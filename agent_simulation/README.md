@@ -561,7 +561,7 @@ Token 缓存绑定对应的标签清单和候选清单。小规模合并／分�
   --dataset data/kuaisearch/lite/sft --model models/Qwen2.5-3B-Instruct \
   --token-cache runs/lite_sft_tokens \
   --seed 42 --role seller --output runs/seller_2pct \
-  --device cuda --dtype bfloat16 --rank 64 --epochs 10 --eval-steps 100
+  --device cuda --dtype bfloat16 --rank 64 --epochs 5
 # Customer 使用 --role customer 和独立的 --output。
 ```
 
@@ -577,11 +577,13 @@ loss 为每条答案 Token 的平均交叉熵乘以样本权重，再对当前�
 
 默认预算为 10 个完整训练轮次，短跑可显式指定 `--max-steps`。Seller 每条标签生成一个训练样本。使用 Token 缓存时，从已完成清单读取接受后的准确行数；按需训练 Customer 时，只扫描标签的曝光数组长度，按 `1 + max(1, ceil(曝光数 / 批大小))` 累加 Query／Response 行数，不执行检索、渲染或分词。每轮数量存入 `run_config.json`，恢复时复用；短跑也沿用这一计数规则。
 
-默认每 100 个优化器更新步、每个 epoch 末及最后一步评估并保存，使用 `--save-steps` 调整间隔。最低评估 loss 的 checkpoint 用于选模，最新完整 checkpoint 用于续训，最多保留两份；最终将选中的 adapter 导出到 `adapter/`。当前评估 split 为 test。
+默认训练 5 轮，每轮结束时用 test 评估并保存 checkpoint。保留 test 损失最低和最新的 checkpoint，并将最优 adapter 导出到 `adapter/`。显式使用 `--max-steps` 时可通过 `--save-steps` 调整保存和评估间隔。答案损失用于选模，实际生成的搜索词、点击和购买由行为评估入口统计。
 
 训练路径为：`run.py` 选择数据和训练参数 → `data_loader.py` 读取样本并组成 Tensor → `trainer.py` 计算加权 Loss、评估与保存。
 
 续训时给原训练命令追加 `--resume latest`，也可以指定本次输出目录里的 `checkpoint-N`。每个完整快照保存 LoRA 权重、AdamW 状态、学习率调度器、随机状态和 Trainer 进度，MPS 另存设备随机状态。恢复会按原种子重建该轮数据顺序，跳过已完成的批次，从上次完整保存处继续。续训比对数据、模型、配置和依赖版本；不比较源码哈希，注释或文件组织变化不会单独阻止续训。使用 Token 缓存时还比对本角色实际读取的分片清单，使用 `--verify` 可核对清单中的分片哈希。
+
+需要在已完成的训练之后再加几轮时，指定新的输出目录并使用 `--init-adapter` 加载已有 LoRA 权重。新训练会重新初始化优化器和学习率调度器。
 
 当前行为 SFT 没有长期总结、工具查询轨迹、推理理由或退出标签；不生成这些标签。完整标签池并不等于已完成全量训练。小模型协议测试也不等于 Qwen 3B 的训练效果验证。
 

@@ -141,6 +141,7 @@ class LoRATrainingTests(unittest.TestCase):
         def make(directory):
             args = parser().parse_args(["train", "--model", "unused", "--dataset", "unused",
                 "--role", "seller", "--output", str(directory), "--device", "cpu",
+                "--epochs", "10",
                 "--accumulation", "2", "--eval-steps", "5", "--learning-rate", "0.01",
                 "--no-gradient-checkpointing"])
             self.assertEqual((args.rank, args.epochs, args.max_steps), (64, 10, None))

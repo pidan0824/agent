@@ -5,12 +5,14 @@ import argparse
 import importlib.metadata
 import json
 import math
+import shutil
 import sys
 import time
 import torch
 from itertools import islice
 from pathlib import Path
-from peft import LoraConfig, get_peft_model
+from tempfile import TemporaryDirectory
+from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, set_seed
 from agent_simulation.inference.requests import load_tokenizer
 from agent_simulation.inference import resolve_device
@@ -136,6 +138,8 @@ def training_identity(args, data_check, eval_split):
         for k, v in vars(args).items()
         if k not in ("command", "resume", "verify")
     }
+    if value.get("init_adapter") is None:
+        value.pop("init_adapter", None)
     value["dataset_manifest_sha256"] = sha256(args.dataset / "manifest.json")
     if getattr(args, 'token_cache', None):
         value['token_cache_identity_sha256'] = sha256(args.token_cache/'identity.json')
@@ -182,6 +186,74 @@ def resume_checkpoint(output, requested, *, device="cpu"):
         if not latest:
             raise ValueError(f"Incomplete training checkpoint: {path}")
     raise ValueError("No complete training checkpoint in this output directory")
+
+
+def load_base_model(args):
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, local_files_only=True, trust_remote_code=False,
+        dtype=getattr(torch, args.dtype), attn_implementation="sdpa",
+    )
+    model.config.use_cache = False
+    return model
+
+
+def select_customer_checkpoint(args, checkpoints):
+    """Compare retained Customer checkpoints on the same labeled test requests."""
+    tokenizer = load_tokenizer(str(args.tokenizer), local_files_only=True)
+    base = load_base_model(args)
+    first, *others = checkpoints
+    model = PeftModel.from_pretrained(base, first, adapter_name=first.name)
+    for checkpoint in others:
+        model.load_adapter(checkpoint, adapter_name=checkpoint.name)
+    trainer = make_trainer(model, tokenizer, args, None, None)
+
+    test = {"query": [], "response": []}
+    for row in TokenStream(args.token_cache, "customer", "test"):
+        test[row.sample_id.split(":", 1)[0]].append(row)
+    weights = {stage: math.fsum(row.weight for row in rows) for stage, rows in test.items()}
+    total_rows = sum(map(len, test.values()))
+    evaluations = []
+    for checkpoint in checkpoints:
+        model.set_adapter(checkpoint.name)
+        state = json.loads((checkpoint / "trainer_state.json").read_text())
+        weighted_losses = {
+            stage: trainer.evaluate(eval_dataset=rows)["eval_loss"] * len(rows)
+            for stage, rows in test.items()
+        }
+        if not all(math.isfinite(loss) for loss in weighted_losses.values()):
+            raise ValueError(f"Non-finite test loss for {checkpoint}")
+        evaluation = {
+            "epoch": state["epoch"],
+            "step": state["global_step"],
+            "checkpoint": str(checkpoint),
+            "eval_loss": sum(weighted_losses.values()) / total_rows,
+            **{stage: {"loss": loss / weights[stage], "rows": len(test[stage])}
+               for stage, loss in weighted_losses.items()},
+        }
+        evaluations.append(evaluation)
+        print(json.dumps(evaluation), flush=True)
+
+    best = min(evaluations, key=lambda evaluation: evaluation["eval_loss"])
+    latest = max(evaluations, key=lambda evaluation: evaluation["step"])
+    with TemporaryDirectory(dir=args.output) as tmp:
+        adapter = Path(tmp) / "adapter"
+        adapter.mkdir()
+        for name in ("adapter_config.json", "adapter_model.safetensors"):
+            shutil.copy2(Path(best["checkpoint"]) / name, adapter / name)
+        adapter.rename(args.output / "adapter")
+    write_outcome(args.output, completed=True, payload={
+        "status": "configured_steps_completed",
+        "steps": latest["step"],
+        "epochs_completed": latest["epoch"],
+        "checkpoint_selection": "lowest test answer loss among evaluated checkpoints",
+        "evaluation_split": "test",
+        "test_used": True,
+        "test_used_for_gradient_updates": False,
+        "behavior_generation_evaluated": False,
+        "best_checkpoint": best["checkpoint"],
+        "evaluation": best,
+        "checkpoint_evaluations": evaluations,
+    })
 
 
 def train(args):
@@ -273,40 +345,39 @@ def train(args):
                 "input_check": data_check,
                 "packages": packages,
                 "loss": "mean_over_examples(request_weight * mean_answer_token_CE)",
-                "checkpoint_selection": "final training step",
+                "checkpoint_selection": f"lowest {eval_split} answer loss",
                 "evaluation_split": eval_split,
                 "lora_reference": "PolicySim rank 64; targets/alpha/dropout are explicit project choices",
             },
         )
     try:
         set_seed(args.seed)
-        dtype = getattr(torch, args.dtype)
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model,
-            local_files_only=True,
-            trust_remote_code=False,
-            dtype=dtype,
-            attn_implementation="sdpa",
-        )
-        model.config.use_cache = False
-        model = get_peft_model(
-            model,
-            LoraConfig(
+        model = load_base_model(args)
+        if args.init_adapter:
+            model = PeftModel.from_pretrained(model, args.init_adapter, is_trainable=True)
+        else:
+            model = get_peft_model(model, LoraConfig(
                 task_type="CAUSAL_LM",
                 r=args.rank,
                 lora_alpha=2 * args.rank,
                 lora_dropout=0.05,
                 bias="none",
                 target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-            ),
-        )
+            ))
         model.print_trainable_parameters()
-        trainer = make_trainer(model, tokenizer, args, train_data, None)
-        initial_metrics = trainer.evaluate(eval_dataset=evaluation_data) if not args.resume else None
+        trainer = make_trainer(
+            model, tokenizer, args, train_data, evaluation_data, evaluate_each_epoch=True
+        )
+        initial_metrics = trainer.evaluate() if not args.resume else None
         if initial_metrics is not None:
             write_report(args.output / "initial_evaluation.json", initial_metrics)
         result = trainer.train(resume_from_checkpoint=str(checkpoint) if checkpoint else None)
-        metrics = trainer.evaluate(eval_dataset=evaluation_data)
+        best = trainer.state.best_model_checkpoint
+        if best is None or not math.isfinite(trainer.state.best_metric):
+            raise ValueError("No checkpoint with finite evaluation loss")
+        best_step = trainer.state.best_global_step
+        metrics = next(entry for entry in reversed(trainer.state.log_history)
+                       if entry.get("step") == best_step and "eval_loss" in entry)
         trainer.save_model(str(args.output / "adapter"))
         trainer.save_state()
         write_outcome(
@@ -317,6 +388,7 @@ def train(args):
                 "train": result.metrics,
                 "evaluation": metrics,
                 "evaluation_split": eval_split,
+                "best_checkpoint": best,
                 "initial_evaluation": initial_metrics,
                 "test_used": eval_split == "test",
                 "test_used_for_gradient_updates": False,
@@ -367,10 +439,10 @@ def parser():
         q.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
         q.add_argument("--dtype", choices=("float32", "bfloat16"), default="float32")
         budget = q.add_mutually_exclusive_group()
-        budget.add_argument("--epochs", type=int, default=10, help="Complete passes over the training stream (default: 10)")
+        budget.add_argument("--epochs", type=int, default=5, help="Complete passes over the training stream (default: 5)")
         budget.add_argument("--max-steps", type=int, help="Explicit optimizer-step budget for bounded runs")
         q.add_argument("--save-steps", "--eval-steps", dest="eval_steps", type=int, default=100,
-                       help="Checkpoint save interval")
+                       help="Checkpoint interval for explicit step-budget runs")
         q.add_argument("--learning-rate", type=float, default=1e-6)
         q.add_argument("--rank", type=int, default=64)
         q.add_argument("--batch-size", type=int, default=1)
@@ -390,7 +462,10 @@ def parser():
         q.add_argument(
             "--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True
         )
-        q.add_argument("--resume", type=Path, help="Checkpoint directory, or 'latest' for the newest complete checkpoint")
+        start = q.add_mutually_exclusive_group()
+        start.add_argument("--resume", type=Path, help="Resume the same run from a checkpoint or 'latest'")
+        start.add_argument("--init-adapter", type=Path,
+                           help="Start a new training run from an existing LoRA adapter")
     return p
 
 

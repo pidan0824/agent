@@ -27,6 +27,8 @@ class EpochCheckpoint(TrainerCallback):
     """Evaluate and save at epoch boundaries and the final step as well as periodic saves."""
 
     def on_step_end(self, args, state, control, **kwargs):
+        if args.eval_strategy == "epoch":
+            return control
         if state.global_step >= state.max_steps or (state.epoch is not None and state.epoch % 1 == 0):
             control.should_save = True
             control.should_evaluate = args.eval_strategy != 'no'
@@ -95,10 +97,11 @@ class BehaviorTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
-def make_trainer(model, tokenizer, args, train_data, eval_data):
+def make_trainer(model, tokenizer, args, train_data, eval_data, *, evaluate_each_epoch=False):
     """Share the identical training setup with bounded integration tests."""
     interval = min(args.eval_steps, args.max_steps) if args.max_steps else args.eval_steps
     evaluate = eval_data is not None
+    strategy = "epoch" if evaluate_each_epoch and not args.max_steps else "steps"
     options = TrainingArguments(
         output_dir=str(args.output),
         use_cpu=args.device == "cpu",
@@ -108,9 +111,9 @@ def make_trainer(model, tokenizer, args, train_data, eval_data):
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=args.accumulation,
-        eval_strategy="steps" if evaluate else "no",
+        eval_strategy=strategy if evaluate else "no",
         eval_steps=interval,
-        save_strategy="steps",
+        save_strategy=strategy,
         save_steps=interval,
         logging_steps=1,
         save_total_limit=2,
