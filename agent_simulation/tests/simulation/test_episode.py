@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_simulation.tests.fixtures import MarketFixture
-from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, ProfileCatalogFixture, answer
+from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, ProfileCatalogFixture, answer, keep_prices
 from agent_simulation.agents.customer import CustomerAgent
 from agent_simulation.agents.prompts.customer import decode_input
 from agent_simulation.agents.seller import SellerAgent
@@ -16,10 +16,14 @@ WAIT = answer({"action": "no_action"})
 EXIT = answer({"action": "exit"})
 
 
+def keep(request, call_id):
+    return answer(keep_prices(request))
+
+
 class EpisodeTests(MarketFixture, unittest.TestCase):
     def test_customer_phases_share_state_without_mutating_it(self):
         response = answer({'clicked_item_ids': [], 'purchased_item_ids': []})
-        episode = self.make_episode([WAIT] * 3, [answer({'query': '水杯'})] * 2 + [response] * 2, ticks=1)
+        episode = self.make_episode([keep] * 3, [answer({'query': '水杯'})] * 2 + [response] * 2, ticks=1)
         episode.concurrency = 2
         build = self.runtime.inputs.customer
         snapshots, contents = {}, {}
@@ -42,19 +46,21 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         for stage, state in snapshots.items():
             self.assertEqual(json.dumps(state, sort_keys=True), contents[stage])
 
-    def test_malformed_tool_calls_cannot_become_a_seller_wait(self):
+    def test_malformed_tool_calls_cannot_become_a_valid_seller_quote(self):
         self.make_episode([], [], ticks=1)
         for malformed in ({}, "", False, 0, None, [{}]):
             with self.subTest(malformed=malformed):
-                self.seller.model = ScriptedModel([{**WAIT, "tool_calls": malformed}])
+                self.seller.model = ScriptedModel([
+                    lambda request, call_id: {**keep(request, call_id), "tool_calls": malformed}
+                ])
                 with self.assertRaises(ValueError):
                     self.seller.propose(10)
-        self.seller.model = ScriptedModel([{**WAIT, "tool_calls": []}])
-        self.assertEqual(self.seller.propose(10)["result"], {"action": "no_action"})
+        self.seller.model = ScriptedModel([keep])
+        self.assertEqual(self.seller.propose(10)["result"], {"status": "staged", "prices": []})
 
     def test_rejected_quote_commit_marks_staged_sellers_failed(self):
         quote = answer({"prices": [{"item_id": 1, "price_raw": 777}]})
-        episode = self.make_episode([quote, WAIT, WAIT], [], ticks=1)
+        episode = self.make_episode([quote, keep, keep], [], ticks=1)
         prices = self.runtime.snapshot()["active_prices"]
         with patch.object(self.runtime, "apply_seller_quotes", side_effect=ValueError("commit rejected")):
             with self.assertRaisesRegex(ValueError, "commit rejected"):
@@ -67,7 +73,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
 
     def test_staged_seller_quote_cannot_overwrite_a_newer_price(self):
         quote = answer({"prices": [{"item_id": 1, "price_raw": 777}]})
-        episode = self.make_episode([quote, WAIT, WAIT], [WAIT, WAIT], ticks=1)
+        episode = self.make_episode([quote, keep, keep], [WAIT, WAIT], ticks=1)
         apply = self.runtime.apply_seller_quotes
 
         def change_then_commit(quotes, **kwargs):
@@ -80,7 +86,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         self.assertEqual(self.runtime.snapshot()["active_prices"]["1"]["price_raw"], 650)
 
     def test_tick_finalization_preserves_actions_committed_before_its_transaction(self):
-        episode = self.make_episode([WAIT] * 3, [WAIT] * 2, ticks=1)
+        episode = self.make_episode([keep] * 3, [WAIT] * 2, ticks=1)
         record = self.runtime.record_tick
 
         def commit_before_record(*args, **kwargs):
@@ -98,7 +104,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         self.assertEqual(trace["status"], "complete")
 
     def test_nonfinal_tick_fails_if_a_search_is_still_pending(self):
-        episode = self.make_episode([WAIT] * 3, [WAIT] * 2, ticks=2)
+        episode = self.make_episode([keep] * 3, [WAIT] * 2, ticks=2)
         settle = self.customer.settle_staged
 
         def settle_then_search(runs, **kwargs):
@@ -131,7 +137,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
     def test_reflection_error_records_failed_run_and_committed_settlements(self):
         query = answer({"query": "杯子"})
         response = answer({"clicked_item_ids": [1], "purchased_item_ids": [1]})
-        episode = self.make_episode([WAIT] * 3, [query, query, response, response], ticks=1)
+        episode = self.make_episode([keep] * 3, [query, query, response, response], ticks=1)
         error = TypeError("bad reflection argument")
         with patch.object(self.customer, "reflect_on_feedback", side_effect=error) as reflect:
             with self.assertRaises(TypeError) as caught:
@@ -171,7 +177,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
                         return answer({"query": "水杯"})
                     return answer({"clicked_item_ids": [ctx["displayed_items"][0]["item_id"]],
                                    "purchased_item_ids": []})
-                episode = case.make_episode([WAIT] * 3, [decide] * 4, ticks=1)
+                episode = case.make_episode([keep] * 3, [decide] * 4, ticks=1)
                 episode.concurrency = limit
                 episode.step()
                 state = case.runtime.snapshot()
@@ -181,7 +187,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         self.assertEqual(replay(1), replay(2))
 
     def test_customers_overlap_in_each_stage_and_searches_observe_actor_order(self):
-        episode = self.make_episode([WAIT] * 3, [], ticks=1)
+        episode = self.make_episode([keep] * 3, [], ticks=1)
         episode.concurrency = 2
         counts = {"query": 0, "response": 0}
         gates = {stage: asyncio.Event() for stage in counts}
@@ -242,7 +248,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         self.assertIsNotNone(self.runtime.snapshot()["customers"]["7"]["exit"])
 
     def test_empty_logical_window_inside_idle_span_has_no_intervals(self):
-        self.make_episode([WAIT] * 9, [WAIT] * 6).run()
+        self.make_episode([keep] * 9, [WAIT] * 6).run()
         result = self.runtime.execute("seller", 10, "query_business", {
             "item_ids": [1], "before_time_index": 10, "limit": 1,
             "start_logical_time": 15, "before_logical_time": 15})
@@ -337,7 +343,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         ]
         with self.runtime.db:
             self.runtime.db.execute('UPDATE state SET value=?', (json.dumps(state),))
-        episode = self.make_episode([WAIT] * 6, [WAIT] * 4, ticks=2)
+        episode = self.make_episode([keep] * 6, [WAIT] * 4, ticks=2)
         self.runtime.inputs.history_embedder = None
         attempts = []
 
@@ -375,7 +381,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
             self.runtime.db.execute("UPDATE state SET value=?", (json.dumps(state),))
         response = answer({"clicked_item_ids": [], "purchased_item_ids": []})
         episode = self.make_episode(
-            [WAIT] * 6,
+            [keep] * 6,
             [answer({"query": "杯子"}), answer({"query": "杯子"}), response, response, WAIT, WAIT],
             ticks=2,
         )
@@ -406,7 +412,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         with self.runtime.db:
             self.runtime.db.execute("UPDATE state SET value=?", (json.dumps(state),))
         episode = self.make_episode(
-            [WAIT] * 3,
+            [keep] * 3,
             [answer({"query": "水杯"}), WAIT, answer({"clicked_item_ids": [1], "purchased_item_ids": [1]})],
             ticks=1,
         )
@@ -437,7 +443,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         self.assertTrue(json.loads(audit)["request"])
 
     def test_invalid_reflection_is_recorded_without_failing_tick(self):
-        episode = self.make_episode([WAIT] * 3, [WAIT] * 2, ticks=1)
+        episode = self.make_episode([keep] * 3, [WAIT] * 2, ticks=1)
         state = self.runtime.snapshot()
         first = state["initial_seller_memory"]["10"][0]
         state["initial_seller_memory"]["10"] = [
@@ -472,7 +478,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         return Episode(self.runtime, self.seller, self.customer, tick_size=5, max_ticks=ticks)
 
     def test_response_clock_includes_current_search_before_first_settlement(self):
-        episode = self.make_episode([WAIT] * 6, [WAIT] * 2, ticks=2)
+        episode = self.make_episode([keep] * 6, [WAIT] * 2, ticks=2)
         episode.step()
         listing = self.runtime.execute("customer", 7, "search_products", {"query": "杯子"})
         messages = next(self.customer.preview_requests(7, response=True))["messages"]
@@ -483,7 +489,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         self.assertNotIn("purchased_item_ids", seen)
 
     def test_waits_advance_time_without_business_or_memory_events(self):
-        episode = self.make_episode([WAIT] * 9, [WAIT] * 6)
+        episode = self.make_episode([keep] * 9, [WAIT] * 6)
         initial = self.runtime.snapshot()
         self.assertEqual(episode.run()["time"], 25)
         state = self.runtime.snapshot()
@@ -505,7 +511,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
             episode.step()
 
     def test_terminal_episode_blocks_writes_but_reports_remain_available(self):
-        episode = self.make_episode([WAIT] * 3, [WAIT] * 2, ticks=1)
+        episode = self.make_episode([keep] * 3, [WAIT] * 2, ticks=1)
         episode.run()
         state = self.runtime.snapshot()
         for name, role, actor, args in (
@@ -536,7 +542,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
             self.assertNotIn("exit", self.runtime.snapshot()["customers"]["7"])
             return answer({"query": "水杯"})
 
-        episode = self.make_episode([WAIT] * 9, [leave, other_customer_search,
+        episode = self.make_episode([keep] * 9, [leave, other_customer_search,
             answer({"clicked_item_ids": [], "purchased_item_ids": []}), WAIT, EXIT], ticks=8)
         initial = self.runtime.snapshot()
         episode.step()
@@ -576,7 +582,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
     def test_replay_tracks_only_completed_ticks_and_the_actual_display_order(self):
         from agent_simulation.simulation.replay import page
         from agent_simulation.simulation.replay import read_timeline
-        episode = self.make_episode([WAIT] * 6, [EXIT, answer({"query": "水杯"}),
+        episode = self.make_episode([keep] * 6, [EXIT, answer({"query": "水杯"}),
             answer({"clicked_item_ids": [], "purchased_item_ids": [1]}), WAIT], ticks=2)
         self.assertFalse(read_timeline(self.path)["frames"])
         episode.step()
@@ -597,7 +603,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         self.assertNotIn("</script><img", page({"query": "</script><img onerror=test>"}))
 
     def test_fixed_horizon_keeps_running_after_all_customers_exit(self):
-        episode = self.make_episode([WAIT] * 9, [EXIT, EXIT], ticks=3)
+        episode = self.make_episode([keep] * 9, [EXIT, EXIT], ticks=3)
         episode.fixed_horizon = True
         clock = episode.run()
         self.assertEqual((clock["tick"], clock["termination_reason"]), (3, "max_ticks"))
@@ -615,7 +621,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
     def test_exit_is_simulation_only_and_never_a_response_label(self):
         with self.assertRaises(PermissionError):
             self.runtime.execute("customer", 7, "exit_customer", {})
-        episode = self.make_episode([WAIT] * 3, [answer({"query": "水杯"}), WAIT, EXIT])
+        episode = self.make_episode([keep] * 3, [answer({"query": "水杯"}), WAIT, EXIT])
         with self.assertRaises(ValueError):
             episode.step()
         state = self.runtime.snapshot()
@@ -627,7 +633,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
             self.runtime.execute("seller", 10, "exit_customer", {})
 
     def test_failed_tick_does_not_commit_a_staged_exit(self):
-        episode = self.make_episode([WAIT] * 3, [EXIT, answer({"action": "invalid"})])
+        episode = self.make_episode([keep] * 3, [EXIT, answer({"action": "invalid"})])
         with self.assertRaises(ValueError):
             episode.step()
         self.assertNotIn("exit", self.runtime.snapshot()["customers"]["7"])
@@ -644,7 +650,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
     def test_phase_barriers_and_next_tick_context(self):
         def second_seller(request, call_id):
             self.assertEqual(self.runtime.snapshot()["active_prices"]["1"]["price_raw"], 120)
-            return WAIT
+            return keep(request, call_id)
 
         seen_customer_contexts = []
         def search(request, call_id):
@@ -655,8 +661,8 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
             return answer({"query": "水杯"})
 
         episode = self.make_episode(
-            [answer({"prices": [{"item_id": 1, "price_raw": 110}]}), second_seller, WAIT]
-            + [WAIT] * 3,
+            [answer({"prices": [{"item_id": 1, "price_raw": 110}]}), second_seller, keep]
+            + [keep] * 3,
             [search, search, answer({"clicked_item_ids": [], "purchased_item_ids": [1]}),
              answer({"clicked_item_ids": [1], "purchased_item_ids": []})] + [WAIT] * 2, ticks=2)
         episode.step()
@@ -725,8 +731,8 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         self.assertEqual(sum(s["exposure_records"] for s in product["price_intervals"]), 1)
 
     def test_idle_spans_split_at_price_changes(self):
-        episode = self.make_episode([WAIT] * 3 + [
-            answer({"prices": [{"item_id": 1, "price_raw": 90}]}), WAIT, WAIT] + [WAIT] * 3,
+        episode = self.make_episode([keep] * 3 + [
+            answer({"prices": [{"item_id": 1, "price_raw": 90}]}), keep, keep] + [keep] * 3,
             [WAIT] * 6)
         episode.run()
         report = self.runtime.execute("seller", 10, "read_business_report", {})
@@ -750,7 +756,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
 
     def test_customer_failure_does_not_settle_other_customers(self):
         quote = answer({"prices": [{"item_id": 1, "price_raw": 90}]})
-        episode = self.make_episode([quote, WAIT, WAIT], [answer({"query": "水杯"}), answer({"query": "水杯"}),
+        episode = self.make_episode([quote, keep, keep], [answer({"query": "水杯"}), answer({"query": "水杯"}),
             answer({"clicked_item_ids": [1], "purchased_item_ids": []}), answer({"action": "invalid"})])
         with self.assertRaises(ValueError):
             episode.step()
@@ -763,7 +769,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         trace = json.loads(self.runtime.db.execute("SELECT trace FROM ticks").fetchone()[0])
         self.assertEqual(trace["settled_phases"], ["seller"])
 
-    def test_tick_tools_exclude_scheduling_and_batch_prices_wait(self):
+    def test_first_batch_keeps_price_and_later_batch_changes_it_at_settlement(self):
 
         def second_batch(request, call_id):
             from agent_simulation.agents.prompts.seller import decode_input as seller_input
@@ -777,19 +783,18 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
             self.assertNotIn("schedule_review", request["messages"][0]["content"])
             return answer({"prices": [{"item_id": 3, "price_raw": 190}]})
 
-        episode = self.make_episode([
-            answer({"prices": [{"item_id": 1, "price_raw": 110}]}),
-            second_batch, WAIT, WAIT], [WAIT] * 2, ticks=1)
+        episode = self.make_episode([keep, second_batch, keep, keep], [WAIT] * 2, ticks=1)
         self.seller.price_batch_size = 1
         episode.run()
         state = self.runtime.snapshot()
-        self.assertEqual([state["active_prices"][str(i)]["price_raw"] for i in (1, 3)], [110, 190])
+        self.assertEqual([state["active_prices"][str(i)]["price_raw"] for i in (1, 3)], [120, 190])
+        self.assertEqual([a["item_id"] for a in state["price_actions"]], [3])
         self.assertEqual({a["logical_time"] for a in state["price_actions"]}, {10})
 
     def test_reject_abandoning_a_partially_reviewed_shop(self):
-        episode = self.make_episode([answer({"prices": [{"item_id": 1, "price_raw": 110}]}), WAIT], [])
+        episode = self.make_episode([answer({"prices": [{"item_id": 1, "price_raw": 110}]}), WAIT, keep, keep], [])
         self.seller.price_batch_size = 1
-        with self.assertRaisesRegex(ValueError, "Only the first Seller batch can wait"):
+        with self.assertRaisesRegex(ValueError, "'prices' is a required property"):
             episode.step()
         self.assertEqual(self.runtime.snapshot()["price_actions"], [])
 

@@ -20,11 +20,6 @@ TABLE_PATHS = frozenset({
     ("external_reference", "competitors"),
 })
 
-SELLER_RUNTIME_WAIT = (
-    'For this first batch, choose one final action. Return {"action":"no_action"} to keep all shop prices this Tick, '
-    'or return the JSON quote below for this batch.'
-)
-
 SELLER_RUNTIME_PRICES = (
     ' Use {"prices":[{"item_id":ID,"price_raw":PRICE}]} with IDs from '
     'decision.requested_item_ids. Repeat a known active price to keep it. Submit a positive '
@@ -78,13 +73,9 @@ def pricing_messages(context, target=None, audit_sink=None):
     return result
 
 
-def seller_can_wait(context):
-    return "decision_time" in context and context.get("product_batch", {}).get("index", 1) == 1
-
-
 def seller_decision_messages(context, *, audit_sink=None):
-    action = SELLER_RUNTIME_WAIT if seller_can_wait(context) else 'Return one JSON object with the requested prices.'
-    rules = FACT_RULES + SELLER_STEPS + "\nOutput\n" + action + SELLER_RUNTIME_PRICES
+    rules = (FACT_RULES + SELLER_STEPS + "\nOutput\n"
+             + "Return one JSON object with the requested prices." + SELLER_RUNTIME_PRICES)
     if "product_batch" in context:
         context = {**context, "price_scope": "Submit one price per owned product in this batch."}
     if "requested_price_item_ids" in context:

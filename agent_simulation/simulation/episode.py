@@ -110,7 +110,7 @@ class Episode:
         try:
             trace["sellers"], baseline = self._seller_proposals(sellers)
             # No Seller can see another Seller's proposal until this barrier.
-            proposals = [run for run in trace["sellers"] if run["result"] != {"action": "no_action"}]
+            proposals = trace["sellers"]
             quotes = [(run["actor"], {"prices": run["result"]["prices"]}) for run in proposals]
             try:
                 applied = self.runtime.apply_seller_quotes(quotes, expected_revision=baseline.revision)

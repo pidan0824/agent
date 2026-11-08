@@ -12,7 +12,15 @@ import unittest
 from unittest.mock import patch
 
 from agent_simulation.simulation.run import parser, run
-from agent_simulation.tests.fixtures import TokenizerFixture
+from agent_simulation.tests.fixtures import TokenizerFixture, keep_prices
+
+
+def fixture_decision(request):
+    if "memory_generation_method" in request:
+        return {"action": "no_update"}
+    if request["agent_role"] == "seller":
+        return keep_prices(request)
+    return {"action": "no_action"}
 
 
 class WorkerFixture:
@@ -27,8 +35,7 @@ class WorkerFixture:
             out.write(json.dumps([str(self.routes.get(req.get("agent_role"), "__base__"))
                                   for _, req, _ in jobs]) + "\n")
         return [{"role": "assistant", "tool_calls": [],
-                 "content": json.dumps({"action": "no_update"}
-                    if "memory_generation_method" in request else {"action": "no_action"})}
+                 "content": json.dumps(fixture_decision(request))}
                 for _, request, _ in jobs]
 
 
@@ -61,8 +68,7 @@ class MainTests(unittest.TestCase):
                 def complete(request, *, call_id):
                     if fail_decision:
                         raise decision_error
-                    answer = ({"action": "no_update"} if "memory_generation_method" in request
-                              else {"action": "no_action"})
+                    answer = fixture_decision(request)
                     return {"role": "assistant", "content": json.dumps(answer)}
                 model = SimpleNamespace(generator_id="fixture", tokenizer=TokenizerFixture(),
                                         max_new_tokens=100, complete=complete, close=Mock(side_effect=close_error))
@@ -115,8 +121,7 @@ class MainTests(unittest.TestCase):
 
             def complete(self, request, *, call_id):
                 self.calls.append(call_id)
-                result = ({"action": "no_update"}
-                          if "memory_generation_method" in request else {"action": "no_action"})
+                result = fixture_decision(request)
                 return {"role": "assistant", "content": json.dumps(result), "tool_calls": []}
 
         root = PROJECT_ROOT

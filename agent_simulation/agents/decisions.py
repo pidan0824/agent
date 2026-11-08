@@ -50,14 +50,14 @@ def action_output(stage, *, allow_control_actions=False, displayed_ids=None,
             field["items"]["enum"] = ids
         if not ids:
             alternatives = [{"const": {"clicked_item_ids": [], "purchased_item_ids": []}}]
-    if allow_control_actions and stage in {"query", "seller"}:
+    if allow_control_actions and stage == "query":
         alternatives.append(
             {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["no_action", "exit"] if stage == "query" else ["no_action"],
+                        "enum": ["no_action", "exit"],
                     }
                 },
                 "required": ["action"],

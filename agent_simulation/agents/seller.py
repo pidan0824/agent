@@ -2,9 +2,8 @@
 
 import asyncio
 from copy import deepcopy
-from itertools import chain
 from agent_simulation.data.common import require
-from agent_simulation.agents.prompts.seller import seller_can_wait, seller_decision_messages
+from agent_simulation.agents.prompts.seller import seller_decision_messages
 from agent_simulation.environment.operations.actions import SellerReview, require_open_market
 from agent_simulation.agents.base import BaseAgent
 from agent_simulation.agents.concurrency import map_decisions
@@ -53,20 +52,16 @@ class SellerAgent(BaseAgent):
         ):
             messages = seller_decision_messages(context)
             request, _ = self.prepare_request(messages, [], 'seller', role='seller',
-                allow_wait=seller_can_wait(context), price_ids=context["requested_price_item_ids"])
+                price_ids=context["requested_price_item_ids"])
             yield request
 
     async def _quote(self, run, batch, review, baseline, request_slots):
         """One isolated target workflow; only its validated draft enters the review."""
-        can_wait = seller_can_wait(batch)
         ids = batch["requested_price_item_ids"]
         prompt = seller_decision_messages(batch)
         self.runtime.long_term_memory.observe_context("seller", run["actor"], batch, baseline)
 
         def stage(arguments):
-            if arguments == {"action": "no_action"}:
-                require(can_wait, "Only the first Seller batch can wait")
-                return arguments
             entry = {"name": "submit_prices", "arguments": deepcopy(arguments), "staged_review": True}
             run["tools"].append(entry)
             try:
@@ -82,7 +77,7 @@ class SellerAgent(BaseAgent):
             result = await run_workflow(
                 messages=prompt,
                 complete=lambda messages, schemas: self._complete(
-                    run, messages, schemas, "seller", allow_wait=can_wait, price_ids=ids),
+                    run, messages, schemas, "seller", price_ids=ids),
                 validate_final=stage,
             )
         return {"item_ids": ids, "result": result}
@@ -96,26 +91,14 @@ class SellerAgent(BaseAgent):
             contexts = self.runtime.inputs.seller_targets(
                 actor, state=baseline.state, batch_size=self.price_batch_size,
                 memory_tokenizer=self.tokenizer)
-            first = next(contexts)
             review = SellerReview(self.runtime, actor, baseline)
             concurrency = self.price_concurrency
             request_slots = request_slots or asyncio.Semaphore(concurrency)
             run.update(price_batches=[], pricing_mode="target", price_concurrency=concurrency)
 
-            # A whole-shop wait must be decided before dispatching the rest.
-            if seller_can_wait(first):
-                result = await self._quote(run, first, review, baseline.state, request_slots)
-                run["price_batches"].append(result)
-                if result["result"] == {"action": "no_action"}:
-                    run["result"] = result["result"]
-                    self.logs.save(run, "complete" if commit else "staged")
-                    return run
-            else:
-                contexts = chain([first], contexts)
-            results = await map_decisions(
+            run["price_batches"] = await map_decisions(
                 contexts, lambda ctx: self._quote(run, ctx, review, baseline.state, request_slots),
                 concurrency=concurrency)
-            run["price_batches"].extend(results)
 
             if commit:
                 run["result"] = review.commit(run["id"])

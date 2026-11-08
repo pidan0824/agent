@@ -55,9 +55,7 @@ class VLLMTests(unittest.TestCase):
         self.assertEqual(sent[0]['prompt'],original['_prompt_tokens']['ids'])
         self.assertEqual(sent[0]['model'],'seller-lora')
         self.assertEqual(json.loads(reply['content']), {'prices': [{'item_id': 1, 'price_raw': 100}]})
-        choices=sent[0]['structured_outputs']['json']['anyOf']
-        self.assertEqual(len(choices),2) # wait or final quote
-        prices=choices[0]['properties']['prices']
+        prices=sent[0]['structured_outputs']['json']['properties']['prices']
         self.assertEqual((prices['minItems'],prices['maxItems']), (1,1))
         self.assertEqual(prices['items']['properties']['item_id']['enum'],[1])
 

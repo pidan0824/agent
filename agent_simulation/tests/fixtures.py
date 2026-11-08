@@ -137,6 +137,14 @@ def explicit_shop_model(runtime, replies):
     model.complete = respond
     return model
 
+
+def keep_prices(request):
+    from agent_simulation.agents.prompts.seller import decode_input
+
+    context = decode_input(request["messages"][1]["content"])
+    return {"prices": [{"item_id": item["item_id"], "price_raw": item["active_quote"]["price_raw"]}
+                       for item in context["current_state"]["products"]]}
+
 def tool(name, arguments, identifier=None):
     def reply(request, call_id):
         return {

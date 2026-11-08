@@ -98,7 +98,7 @@ class ActionGrammarTests(unittest.TestCase):
         self.assertFalse(self.allowed('{"action":"exit"}', "query"))
         self.assertTrue(self.allowed('{"action":"exit"}', "query", control=True))
         self.assertFalse(self.allowed('{"action":"no_action"}', "seller", batch_ids=[7]))
-        self.assertTrue(self.allowed('{"action":"no_action"}', "seller", control=True, batch_ids=[7]))
+        self.assertFalse(self.allowed('{"action":"no_action"}', "seller", control=True, batch_ids=[7]))
         self.assertFalse(self.allowed('{"action":"exit"}', "seller", control=True, batch_ids=[7]))
 
     def test_seller_supervision_decoding_matches_exact_target_and_runtime_can_keep_unknown(self):

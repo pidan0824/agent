@@ -139,28 +139,27 @@ class TargetPricingTests(MarketFixture, unittest.TestCase):
         self.assertEqual(result['result']['reviewed_products'],2)
         self.assertEqual(self.runtime.snapshot(),state)
 
-    def test_first_target_wait_is_whole_shop_wait_and_later_wait_is_rejected(self):
+    def test_no_action_is_rejected_in_first_and_later_batches(self):
         state = self.runtime.snapshot()
         state['clock'] = create_clock(10,1,1)
         self.runtime.db.execute('UPDATE state SET value=?',(json.dumps(state),))
         self.runtime.db.commit()
-        model = ScriptedModel([answer({'action':'no_action'})])
-        result=SellerAgent(self.runtime,model,TokenizerFixture()).propose(10)
-        self.assertEqual(result['result'],{'action':'no_action'})
-        self.assertEqual(self.runtime.snapshot(),state)
-        model = ScriptedModel([answer({'prices':[{'item_id':1,'price_raw':111}]}),answer({'action':'no_action'})])
-        with self.assertRaises(ValueError):SellerAgent(self.runtime,model,TokenizerFixture()).propose(10)
-        self.assertEqual(self.runtime.snapshot(),state)
+        wait = answer({"action": "no_action"})
+        first = answer({"prices": [{"item_id": 1, "price_raw": 120}]})
+        later = answer({"prices": [{"item_id": 3, "price_raw": 200}]})
+        for replies in ([wait, later], [first, wait]):
+            with self.assertRaisesRegex(ValueError, "'prices' is a required property"):
+                SellerAgent(self.runtime, ScriptedModel(replies), TokenizerFixture()).propose(10)
+            self.assertEqual(self.runtime.snapshot(), state)
 
     def test_wait_and_quote_cannot_be_combined(self):
         self.runtime.start_episode(create_clock(10, 1, 1))
         before = self.runtime.snapshot()
         mixed = answer({"action": "no_action", "prices": [{"item_id": 1, "price_raw": 111}]})
 
-        model = ScriptedModel([mixed])
+        model = ScriptedModel([mixed, answer({"prices": [{"item_id": 3, "price_raw": 200}]})])
         with self.assertRaisesRegex(ValueError, "'action' was unexpected"):
             SellerAgent(self.runtime, model, TokenizerFixture()).propose(10)
-        self.assertEqual(len(model.requests), 1)
         self.assertEqual(self.runtime.snapshot(), before)
 
     def test_market_cache_reuses_exact_category_and_shop_but_not_different_cutoff(self):
