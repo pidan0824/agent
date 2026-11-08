@@ -212,6 +212,21 @@ class LoRATrainingTests(unittest.TestCase):
         )
         return BehaviorTrainer(model=model, args=args)
 
+    def test_five_epochs_can_keep_all_snapshots_on_a_ten_epoch_lr_schedule(self):
+        batch = tensor_batch()
+        rows = [{k: v[0] for k, v in batch.items()}]
+        with tempfile.TemporaryDirectory() as folder:
+            args = parser().parse_args(["train", "--model", "unused", "--dataset", "unused",
+                "--role", "customer", "--output", folder, "--device", "cpu", "--epochs", "5",
+                "--lr-schedule-epochs", "10", "--accumulation", "1", "--keep-checkpoints", "0"])
+            trainer = make_trainer(tiny_model(), None, args, rows, None)
+            trainer.data_collator = lambda items: {k: torch.stack([r[k] for r in items]) for k in batch}
+            trainer.train()
+            self.assertEqual(trainer.state.global_step, 5)
+            self.assertEqual(len(list(Path(folder).glob("checkpoint-*"))), 5)
+            self.assertAlmostEqual(trainer.lr_scheduler.get_last_lr()[0], args.learning_rate / 2)
+            self.assertTrue(all((p / "optimizer.pt").exists() for p in Path(folder).glob("checkpoint-*")))
+
     def test_loss_parts_add_up_and_train_evaluation_does_not_update_weights(self):
         batch = tensor_batch()
         batch["answer_parts"] = torch.tensor([[-1, -1, 0, 1], [-1, -1, 2, -1]])
