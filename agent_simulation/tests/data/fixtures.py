@@ -67,6 +67,11 @@ class CatalogFixture:
             for i in r["impressed_item_ids"]:
                 rank.append(
                     dict(
+                        user_id=1,
+                        recently_clicked_item_ids=[1],
+                        recently_purchased_item_ids=[2, 2],
+                        user_statistical_features=dict(user_show_cnt_30d_hist=20, user_click_cnt_30d_hist=4,
+                                                       user_order_cnt_30d_hist=2, user_gmv_30d_hist=200),
                         session_id=t,
                         target_item_id=i,
                         time_index=t,

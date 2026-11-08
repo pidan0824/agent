@@ -57,6 +57,8 @@ def validate_release(root, directory, seed, *, role=None, tokenizer_path=None):
     expected = selected_identity(directory, selection, selection_hash, seed, spec['buckets'],
                                  tokenizer_digest=digest)
     require(selection['dataset_manifest_sha256'] == expected['dataset'], 'Selected cache source differs')
+    if 'background_sha256' in spec:
+        expected['background_sha256'] = spec['background_sha256']
     require(spec == expected,
             'Token cache dataset, seed or candidate selection differs')
     complete = root / 'complete.json'
@@ -338,6 +340,8 @@ def preflight(args):
                 market = json.loads((args.market_cache / "manifest.json").read_text())
                 require(market["sources"] == sources, "Market cache source release differs")
                 attach_cache(data.catalog.connection, data.catalog.config, args.market_cache, verify_hashes=verify)
+    catalog = Path(json.loads((args.dataset / 'manifest.json').read_text())['catalog'])
+    spec['background_sha256'] = sha256(catalog / 'facts/customer_background.parquet')
     spec['tokenizer_sha256'] = cache_tokenizer_digest(args.tokenizer)
     return spec, splits
 

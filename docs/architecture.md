@@ -260,3 +260,32 @@ Customer的Query阶段用近期历史中的搜索词检索较早经历，不读�
 留出评估入口 `python -m agent_simulation.evaluation.micro.behavior_prediction` 支持在既有 Customer 命令上追加 `--price-response`。同一请求固定原始展示顺序、其他商品价格和历史，按种子选择一个展示商品，比较原价及上下 20% 条件。每个改价条件只对目标所在批次推理一次，复用其他批次的原价结果。评估文件 `price_response.json` 保存每个条件下完整请求的购买集合，并在同一批有效配对上报告目标商品、其他商品及整单购买比例。这些比例来自单次贪心解码的模型选择。原价预测和真实标签另用于比较商品及一级品类的购买分布，并报告同商品高低价组的曝光数和购买率差。真实日志只记录实际展示价下的购买，组间差异是观察性关联。
 
 MALLES 的价格与促销条件、群体稳定性和校准实验可以借鉴。建议先报告原始 Agent 的配对响应和分布，再将 Mean-field 反馈作为独立实验条件。若做额外校准，只用训练／验证期拟合，在独立测试期并列报告校准前后结果，并按品类、顾客和曝光频次检查是否掩盖局部偏差。[MALLES 原文](https://arxiv.org/html/2603.17694v1)
+
+### 原始历史背景与行为事实
+
+Customer 的 `behavioral_summary` 保存决策截止点之前最近一次 Ranking 快照：
+30 天曝光、点击、订单、GMV，以及原始近期点击/购买 ID。`item_details` 从静态
+商品目录补充标题、品牌、类目等属性，不补造当时价格或行为时间。原始数组保留重复，
+但不解释为购买件数，也不与搜索历史合并计数。没有更早快照时为 null。
+近期搜索仍为最近 10 次请求，较早历史仍走现有检索，长期记忆仍是可修正的经验。
+
+Seller 的自有商品 `business_summary` 保存最近已知观测的原始 30 天经营统计，
+与近期观测计数、已结算反馈分开。它进入最终 Seller Prompt，但不进入竞品公开信息，
+也不包含消费者个人统计。SFT 和仿真复用同一组装规则。
+
+两类背景均采用严格 `time_index < cutoff`：不使用当前监督行，也不使用同时间其他
+请求。原始近期列表缺少逐事件时间，当前不能证明它在 Query 生成前可见，因此统一
+使用较早已知快照。搜索入口也不从待预测请求注入 Query。仿真固定初始化 cutoff，
+原始背景不随 Tick 更新；新行为只进入现有 History Store，不伪装成新的滚动 30 天值。
+
+构建完整 Catalog 时会生成 `facts/customer_background.parquet`。已有 Catalog 可运行：
+
+```bash
+python -m agent_simulation.data.build.catalog --config data/kuaisearch/lite/config.json \
+  --output data/kuaisearch/lite/source/catalog --customer-background-only
+```
+
+这只补充每请求一条的事实快照，不改标签、旧 Token 缓存或模型权重。商品属性在读取时
+关联，不在快照里重复存储。新 Prompt 必须生成到新的 Token 缓存目录；构建时绑定背景
+文件摘要，防止续建时混入旧上下文分片。训练读取旧缓存仍使用其原有 Token，不重扫数据。
+旧模型生成评估若使用新上下文，应作为新的输入条件记录，不能混入原评估输出目录。

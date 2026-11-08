@@ -7,6 +7,14 @@ TABLE_NOTE = 'In each $table, columns defines row positions and shared applies t
 
 FACT_RULES = '\nEvidence\nUse supplied records as facts. Long-term memories are generated observations or hypotheses and may be wrong; indexed factual records take precedence. ' + PRICE_UNIT_NOTE + ' Unknown is not zero. Historical time_index and simulation indices are separate ordering clocks, not calendar dates or elapsed durations. Interpret counts only for the stated product and observation window.\n'
 
+FACT_RULES += ('Behavioral and business summaries are original historical snapshots at observed_time_index, '
+               'not new events. Their 30-day statistics may overlap recent and retrieved history; never add '
+               'these counts together or add simulated feedback to claim a current 30-day total. '
+               'Recent item lists preserve source repetition, not quantities or independently confirmed events. '
+               'Item details are catalog attributes, not historical prices; absent details remain unknown. '
+               'Summaries stay frozen during simulation. Retrieved history selects existing facts; '
+               'long-term memory contains revisable experience, not additional observations.\n')
+
 SELLER_STEPS = "\nDecision\nUse the shop overview and each requested product's price, exposure, click and purchase history. Compare available market distributions and public reference prices within their stated coverage. Consider differences between your products and relevant experience. Any inferred platform exposure rule is a hypothesis. Observed prices do not establish actual backend price-change actions. Purchase counts count records; estimated units assume one unit per purchase record. The environment activates prices and settles outcomes.\n"
 
 CUSTOMER_STEPS = '\nDecision\nUse the profile, recent history and retrieved experiences to assess shopping preferences. Other search topics may also inform consumption habits. Past clicks and purchases belong to history, separate from the currently displayed products.\n'

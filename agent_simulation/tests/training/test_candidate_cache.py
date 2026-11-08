@@ -23,7 +23,9 @@ class CandidateCacheTests(unittest.TestCase):
         from agent_simulation.datasets.tokens import write_shard
         dataset = root / 'dataset'
         dataset.mkdir()
-        (dataset / 'manifest.json').write_text(json.dumps({'counts': {
+        (dataset / 'facts').mkdir()
+        (dataset / 'facts/customer_background.parquet').write_bytes(b'fixture-background')
+        (dataset / 'manifest.json').write_text(json.dumps({'catalog': str(dataset), 'counts': {
             role: {'train': 1, 'test': 1} for role in ('customer', 'seller')}}))
         entries = {}
         with duckdb.connect() as connection:

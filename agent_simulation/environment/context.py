@@ -173,9 +173,9 @@ class AgentContextBuilder:
         cutoff = self.runtime.data.cutoff
         cached = self._customer_observed.get(actor_id)
         if cached is not None:
-            source, end, previous_seed, profile, pool = cached
+            source, end, previous_seed, profile, pool, summary = cached
             if source is catalog and end == cutoff and previous_seed == seed:
-                return profile, pool
+                return profile, pool, summary
 
         observed = catalog.customer_history(actor_id, cutoff, official_split="test", all_prior=True)
         seed = deepcopy(seed)
@@ -186,12 +186,13 @@ class AgentContextBuilder:
         )
         pool = sorted(combined.values(), key=lambda e: (e["time_index"], e["session_id"]))
         profile = observed["profile"]
-        self._customer_observed[actor_id] = catalog, cutoff, seed, profile, pool
-        return profile, pool
+        summary = observed["behavioral_summary"]
+        self._customer_observed[actor_id] = catalog, cutoff, seed, profile, pool, summary
+        return profile, pool, summary
 
     def _prepare_customer_history(self, actor_id, state):
         customer = state["customers"][str(actor_id)]
-        profile, pool = self._customer_observed_history(actor_id, customer["observed_history"])
+        profile, pool, summary = self._customer_observed_history(actor_id, customer["observed_history"])
         simulated = [shopping_history_event(event) for event in customer["simulation_history"]]
         key = (actor_id, state["customer_history_limit"])
         if key not in self._customer_history:
@@ -199,14 +200,14 @@ class AgentContextBuilder:
         return profile, self._customer_history[key].update(
             pool, simulated, cutoff=self.runtime.data.cutoff,
             simulation_before=state["simulation_step"] + 1,
-        )
+        ), summary
 
     def reflection_evidence(self, role, actor, *, state):
         """Collect the factual sources that can be cited during reflection."""
         actor_key(state, role, actor)
         if role == "customer":
             require(self.runtime.catalog is not None, "Customer memory needs a verified profile")
-            profile, history = self._prepare_customer_history(actor, state)
+            profile, history, _ = self._prepare_customer_history(actor, state)
             facts = history.retrieve(embedder=self._history_encoder(), diagnostics=False)
             return profile, {"retrieved_context": {"history": facts}}
 
@@ -256,7 +257,7 @@ class AgentContextBuilder:
         if expected_request_id is not None:
             require(response and pending["request_id"] == expected_request_id,
                     "Customer displayed request changed before response input")
-        profile, prepared = self._prepare_customer_history(actor_id, state)
+        profile, prepared, summary = self._prepare_customer_history(actor_id, state)
         searches = state["customers"][str(actor_id)]["simulation_history"]
         result = customer_context(
             profile, (), prepared_history=prepared,
@@ -264,6 +265,7 @@ class AgentContextBuilder:
             cutoff=self.runtime.data.cutoff,
             history_query=pending["query"] if response else "",
             history_embedder=self._history_encoder(),
+            behavioral_summary=summary,
             simulation_before=state["simulation_step"] + 1,
         )
         if state["simulation_step"]:

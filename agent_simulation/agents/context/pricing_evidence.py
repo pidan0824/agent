@@ -118,6 +118,9 @@ def project_seller(state, *, include_audit=True):
                 last_observed_quote={'source':'observed','price_raw':p['last_observed_price_raw'],
                   'price_status':p['price_status'],'observed_at':p['last_observed_time_index']},recent=[])
         require(p['last_observed_time_index']<cutoff,'Future own quote')
+        if 'business_summary' in p:
+            require(p['business_summary']['observed_time_index'] < cutoff, 'Future business summary')
+            own['business_summary'] = deepcopy(p['business_summary'])
         if p.get('last_valid_reference'):
             require(p['last_valid_reference']['time_index']<cutoff,'Future fallback quote')
             own['last_observed_quote']['last_valid_reference']=deepcopy(p['last_valid_reference'])

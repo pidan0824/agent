@@ -52,6 +52,56 @@ class IntegratedTests(CatalogFixture, unittest.TestCase):
         self.assertEqual(decode_customer(q["messages"][1]["content"]), project_customer(q["input"]))
         self.assertEqual(r["messages"], messages(r["input"], r["target"], response=True))
 
+    def test_background_is_prior_frozen_and_not_an_event(self):
+        before = self.runtime.inputs.customer(1, observe=False)
+        summary = before["behavioral_summary"]
+        self.assertEqual(summary["observed_time_index"], 4)
+        self.assertEqual(summary["recent_purchased_item_ids"], [2, 2])
+        self.assertEqual(summary["statistics_30d"]["orders"], 2)
+        self.assertEqual([p["item_id"] for p in summary["item_details"]], [1, 2])
+        self.assertNotIn("price_raw", summary["item_details"][0])
+        self.assertTrue(all(not e["purchased_items"] for e in before["short_term_memory"]["search_history"]))
+        self.assertIsNone(self.catalog.customer_summary(1, 1))
+        self.assertIsNone(self.catalog.customer_summary(999, 5))
+        self.settle()
+        after = self.runtime.inputs.customer(1, observe=False)
+        self.assertEqual(after["behavioral_summary"], summary)
+        self.assertGreater(len(after["short_term_memory"]["search_history"]),
+                           len(before["short_term_memory"]["search_history"]))
+        with self.assertRaisesRegex(ValueError, "Future Customer background"):
+            context({"user_id": 1}, [], cutoff=4, history_embedder=None, behavioral_summary=summary)
+
+    def test_stream_background_matches_direct_and_excludes_same_time(self):
+        from agent_simulation.datasets.samples.customer import customer_records, CustomerHistory
+        samples = list(customer_records(self.catalog, 0, 1, split="test", stage="response"))
+        self.assertEqual(samples[0][1]["input"]["behavioral_summary"],
+                         customer_sample(self.catalog, 5, stage="response")[1]["input"]["behavioral_summary"])
+        state = CustomerHistory(1, "fixture")
+        products = self.catalog.request(5)["response_input"]["displayed_items"]
+        row = dict(session_id=100, user_id=1, time_index=8, split="train", assigned_split="train",
+                   query="a", impressed_item_ids=[p["item_id"] for p in products],
+                   clicked_item_ids=[], purchased_item_ids=[], displayed_products=products,
+                   user_profile={"user_id": 1}, background=dict(time_index=8,
+                       recently_clicked_item_ids=[], recently_purchased_item_ids=[1],
+                       user_statistical_features={}, product_details=None))
+        outputs = list(state.samples([row, {**row, "session_id": 101}], stage="query", render=False))
+        self.assertTrue(all(q["input"]["behavioral_summary"] is None for q, _ in outputs))
+        later = list(state.samples([{**row, "session_id": 102, "time_index": 9}], stage="query", render=False))
+        self.assertEqual(later[0][0]["input"]["behavioral_summary"]["observed_time_index"], 8)
+
+    def test_seller_background_reaches_prompt_without_public_counts(self):
+        from agent_simulation.agents.context.pricing_evidence import project_seller
+        sample = seller_sample(self.catalog, 10, 1, 5, history_embedder=None)
+        visible, _ = project_seller(sample["input"], include_audit=False)
+        encoded = json.dumps(visible)
+        self.assertIn('"business_summary"', encoded)
+        summary = sample["input"]["owned_products"][0]["business_summary"]
+        self.assertEqual(summary["observed_time_index"], 4)
+        self.assertEqual(summary["statistics_30d"], {"exposures": 1.0, "clicks": 0.0, "orders": 0.0})
+        self.assertNotIn('"user_order_cnt_30d_hist"', encoded)
+        runtime, _ = self.runtime.inputs.seller(10, retrieve=False, observe=False, include_market=False)
+        self.assertEqual(runtime["owned_products"][0]["business_summary"], summary)
+
     def test_cached_observed_history_preserves_catalog_precedence_and_seed_corrections(self):
         state = self.runtime.snapshot()
         seed = state["customers"]["1"]["observed_history"]
@@ -60,7 +110,9 @@ class IntegratedTests(CatalogFixture, unittest.TestCase):
         seed.append({**canonical, "session_id": 99, "query": "additional seed session"})
 
         with patch.object(self.runtime.catalog, "customer_history",
-                          wraps=self.runtime.catalog.customer_history) as read:
+                          wraps=self.runtime.catalog.customer_history) as read, \
+             patch.object(self.runtime.catalog, "customer_summary",
+                          wraps=self.runtime.catalog.customer_summary) as read_summary:
             initial = self.runtime.inputs.customer(1, state=state, observe=False)
             history = initial["short_term_memory"]["search_history"]
             self.assertEqual(history[-2]["query"], canonical["query"])
@@ -69,6 +121,7 @@ class IntegratedTests(CatalogFixture, unittest.TestCase):
                 self.runtime.inputs.customer(1, state=deepcopy(state), observe=False), initial,
             )
             self.assertEqual(read.call_count, 1)
+            self.assertEqual(read_summary.call_count, 1)
 
             seed[-1]["query"] = "corrected seed session"
             updated = self.runtime.inputs.customer(1, state=state, observe=False)

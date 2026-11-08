@@ -72,6 +72,16 @@ def build_pricing_context(
             "price_status": latest["price_status"],
             "last_observed_time_index": latest["time_index"],
             "observed_price_history": history.view(cutoff),
+            "business_summary": {
+                "observed_time_index": latest["time_index"],
+                "statistics_30d": {
+                    name: latest.get(field) for name, field in (
+                        ("exposures", "item_shows_30d_hist"),
+                        ("clicks", "item_clicks_30d_hist"),
+                        ("orders", "item_orders_30d_hist"),
+                    )
+                },
+            },
         }
         if settled is not None:
             product["settled_price_history"] = dict(settled.view(simulation_cutoff), clock="simulation_settled_step")

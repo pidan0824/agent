@@ -80,6 +80,30 @@ def convert(c, query, path, order):
     }
 
 
+def build_customer_background(c, ranking, output):
+    """Store one factual snapshot per request, not one copy per exposed item."""
+    c.execute(f"""CREATE OR REPLACE TEMP TABLE backgrounds AS
+        SELECT DISTINCT user_id,session_id,time_index,split AS source_split,
+            recently_clicked_item_ids,recently_purchased_item_ids,user_statistical_features
+        FROM {raw_ranking(ranking, with_customer=True)}""")
+    count, unique = c.execute("SELECT count(*),count(DISTINCT session_id) FROM backgrounds").fetchone()
+    require(count == unique, "Conflicting Customer snapshots within a request")
+    mismatched = c.execute("""SELECT count(*) FROM backgrounds b LEFT JOIN requests r USING(session_id)
+        WHERE r.session_id IS NULL OR b.user_id IS DISTINCT FROM r.user_id
+           OR b.time_index IS DISTINCT FROM r.time_index OR b.source_split IS DISTINCT FROM r.split""").fetchone()[0]
+    require(mismatched == 0, "Customer background owner, time or split differs from request")
+    query = "SELECT * FROM backgrounds"
+    path = Path(output) / "facts/customer_background.parquet"
+    temporary = path.with_suffix(".pending.parquet")
+    try:
+        result = convert(c, query, temporary, "user_id,time_index,session_id")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+        c.execute("DROP TABLE backgrounds")
+    return result
+
+
 def create_views(c, output, cfg, splits):
     for name in ("products", "users", "requests", "ranking_observations"):
         c.execute(
@@ -230,6 +254,7 @@ def build(cfg, users, splits, output):
             files[table] = convert(c, query, output / "facts" / f"{table}.parquet", order)
             print(f'{cfg.dataset}: materialized {table}: {files[table]["rows"]} rows', flush=True)
         create_views(c, output, cfg, splits)
+        files["customer_background"] = build_customer_background(c, Path(sources["ranking"]["path"]), output)
         checks = verify_catalog(c, cfg)
         for record in source_records.values():
             stat = Path(record["path"]).stat()
@@ -291,9 +316,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--users", type=Path, help="Defaults to the users source in --config")
-    parser.add_argument("--splits", type=Path, required=True)
+    parser.add_argument("--splits", type=Path)
+    parser.add_argument("--customer-background-only", action="store_true",
+                        help="Add factual Customer snapshots to an existing catalog; no SFT/token rebuild")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    build(
-        Config.load(args.config), args.users, args.splits.resolve(), args.output.resolve()
-    )
+    cfg = Config.load(args.config)
+    if args.customer_background_only:
+        c = duckdb.connect(str(args.output / "catalog.duckdb"), read_only=True)
+        c.execute("SET threads=2; SET memory_limit='2GB'")
+        try:
+            print(build_customer_background(c, Path(cfg.sources["ranking"]["path"]), args.output))
+        finally:
+            c.close()
+    else:
+        require(args.splits is not None, "Catalog construction requires --splits")
+        build(cfg, args.users, args.splits.resolve(), args.output.resolve())

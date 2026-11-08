@@ -23,6 +23,7 @@ def context(
     history_embedder=DEFAULT_HISTORY_ENCODER,
     simulation_before=None,
     prepared_history=None,
+    behavioral_summary=None,
 ):
     """Assemble recent and retrieved history from the same authorized snapshot."""
     n = customer_history_limit() if limit is None else limit
@@ -30,8 +31,11 @@ def context(
         observed, simulated, cutoff=cutoff, recent_n=n, user_id=profile.get("user_id"),
         simulation_before=simulation_before, prepared=prepared_history,
     )
+    if behavioral_summary is not None:
+        require(behavioral_summary["observed_time_index"] < cutoff, "Future Customer background")
     return {
         "profile": deepcopy(profile),
+        "behavioral_summary": deepcopy(behavioral_summary),
         "history_cutoff_exclusive": cutoff,
         "short_term_memory": {"search_history": pool.recent_history()},
         "long_term_memory": deepcopy(list(long_term)),

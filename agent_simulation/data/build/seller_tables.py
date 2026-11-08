@@ -18,7 +18,7 @@ from agent_simulation.data.common import (
 )
 
 
-def raw_ranking(path, *, with_history=False):
+def raw_ranking(path, *, with_history=False, with_customer=False):
     """Expose the same typed request, product, price and feedback fields in both builds."""
     columns = {
         "session_id": "BIGINT",
@@ -34,6 +34,12 @@ def raw_ranking(path, *, with_history=False):
             "STRUCT(item_show_cnt_30d_hist DOUBLE, item_click_cnt_30d_hist DOUBLE, "
             "item_order_cnt_30d_hist DOUBLE)"
         )
+    if with_customer:
+        columns.update(user_id="BIGINT", recently_clicked_item_ids="BIGINT[]",
+                       recently_purchased_item_ids="BIGINT[]",
+                       user_statistical_features="STRUCT(user_show_cnt_30d_hist DOUBLE, "
+                       "user_click_cnt_30d_hist DOUBLE, user_order_cnt_30d_hist DOUBLE, "
+                       "user_gmv_30d_hist DOUBLE)")
     schema = ", ".join(f"{key}: {literal(dtype)}" for key, dtype in columns.items())
     return f"read_json({literal(path)}, format='newline_delimited', columns={{{schema}}})"
 

@@ -2,7 +2,8 @@
 
 import json
 from itertools import groupby
-from agent_simulation.data.catalog import DISPLAY_PRICE_SQL
+from agent_simulation.data.catalog import DISPLAY_PRICE_SQL, customer_summary
+from agent_simulation.data.market.products import PROFILE_FIELDS
 from agent_simulation.agents.context.shopping import context, project_customer
 from agent_simulation.agents.prompts.customer import messages, prepare_history
 from agent_simulation.data.common import iter_rows, require
@@ -36,6 +37,7 @@ def sample_from_request(dataset, session, r, *, history_embedder=DEFAULT_HISTORY
             base["profile"], base["short_term_memory"]["search_history"],
             cutoff=base["history_cutoff_exclusive"], history_embedder=history_embedder,
             history_query=query, prepared_history=prepared,
+            behavioral_summary=base.get("behavioral_summary"),
         )
 
     state = stage_context("") if stage != "response" else None
@@ -118,6 +120,7 @@ class CustomerHistory:
         self.train = []
         self.last_time = -1
         self.prepared = {}
+        self.backgrounds = {"train": None, "all": None}
 
     def samples(self, cohort, *, split=None, stage=None, render=True):
         cutoff = cohort[0]["time_index"]
@@ -152,6 +155,7 @@ class CustomerHistory:
                     "assigned_split": row["assigned_split"],
                     "query_input": {
                         "profile": row["user_profile"],
+                        "behavioral_summary": self.backgrounds[source],
                         "history_cutoff_exclusive": cutoff,
                         "short_term_memory": {"search_history": history},
                     },
@@ -182,6 +186,12 @@ class CustomerHistory:
             self.all.append(event)
             if split == "train":
                 self.train.append(event)
+        for row in sorted(cohort, key=lambda r: r["session_id"]):
+            snapshot = row.get("background")
+            if snapshot is not None:
+                self.backgrounds["all"] = customer_summary(snapshot)
+                if row["split"] == "train":
+                    self.backgrounds["train"] = self.backgrounds["all"]
         self.last_time = cutoff
 
 
@@ -192,6 +202,14 @@ def customer_records(catalog, bucket, buckets, *, split=None, stage=None, includ
         f"""WITH selected AS (
           SELECT r.*,s.assigned_split FROM requests r
           JOIN customer_splits s USING(session_id) WHERE r.user_id % ? = ?
+        ), background_items AS (
+          SELECT DISTINCT b.session_id,unnest(list_concat(b.recently_clicked_item_ids,
+              b.recently_purchased_item_ids)) AS item_id
+          FROM customer_background b JOIN selected r USING(session_id)
+        ), background_details AS (
+          SELECT b.session_id,to_json(list(struct_pack({','.join(f'{k}:=p.{k}' for k in PROFILE_FIELDS)})
+              ORDER BY p.item_id)) AS product_details
+          FROM background_items b JOIN products p USING(item_id) GROUP BY b.session_id
         ), displayed AS (
           SELECT o.session_id,to_json(list(struct_insert(p,price_raw := {DISPLAY_PRICE_SQL}))) AS products_json
           FROM ranking_observations o JOIN selected r USING(session_id)
@@ -201,8 +219,10 @@ def customer_records(catalog, bucket, buckets, *, split=None, stage=None, includ
              OR list_contains(r.purchased_item_ids,o.item_id)
           GROUP BY o.session_id
         )
-        SELECT r.*,to_json(u) AS profile_json,d.products_json
+        SELECT r.*,to_json(u) AS profile_json,d.products_json,CASE WHEN b.session_id IS NOT NULL THEN to_json(b) END AS background_json,bd.product_details AS background_products
         FROM selected r
+        LEFT JOIN customer_background b USING(session_id)
+        LEFT JOIN background_details bd USING(session_id)
         LEFT JOIN users u ON u.user_id=r.user_id LEFT JOIN displayed d ON d.session_id=r.session_id
         ORDER BY r.user_id,r.time_index,r.session_id""",
         [buckets, bucket, split, split, stage != "query"],
@@ -211,6 +231,11 @@ def customer_records(catalog, bucket, buckets, *, split=None, stage=None, includ
     def decode():
         for row in iter_rows(cursor, 64):
             row["user_profile"] = json.loads(row.pop("profile_json"))
+            background = row.pop("background_json")
+            row["background"] = json.loads(background) if background is not None else None
+            details = row.pop("background_products")
+            if row["background"] is not None:
+                row["background"]["product_details"] = details
             raw = row.pop("products_json")
             row["displayed_products"] = json.loads(raw) if raw is not None else []
             yield row

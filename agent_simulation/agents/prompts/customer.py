@@ -23,6 +23,7 @@ ATTRIBUTE_GROUPS = {
 }
 
 TABLE_PATHS = frozenset({
+    ("behavioral_summary", "item_details"),
     ("displayed_items",),
     ("display_categories",),
     ("short_term_memory", "item_attributes"),

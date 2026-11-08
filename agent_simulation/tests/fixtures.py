@@ -174,6 +174,7 @@ class ProfileCatalogFixture:
         history = self.state["customers"][str(actor)]["observed_history"]
         return {
             "profile": {"user_id": actor, "gender": "fixture"},
+            "behavioral_summary": None,
             "short_term_memory": {
                 "search_history": [e for e in history if e["time_index"] < cutoff][0 if all_prior else -limit:]
             },

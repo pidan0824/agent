@@ -6,7 +6,7 @@ import json
 import duckdb
 import math
 from pathlib import Path
-from agent_simulation.data.common import Config, require, rows
+from agent_simulation.data.common import Config, require, rows, literal
 from agent_simulation.data.history_records import (
     shopping_event,
     customer_history_limit,
@@ -32,6 +32,22 @@ from agent_simulation.data.market.statistics import (
 
 # Customer inputs use NULL for unknown prices; ranking_observations retains the source value.
 DISPLAY_PRICE_SQL = "CASE WHEN isfinite(o.price_raw) AND o.price_raw > 0 THEN o.price_raw END"
+
+
+def customer_summary(snapshot):
+    """A background snapshot is not another search event or additive count."""
+    if snapshot is None:
+        return None
+    statistics = snapshot["user_statistical_features"] or {}
+    return {
+        "observed_time_index": snapshot["time_index"],
+        "statistics_30d": {name: statistics.get(field) for name, field in (
+            ("exposures", "user_show_cnt_30d_hist"), ("clicks", "user_click_cnt_30d_hist"),
+            ("orders", "user_order_cnt_30d_hist"), ("gmv_raw", "user_gmv_30d_hist"))},
+        "recent_clicked_item_ids": snapshot["recently_clicked_item_ids"],
+        "recent_purchased_item_ids": snapshot["recently_purchased_item_ids"],
+        "item_details": json.loads(snapshot["product_details"]) if snapshot["product_details"] else [],
+    }
 
 
 
@@ -357,9 +373,28 @@ class Catalog:
         )
         self.connection = duckdb.connect(str(self.directory / "catalog.duckdb"), read_only=True)
         self.connection.execute("SET threads=2; SET memory_limit='2GB'")
+        background = self.directory / "facts/customer_background.parquet"
+        if not background.is_file():
+            self.connection.close()
+            raise FileNotFoundError(f"Build Customer background snapshots first: {background}")
+        self.connection.execute(
+            f"CREATE TEMP VIEW customer_background AS SELECT * FROM read_parquet({literal(background)})")
 
     def close(self):
         self.connection.close()
+
+    def customer_summary(self, user_id, cutoff, official_split="test"):
+        snapshots = rows(self.connection, """SELECT * FROM customer_background
+            WHERE user_id=? AND time_index<? AND (?='test' OR source_split='train')
+            ORDER BY time_index DESC,session_id DESC LIMIT 1""", [user_id, cutoff, official_split])
+        if not snapshots:
+            return None
+        snapshot = snapshots[0]
+        ids = set((snapshot["recently_clicked_item_ids"] or []) + (snapshot["recently_purchased_item_ids"] or []))
+        details = rows(self.connection, "SELECT " + ",".join(PROFILE_FIELDS) +
+                       " FROM products WHERE item_id IN (SELECT unnest(?::BIGINT[])) ORDER BY item_id", [list(ids)])
+        snapshot["product_details"] = json.dumps(details, ensure_ascii=False)
+        return customer_summary(snapshot)
 
     def customer_history(self, user_id, cutoff, limit=None, official_split="train", *, all_prior=False):
         if all_prior:
@@ -403,6 +438,7 @@ class Catalog:
                 snapshots[session][product["item_id"]] = product
         return {
             "profile": profiles[0],
+            "behavioral_summary": self.customer_summary(user_id, cutoff, official_split),
             "history_cutoff_exclusive": cutoff,
             "short_term_memory": {"search_history": [shopping_event(r, snapshots[r["session_id"]]) for r in events]},
             "long_term_memory": [],
