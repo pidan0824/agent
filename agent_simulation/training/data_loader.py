@@ -3,6 +3,8 @@
 
 import json
 import random
+import sys
+import time
 import torch
 from contextlib import closing
 from itertools import islice
@@ -201,3 +203,44 @@ class TensorCollator:
         }
         result["sample_weights"] = torch.tensor(batch["sample_weights"], dtype=torch.float32)
         return result
+
+
+def prepare_datasets(args, tokenizer, data_check, eval_split, *, resume_epoch_size=None):
+    """Prepare the training and held-out streams before loading model weights."""
+    if getattr(args, "token_cache", None):
+        if args.train_samples or args.data_workers:
+            raise ValueError("Use the finished token cache without caps or live workers")
+        train_data = TokenStream(args.token_cache, args.role, "train", seed=args.seed,
+                                 shuffle_buffer=args.shuffle_buffer)
+        evaluation_data = TokenStream(args.token_cache, args.role, eval_split)
+        return train_data, evaluation_data, len(train_data)
+
+    workers = getattr(args, "data_workers", 0)
+    train_tokenizer = args.tokenizer if workers else tokenizer
+    train_data = SampleStream(args.dataset, train_tokenizer, args.role, "train", limit=args.train_samples,
+                              shuffle_buffer=args.shuffle_buffer, seed=args.seed,
+                              workers=workers)
+    samples_per_epoch = (resume_epoch_size if resume_epoch_size is not None else train_data.measure_epoch(
+        data_check["counts"]["train"]))
+    train_data.epoch_size = samples_per_epoch
+    records = data_check["evaluation_selection"]["record_ids"]
+    if records is None:
+        evaluation_data = SampleStream(args.dataset, tokenizer, args.role, eval_split)
+    elif not records:
+        raise ValueError("Empty evaluation selection")
+    elif not workers:
+        evaluation_data = EvaluationStream(args.dataset, tokenizer, args.role, eval_split, records)
+    else:
+        groups = worker_loader(WorkerRecords(args.dataset, args.tokenizer, args.role,
+                                             eval_split, records=records), workers)
+        evaluation_data = []
+        started = time.monotonic()
+        print(f"Preparing {len(records)} evaluation records with {args.data_workers} workers",
+              file=sys.stderr, flush=True)
+        for count, group in enumerate(groups, 1):
+            evaluation_data.extend(group)
+            if count % 16 == 0 or count == len(records):
+                print(f"Evaluation inputs {count}/{len(records)} records, "
+                      f"{len(evaluation_data)} samples, {time.monotonic()-started:.1f}s",
+                      file=sys.stderr, flush=True)
+    return train_data, evaluation_data, samples_per_epoch

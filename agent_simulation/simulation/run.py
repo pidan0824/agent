@@ -234,6 +234,7 @@ def run(args, *, load_model=None):
             episode = Episode(
                 runtime, seller, customer, tick_size=args.tick_size, max_ticks=args.ticks,
                 max_concurrent_requests=args.max_concurrent_requests,
+                fixed_horizon=getattr(args, "fixed_horizon", False),
             )
             episode.run(progress=lambda tick, status: print("Tick", tick, status, flush=True))
         else:
@@ -305,6 +306,8 @@ def parser():
     p.add_argument("--seed", type=int, default=20261031)
     p.add_argument("--tick-size", type=int, default=1)
     p.add_argument("--ticks", type=int, default=3)
+    p.add_argument("--fixed-horizon", action="store_true",
+                   help="Continue to --ticks after all Customers exit")
     p.add_argument("--max-new-tokens", type=int, default=2048)
     from agent_simulation.environment.batching import CUSTOMER_RESPONSE_BATCH_SIZE
     p.add_argument("--customer-response-batch-size", type=int, default=CUSTOMER_RESPONSE_BATCH_SIZE,

@@ -6,8 +6,6 @@ import importlib.metadata
 import json
 import math
 import shutil
-import sys
-import time
 import torch
 from itertools import islice
 from pathlib import Path
@@ -20,15 +18,38 @@ from agent_simulation.logs import write_report
 from agent_simulation.datasets.labels import SFTDataset, record_samples, select_record_ids, selection_split
 from agent_simulation.datasets.tokens import validate_release
 from agent_simulation.training.data_loader import (
-    SampleStream,
-    EvaluationStream,
-    WorkerRecords,
-    worker_loader,
+    prepare_datasets,
     TensorCollator,
     TokenStream,
 )
 from agent_simulation.training.trainer import make_trainer
 from agent_simulation.data.common import sha256
+
+
+def input_report(args, shards, eval_split, counts, checks, *, cached=False):
+    return {
+        "role": args.role,
+        "counts": counts,
+        "checks": checks,
+        "test_used": eval_split == "test",
+        "test_used_for_gradient_updates": False,
+        "weights_loaded": False,
+        "local_model_shards_present": shards,
+        "tokenizer_matches_model": True,
+        "capacity_checked_during_cache_build": cached,
+    }
+
+
+def sample_probe(collator, sample, sample_id, split):
+    batch = collator([sample])
+    return {
+        "sample_id": sample_id,
+        "split": split,
+        "tokens": batch["input_ids"].shape[1],
+        "answer_tokens": batch["labels"].ne(-100).sum().item(),
+        "weight": batch["sample_weights"].item(),
+    }
+
 
 def check_cached_data(args, data, shards, *, verify=False):
     """Read cached split counts and optionally verify files and sample rows."""
@@ -44,14 +65,13 @@ def check_cached_data(args, data, shards, *, verify=False):
         counts[split] = len(stream)
         if verify:
             for sample in islice(stream, 2):
-                batch = collator([sample])
-                checks.append(dict(sample_id=sample.sample_id, split=split,
-                    tokens=batch['input_ids'].shape[1], answer_tokens=batch['labels'].ne(-100).sum().item(),
-                    weight=batch['sample_weights'].item()))
-    return dict(role=args.role,counts=counts,count_unit='expanded_cached_rows',checks=checks,
-        test_used=eval_split == 'test',weights_loaded=False,local_model_shards_present=shards,
-        tokenizer_matches_model=True,capacity_checked_during_cache_build=True,
-        token_cache_identity=spec,evaluation_selection='All evaluation rows in the frozen token cache; no resampling')
+                checks.append(sample_probe(collator, sample, sample.sample_id, split))
+    return {
+        **input_report(args, shards, eval_split, counts, checks, cached=True),
+        "count_unit": "expanded_cached_rows",
+        "token_cache_identity": spec,
+        "evaluation_selection": "All evaluation rows in the frozen token cache; no resampling",
+    }
 
 
 def check_data(args):
@@ -94,25 +114,8 @@ def check_data(args):
                 for sample in samples:
                     if sample["split"] != split:
                         raise ValueError(f"Expected {split} sample, got {sample['sample_id']}")
-                    batch = collator([sample])
-                    checks.append({
-                        "sample_id": sample["sample_id"],
-                        "split": split,
-                        "tokens": batch["input_ids"].shape[1],
-                        "answer_tokens": batch["labels"].ne(-100).sum().item(),
-                        "weight": batch["sample_weights"].item(),
-                    })
-        result = {
-            "role": args.role,
-            "counts": data.manifest["counts"][args.role],
-            "checks": checks,
-            "test_used": eval_split == "test",
-            "test_used_for_gradient_updates": False,
-            "weights_loaded": False,
-            "local_model_shards_present": shards,
-            "tokenizer_matches_model": True,
-            "all_inputs_capacity_checked": False,
-        }
+                    checks.append(sample_probe(collator, sample, sample["sample_id"], split))
+        result = input_report(args, shards, eval_split, data.manifest["counts"][args.role], checks)
         if args.command == "train":
             result["evaluation_selection"] = {
                 "seed": args.seed,
@@ -216,6 +219,7 @@ def select_customer_checkpoint(args, checkpoints):
     for checkpoint in checkpoints:
         model.set_adapter(checkpoint.name)
         state = json.loads((checkpoint / "trainer_state.json").read_text())
+        # Trainer averages weight × answer loss over rows. Undo that mean before merging.
         weighted_losses = {
             stage: trainer.evaluate(eval_dataset=rows)["eval_loss"] * len(rows)
             for stage, rows in test.items()
@@ -259,9 +263,8 @@ def select_customer_checkpoint(args, checkpoints):
 def train(args):
     if getattr(args, "empty_cache_steps", None) is not None and args.empty_cache_steps < 1:
         raise ValueError("Cache release interval must be positive")
-    if min(args.epochs, args.eval_steps, args.batch_size, args.accumulation, args.rank) < 1 or (
-        args.max_steps is not None and args.max_steps < 1
-    ):
+    budget = args.max_steps if args.max_steps is not None else args.epochs
+    if min(budget, args.eval_steps, args.batch_size, args.accumulation, args.rank) < 1:
         raise ValueError("Positive step, batch, accumulation and rank values required")
     if (
         not math.isfinite(args.learning_rate)
@@ -297,42 +300,10 @@ def train(args):
         if config["packages"] != packages:
             raise ValueError("Resume package versions differ")
     tokenizer = load_tokenizer(str(args.tokenizer), local_files_only=True)
-    if getattr(args, "token_cache", None):
-        if args.train_samples or args.data_workers:
-            raise ValueError("Use the finished token cache without caps or live workers")
-        train_data = TokenStream(args.token_cache, args.role, "train", seed=args.seed,
-                                 shuffle_buffer=args.shuffle_buffer)
-        evaluation_data = TokenStream(args.token_cache, args.role, eval_split)
-        samples_per_epoch = len(train_data)
-    else:
-        workers = getattr(args, "data_workers", 0)
-        train_tokenizer = args.tokenizer if workers else tokenizer
-        train_data = SampleStream(args.dataset, train_tokenizer, args.role, "train", limit=args.train_samples,
-                                  shuffle_buffer=args.shuffle_buffer, seed=args.seed,
-                                  workers=workers)
-        samples_per_epoch = (config["samples_per_epoch"] if checkpoint else train_data.measure_epoch(
-            data_check["counts"]["train"]))
-        train_data.epoch_size = samples_per_epoch
-        records = data_check["evaluation_selection"]["record_ids"]
-        if records is None:
-            evaluation_data = SampleStream(args.dataset, tokenizer, args.role, eval_split)
-        elif not records:
-            raise ValueError("Empty evaluation selection")
-        elif not workers:
-            evaluation_data = EvaluationStream(args.dataset, tokenizer, args.role, eval_split, records)
-        else:
-            groups = worker_loader(WorkerRecords(args.dataset, args.tokenizer, args.role,
-                                                 eval_split, records=records), workers)
-            evaluation_data = []
-            started = time.monotonic()
-            print(f"Preparing {len(records)} evaluation records with {args.data_workers} workers",
-                  file=sys.stderr, flush=True)
-            for count, group in enumerate(groups, 1):
-                evaluation_data.extend(group)
-                if count % 16 == 0 or count == len(records):
-                    print(f"Evaluation inputs {count}/{len(records)} records, "
-                          f"{len(evaluation_data)} samples, {time.monotonic()-started:.1f}s",
-                          file=sys.stderr, flush=True)
+    train_data, evaluation_data, samples_per_epoch = prepare_datasets(
+        args, tokenizer, data_check, eval_split,
+        resume_epoch_size=config["samples_per_epoch"] if checkpoint and not args.token_cache else None,
+    )
     if samples_per_epoch == 0:
         raise ValueError("Empty training epoch")
     if not args.resume:

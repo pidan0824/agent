@@ -92,6 +92,12 @@ def project_customer(state):
         return result
 
     visible = dict(state)
+    displayed = visible.get("displayed_items", ())
+    if any("price_provenance" in item for item in displayed):
+        visible["displayed_items"] = [
+            {key: value for key, value in item.items() if key != "price_provenance"}
+            for item in displayed
+        ]
     memory = state.get("short_term_memory", {})
     require(isinstance(memory, dict), "Customer short-term memory must be an object")
     if "search_history" in memory:

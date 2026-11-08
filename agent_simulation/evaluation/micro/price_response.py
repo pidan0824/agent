@@ -100,6 +100,7 @@ def observed_price_gradient(exposures):
             counts[item] = {"low": len(low), "high": len(high)}
     return {
         "comparable_items": len(counts),
+        "direction": "high_price_minus_low_price",
         "grouping": "below/above median distinct observed price within item; equal item weights",
         "exposure_counts_by_item": counts,
         "high_minus_low_purchase_rate": {
@@ -123,6 +124,7 @@ def population(records, categories, trials):
         distributions[field] = {"counts": counts, "total_variation":
             sum(abs(p[k] / pn - t[k] / tn) for k in p.keys() | t.keys()) / 2 if pn and tn else None}
     paired = [r for r in trials if r["status"] == "ok"]
+    focal_decisions = [tuple(arm["purchased"] for arm in trial["arms"]) for trial in paired]
     focal_rates, other_rates, request_rates = [], [], []
     for index in range(len(PRICE_MULTIPLIERS)):
         outcomes = [(r["item_id"], r["arms"][index]["purchased_item_ids"]) for r in paired]
@@ -134,7 +136,16 @@ def population(records, categories, trials):
     return {"requests": len(responses), "valid_requests": len(valid),
             "purchase_distributions": distributions, "price_trials": trials,
             "valid_pairs": len(paired), "multipliers": list(PRICE_MULTIPLIERS),
-            "purchase_rate_scope": "Share of paired requests with each outcome from one greedy decision per batch.",
+            "purchase_rate_scope": (
+                "Share of valid paired requests from greedy decisions. Only the focal product's "
+                "batch is rerun; cross-batch substitution is outside this intervention."
+            ),
+            "focal_purchase_switch_rate": (
+                mean(low != high for low, _, high in focal_decisions) if paired else None
+            ),
+            "focal_purchase_monotonicity_rate": (
+                mean(low >= base >= high for low, base, high in focal_decisions) if paired else None
+            ),
             "focal_purchase_rates": focal_rates,
             "other_purchase_rates": other_rates,
             "request_purchase_rates": request_rates}

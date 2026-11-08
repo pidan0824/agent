@@ -593,6 +593,13 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         self.assertNotIn("observed_history", page(final))
         self.assertNotIn("</script><img", page({"query": "</script><img onerror=test>"}))
 
+    def test_fixed_horizon_keeps_running_after_all_customers_exit(self):
+        episode = self.make_episode([WAIT] * 9, [EXIT, EXIT], ticks=3)
+        episode.fixed_horizon = True
+        clock = episode.run()
+        self.assertEqual((clock["tick"], clock["termination_reason"]), (3, "max_ticks"))
+        self.assertEqual(len(self.customer_model.requests), 2)
+
     def test_exit_cannot_discard_an_unsettled_response(self):
         self.make_episode([], [])
         self.runtime.execute("customer", 7, "search_products", {"query": "水杯"})

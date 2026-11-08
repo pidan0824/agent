@@ -9,6 +9,7 @@ class PriceResponseTest(unittest.TestCase):
     def test_repeated_low_price_does_not_hide_observed_high_price(self):
         report = observed_price_gradient({5: [(780, 1, 1), (780, 1, 0), (936, 0, 0)]})
         self.assertEqual(report["comparable_items"], 1)
+        self.assertEqual(report["direction"], "high_price_minus_low_price")
         self.assertEqual(report["exposure_counts_by_item"], {5: {"low": 2, "high": 1}})
         self.assertEqual(report["high_minus_low_purchase_rate"], {"prediction": -1, "target": -0.5})
 
@@ -35,7 +36,11 @@ class PriceResponseTest(unittest.TestCase):
         self.assertEqual(skipped["status"], "ineligible")
 
     def test_only_visible_price_changes_and_invalid_arms_are_excluded(self):
-        state = {"displayed_items": [{"item_id": 5, "price_raw": 780}, {"item_id": 6, "price_raw": None}],
+        state = {"displayed_items": [
+                     {"item_id": 5, "price_raw": 780, "price_provenance": {"price_raw": 780}},
+                     {"item_id": 6, "price_raw": 321}],
+                 "profile": {"user_id": 2}, "query": "杯子",
+                 "long_term_memory": [{"content": "Usually shops for cups."}],
                  "short_term_memory": {"search_history": [
                      {"session_id": 6, "time_index": 10, "query": "杯子",
                       "clicked_items": [], "purchased_items": [{"item_id": 5, "price_raw": 750}]}
@@ -44,6 +49,8 @@ class PriceResponseTest(unittest.TestCase):
                   "messages": messages(state, {}, response=True)}
         original = deepcopy(sample)
         visible = decode_input(sample["messages"][1]["content"])
+        self.assertEqual([p["price_raw"] for p in visible["displayed_items"]], [780, 321])
+        self.assertNotIn("price_provenance", visible["displayed_items"][0])
         baseline = {"stage": "response", "status": "ok",
                     "prediction": {"purchased_item_ids": []}, "target": {"purchased_item_ids": [5]}}
         seen = []
@@ -64,6 +71,8 @@ class PriceResponseTest(unittest.TestCase):
         self.assertEqual([a["purchased_item_ids"] for a in trial["arms"]], [[5], [], None])
         report = population([baseline], {5: "14"}, [trial])
         self.assertEqual(report["valid_pairs"], 0)
+        self.assertIsNone(report["focal_purchase_switch_rate"])
+        self.assertIsNone(report["focal_purchase_monotonicity_rate"])
         self.assertEqual(report["request_purchase_rates"], [None, None, None])
         self.assertIsNone(report["purchase_distributions"]["item"]["total_variation"])
         self.assertEqual(report["purchase_distributions"]["category"]["counts"]["target"], {"14": 1})
@@ -97,3 +106,13 @@ class PriceResponseTest(unittest.TestCase):
         self.assertEqual(report["focal_purchase_rates"], [1, 0, 0])
         self.assertEqual(report["other_purchase_rates"], [0.5, 1, 0.5])
         self.assertEqual(report["request_purchase_rates"], [1, 1, 0.5])
+        self.assertEqual(report["focal_purchase_switch_rate"], 1)
+        self.assertEqual(report["focal_purchase_monotonicity_rate"], 1)
+
+        def predict_reverse(variant, _model):
+            return ok(5) if variant["input"]["displayed_items"][0]["price_raw"] == 120 else ok()
+
+        reverse = compare_prices(samples, [ok(), ok(6)], None, predict_reverse, seed=1)
+        report = population([], {}, [trial, reverse])
+        self.assertEqual(report["focal_purchase_switch_rate"], 1)
+        self.assertEqual(report["focal_purchase_monotonicity_rate"], 0.5)

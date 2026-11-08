@@ -19,6 +19,11 @@ from agent_simulation.inference.client import ModelOutputError
 
 
 class BehaviorTests(unittest.TestCase):
+    def test_price_intervention_requires_customer_only(self):
+        args = SimpleNamespace(count=1, seed=42, role="both", price_response=True)
+        with self.assertRaisesRegex(ValueError, "Price response requires Customer role"):
+            run(args)
+
     def test_programming_failure_propagates_and_user_message_is_not_a_prediction(self):
         tokenizer = SimpleNamespace(chat_template="fixture", apply_chat_template=lambda *a, **kw: [1])
         model = Mock(tokenizer=tokenizer, max_new_tokens=8)
@@ -61,6 +66,7 @@ class BehaviorTests(unittest.TestCase):
             {"role": "assistant", "content": '{"clicked_item_ids":[999],"purchased_item_ids":[]}'},
             {"role": "assistant", "content": '{"query":"杯子"}'},
             {"role": "assistant", "content": '{"clicked_item_ids":[],"purchased_item_ids":[]}'},
+            {"role": "assistant", "content": '{"clicked_item_ids":[],"purchased_item_ids":[]}'},
         ]
         backend = model
         data = Mock(tokenizer=tokenizer)
@@ -79,6 +85,10 @@ class BehaviorTests(unittest.TestCase):
                 patch("agent_simulation.evaluation.micro.behavior_prediction.verify_checkpoint", side_effect=AssertionError("Default run must not hash model weights")),
             ):
                 run(args)
+                (args.output / "completion.json").unlink()
+                (args.output / "response_2.json").unlink()
+                args.resume = True
+                run(args)
             results = json.loads((args.output / "results.json").read_text())
             failed = json.loads((args.output / "response_1.json").read_text())
             self.assertEqual(failed["status"], "invalid")
@@ -86,8 +96,19 @@ class BehaviorTests(unittest.TestCase):
             self.assertNotIn("prediction", failed)
             self.assertEqual(results["metrics"]["response"]["invalid_rate"], 0.5)
             self.assertTrue((args.output / "completion.json").exists())
-        self.assertEqual(model.complete.call_count, 4)
-        data.close.assert_called_once()
+        self.assertEqual(model.complete.call_count, 5)
+        self.assertEqual(data.close.call_count, 2)
+
+    def test_query_exact_match_includes_invalid_requests(self):
+        target = {"query": "杯子"}
+        rows = [
+            {"stage": "query", "sample_id": "query:1", "status": "ok",
+             "target": target, "prediction": target},
+            {"stage": "query", "sample_id": "query:2", "status": "invalid"},
+        ]
+        metrics = summarize(rows)["query"]
+        self.assertEqual(metrics["exact_text_rate_valid_only"], 1)
+        self.assertEqual(metrics["end_to_end_exact_text_rate"], 0.5)
 
     def test_evaluation_rejects_adapter_trained_on_different_base_weights(self):
         tokenizer = SimpleNamespace(chat_template="fixture", get_vocab=lambda: {"test": 1})
@@ -296,7 +317,7 @@ class BehaviorTests(unittest.TestCase):
             }
 
         summary = summarize([
-            record(1, 120, 110),
+            record(1, 120, 120),
             record(2, 80, 110),
             record(3, 100, 100),
             {"stage": "seller", "sample_id": "seller:10:4:11", "status": "invalid"},
@@ -305,7 +326,7 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(summary["invalid"], 1)
         self.assertEqual(changes["observations"], 3)
         self.assertEqual(changes["direction_accuracy"], 2 / 3)
-        self.assertAlmostEqual(changes["relative_change_mae"], 0.4 / 3)
+        self.assertAlmostEqual(changes["relative_change_mae"], 0.3 / 3)
         self.assertEqual(changes["keep_previous_price_baseline"]["direction_accuracy"], 1 / 3)
         self.assertAlmostEqual(changes["keep_previous_price_baseline"]["relative_change_mae"], 0.4 / 3)
         self.assertEqual(changes["by_actual_direction"]["increase"]["direction_accuracy"], 1)

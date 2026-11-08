@@ -40,7 +40,7 @@ class Episode:
     """
 
     def __init__(self, runtime, seller_agent, customer_agent, *, tick_size, max_ticks,
-                 max_concurrent_requests=1):
+                 max_concurrent_requests=1, fixed_horizon=False):
         require(type(max_concurrent_requests) is int and max_concurrent_requests > 0,
                 "Invalid inference concurrency")
         self.concurrency = max_concurrent_requests
@@ -51,6 +51,7 @@ class Episode:
             "Agents must share the Episode runtime",
         )
         self.runtime, self.seller, self.customer = runtime, seller_agent, customer_agent
+        self.fixed_horizon = fixed_horizon
         cutoff = runtime.snapshot()['historical_cutoff_exclusive']
         runtime.start_episode(create_clock(cutoff, tick_size, max_ticks))
 
@@ -139,7 +140,7 @@ class Episode:
                         }
                 reason = advance_clock(
                     state["clock"],
-                    all_customers_exited=all(
+                    all_customers_exited=not self.fixed_horizon and all(
                         customer.get("exit") for customer in state["customers"].values()
                     ),
                 )
@@ -156,7 +157,7 @@ class Episode:
         return deepcopy(trace)
 
     def run(self, *, progress=None):
-        """Stop at the horizon or after all Customers exit; waiting is not exit."""
+        """Run to the horizon, optionally stopping when all Customers exit."""
         clock = self.runtime.snapshot()["clock"]
         while clock["status"] == "ready":
             tick = clock["tick"]
