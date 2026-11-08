@@ -1,0 +1,23 @@
+{
+  "dataset": "KuaiSearch Lite",
+  "output": "source/seller_tables",
+  "item_parts": 8,
+  "sources": {
+    "items": {
+      "path": "source/raw/items_lite.jsonl",
+      "sha256": "5c04e031324a37636afb2f822a4d862378d7f54eada93875d686fa8f31bd2621"
+    },
+    "recall": {
+      "path": "source/raw/recall_lite.jsonl",
+      "sha256": "8949ed6b5cf685bb69067710ac70da12fd7999f66e66bafea4b9d8d78bfefe8a"
+    },
+    "users": {
+      "path": "source/raw/users_lite.jsonl",
+      "sha256": "9853a69555ae52508200ce7855502fa52ad2e1875662193091b9993005f29554"
+    },
+    "ranking": {
+      "path": "source/raw/ranking_lite.jsonl",
+      "sha256": "5687c98a382a5e4b32a9132117e46b5c7ed452c8db86f48e185100b106a43221"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "folders": [
+    {
+      "name": "E-commerce Agent Simulation",
+      "path": "."
+    }
+  ],
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.debugpy"
+    ]
+  }
+}

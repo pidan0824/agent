@@ -1,0 +1,20 @@
+{
+  "dataset": "KuaiSearch Full",
+  "output": "seller_tables",
+  "item_parts": 32,
+  "sources": {
+    "items": {
+      "path": "raw/items_full.jsonl"
+    },
+    "recall": {
+      "path": "raw/recall_full.jsonl"
+    },
+    "ranking": {
+      "path": "raw/ranking_full.jsonl",
+      "sha256": "78550c4eb2c3e74866bdbe5688174d0958db116eb1b2f37218fc0df43e6b0a62"
+    },
+    "users": {
+      "path": "raw/users_full.jsonl"
+    }
+  }
+}

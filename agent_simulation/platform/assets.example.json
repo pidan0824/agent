@@ -1,0 +1,26 @@
+{
+  "schema": "kuaisearch-platform-assets-v1",
+  "status": "template_only_missing_trained_assets",
+  "identity": "kuaisearch-88a545d-DPR-SDE-DIN-local-checkpoint-revision",
+  "device": "auto",
+  "recall_encoder": "../../models/platform/kuaisearch/dpr/query_encoder",
+  "recall_vectors": "../../models/platform/kuaisearch/dpr/visible_corpus_vectors.npy",
+  "recall_item_ids": "../../models/platform/kuaisearch/dpr/original_item_ids.npy",
+  "ranking_checkpoint": "../../models/platform/kuaisearch/din/best_model.pt",
+  "ranking_text_encoder": "../../models/bge-small-zh-v1.5",
+  "ranking_items": "../../models/platform/kuaisearch/features/corpus.jsonl",
+  "ranking_users": "../../models/platform/kuaisearch/features/users.jsonl",
+  "ranking_item_vectors": "../../models/platform/kuaisearch/features/item_title_emb.npy",
+  "ranking_embedding_index": "../../models/platform/kuaisearch/features/item_id2idx.json",
+  "item_id_map": "../../models/platform/kuaisearch/features/original_to_model_item_ids.json",
+  "user_id_map": "../../models/platform/kuaisearch/features/original_to_model_user_ids.json",
+  "max_history_len": 20,
+  "ranking_model": "DIN",
+  "ranking_model_kwargs": {
+    "config": {},
+    "num_cross_layers": 3,
+    "hidden_size": 256,
+    "dropout_rate": 0.3,
+    "user_id_embedding_dim": 32
+  }
+}

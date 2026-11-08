@@ -1,0 +1,151 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>市场放映室 · 顾客与商家</title><style>
+:root{color-scheme:light;--ink:#203a35;--mint:#c7dfae;--gold:#f8cd79;--lilac:#e0d8fa;--muted:#526660;--line:#c5d2c8}
+*{box-sizing:border-box}body{margin:0;background:#f7f7ef;color:var(--ink);font:15px/1.6 system-ui,"PingFang SC",sans-serif}main{max-width:1050px;margin:auto;padding:18px 24px 40px}header,.flex,.controls,.rail{display:flex;align-items:center;gap:12px}.between{justify-content:space-between}header{padding-bottom:12px;border-bottom:1px solid var(--line);font-size:13px}a{color:#265e50}h1{font-size:clamp(26px,4.2vw,42px);line-height:1.2;letter-spacing:-.05em;margin:15px 0 6px}p{margin:0}.muted{color:var(--muted)}.eyebrow{font:700 11px ui-monospace,monospace;letter-spacing:.12em}.screen{margin-top:18px;border:1px solid #9eafa1;background:#edf1e7;border-radius:18px;overflow:hidden}.strip{padding:9px 18px;border-bottom:1px solid #c5d1c2;background:#e0e8d9;font-size:13px}.light{width:9px;height:9px;border-radius:50%;background:#38895e;display:inline-block;margin-right:7px}#scene{width:100%;height:auto;display:block;max-height:47vh;min-height:175px}.caption{padding:12px 18px 15px;border-top:1px solid var(--line);background:#fffef8}.caption h2{font-size:20px;line-height:1.3;margin:3px 0}#facts{overflow-wrap:anywhere}.rail{padding:13px 0 8px}.rail input{accent-color:#236853;flex:1;min-width:1em}.rail span{font:12px ui-monospace,monospace;white-space:nowrap}button,select{background:white;color:var(--ink);border:1px solid #afc1b3;border-radius:7px;padding:7px 12px;font:inherit;cursor:pointer}#play{background:#235744;color:#fff;min-width:85px}.controls{flex-wrap:wrap}.controls label{margin-left:auto}button:disabled{opacity:.45;cursor:default}.details{margin-top:14px;border-top:1px solid var(--line);padding:12px 0}summary{cursor:pointer;font-weight:600}ul{padding-left:22px}li{margin:3px 0}svg text{font-family:system-ui,"PingFang SC",sans-serif;fill:var(--ink)}.node{transition:opacity .25s}.node.dim{opacity:.48}.node.active .plate{stroke-width:3;stroke:#235744}.plate{fill:#fffef7;stroke:#b6c4b5;stroke-width:1.5}.road{fill:none;stroke:#bbcbbb;stroke-width:2.5;stroke-dasharray:3 7}.wire{stroke:#50866b;stroke-width:3;fill:none}.parcel{fill:#174e42;stroke:white;stroke-width:2}.parcelText{fill:white;font-size:11px;font-weight:700}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #c47b21;outline-offset:2px}
+@media(max-width:620px){main{padding:10px 12px 24px}.strip,.caption{padding:9px 12px}.controls{gap:6px}button,select{font-size:13px;padding:6px 8px}#scene{min-height:145px}.caption h2{font-size:17px}}
+@media(prefers-reduced-motion:reduce){.node{transition:none}}
+</style></head><body><main>
+<header class="between"><b>◉　市场放映室</b><span class="eyebrow">MARKET IN MOTION</span></header>
+<h1>一次搜索，怎样连接顾客与商家？</h1><p class="muted" id="meta"></p>
+<section class="screen"><div class="strip flex between"><b><i class="light"></i><span id="tick"></span></b><span id="clock"></span></div>
+<svg id="scene" role="img" aria-label="仿真日志中的商家、平台与顾客之间的事件流" viewBox="0 0 720 240">
+<defs>
+<pattern id="dots" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="4" cy="4" r="1" fill="#d0dbcd"/></pattern>
+<g id="shop" stroke="#31513b" stroke-width="2.2" stroke-linejoin="round"><path fill="#f8edd9" d="M-23 0h46v24h-46z"/><path fill="#d4e2af" d="M-26 -7l5-12h42l5 12v6q-4 7-9 1-4 6-9 0-4 6-9 0-4 6-9 0-4 6-9 0-4 6-7-1z"/><path d="M-11 -18l-2 11M2 -18v11M14 -18l2 11" fill="none"/><path fill="#b9d5c0" d="M-17 7h14v9h-14zm22 0h11v17H5z"/></g>
+<g id="hub" stroke="#57476a" stroke-width="2.2" stroke-linejoin="round"><rect x="-27" y="-20" width="54" height="39" rx="6" fill="#fff"/><path d="M-26 -10h52" fill="none"/><circle cx="-20" cy="-15" r="1" /><circle cx="-15" cy="-15" r="1"/><path d="M-19 -3h8m-8 6h8m-8 6h8" fill="none"/><rect x="-5" y="-4" width="22" height="15" rx="2" fill="#dacbf0"/></g>
+<g id="cat" stroke="#3b5934" stroke-width="2.3" stroke-linejoin="round"><path d="M-21 3l-2-22 16 9q7-3 14 0l15-11-1 23q6 19-20 21-26-1-22-20z" fill="#bcdf85"/><path fill="#edb6ac" stroke="none" d="M-19-13l8 5-7 3zm31 4 7-5-1 9z"/><circle cx="-8" cy="3" r="1.5"/><circle cx="9" cy="3" r="1.5"/><path d="M-4 10l4 3 4-3m-23-2-8-2m46 3 8-2" fill="none"/></g>
+</defs><rect width="100%" height="100%" fill="url(#dots)"/><g id="roads"></g><g id="route"></g><g id="roles"></g><g id="packet"></g></svg>
+<div class="caption"><span class="eyebrow" id="stage"></span><h2 id="title"></h2><p id="facts" class="muted"></p></div></section>
+<div class="rail"><span id="pos"></span><input id="seek" type="range" min="0" value="0" step="0.01" aria-label="动画进度"><span id="total"></span></div>
+<div class="controls"><button id="play">播放</button><button id="prev">上一幕</button><button id="next">下一幕</button><label>速度 <select id="speed"><option>0.5</option><option selected>1</option><option>2</option></select> ×</label></div>
+<details class="details"><summary>本幕记录</summary><ul id="records"></ul></details>
+</main><script id="data" type="application/json">__EPISODE__</script><script>
+"use strict";
+const data = JSON.parse(document.getElementById("data").textContent);
+const el = id => document.getElementById(id);
+const money = x => x === null ? "未知" : String(x);
+const scenes = [];
+for (const frame of data.frames) {
+  const add = (phase, title, facts, records, from, to, label) =>
+    scenes.push({frame,phase,title,facts,records,from,to,label});
+  const items = frame.customers.flatMap(c => c.items || []);
+  for (const s of frame.sellers) {
+    const records = s.prices.map(p => p.title+"　"+money(p.before)+" → "+money(p.after));
+    const title = s.wait ? "本轮不行动" : records.length ? "调整 "+records.length+" 件商品价格" : "保持现有价格";
+    add("01　商家定价","商家 #"+s.id+" · "+title,records[0] || "本轮展示沿用已有价格。",records,"s"+s.id,records.length?"platform":null,"新价格");
+  }
+  for (const c of frame.customers) {
+    const actor = "c"+c.id;
+    if (c.action !== "search") {
+      add("02　顾客行动","顾客 #"+c.id+(c.action==="exit"?" 退出":" 等待"),"本轮没有发起搜索。",[],actor,null,"");
+      continue;
+    }
+    add("02　顾客搜索","顾客 #"+c.id+" 提交搜索","“"+c.query+"”",["请求 #"+c.request],actor,"platform","搜索词");
+    const list = c.items.map((i,n) => (n+1)+". "+i.title+"　· 商家 #"+i.shop+"　· 价格 "+money(i.price));
+    add("03　平台展示","平台向顾客 #"+c.id+" 返回 "+list.length+" 件商品",list[0]?"首位商品　"+c.items[0].title:"本次列表为空。",list,"platform",actor,"商品列表");
+    const selected = c.items.filter(i=>i.click||i.buy);
+    add("04　顾客反馈","顾客 #"+c.id+(selected.length?" 作出商品选择":" 看过列表，本次没有选择"),
+        "点击 "+c.items.filter(i=>i.click).length+" 件 · 购买记录 "+c.items.filter(i=>i.buy).length+" 条",
+        selected.map(i=>i.title+"　"+[i.click?"点击":"",i.buy?"购买":""].filter(Boolean).join("、")),actor,"platform","选择结果");
+  }
+  for (const s of frame.sellers) {
+    const rows=items.filter(i=>i.shop===s.id);
+    const summary=rows.length+" 次曝光 · "+rows.filter(i=>i.click).length+" 次点击 · "+rows.filter(i=>i.buy).length+" 条购买";
+    add("05　按店结算","商家 #"+s.id+" 的本轮反馈",summary,
+      ["覆盖 "+new Set(rows.map(i=>i.id)).size+" 件本店商品。","已结算反馈供后续商家决策读取。"],rows.length?"platform":"s"+s.id,rows.length?"s"+s.id:null,"经营反馈");
+  }
+}
+const ns="http://www.w3.org/2000/svg";
+function svg(parent,name,attrs,text){
+  const node=document.createElementNS(ns,name);
+  for(const [key,val] of Object.entries(attrs)) node.setAttribute(key,val);
+  if(text!==undefined) node.textContent=text;
+  parent.append(node);
+  return node;
+}
+let nodes=new Map(), paths=new Map(), token=null, wire=null, shown=-1, tick=null;
+function arrange(frame){
+  nodes.clear(); paths.clear(); el("roads").replaceChildren(); el("roles").replaceChildren();
+  const height=Math.max(224,Math.max(frame.sellers.length,frame.customers.length)*87+28);
+  const center=height/2;
+  el("scene").setAttribute("viewBox","0 0 720 "+height);
+  function role(key,x,y,symbol,label,color){
+    const g=svg(el("roles"),"g",{class:"node",transform:"translate("+x+" "+y+")"});
+    svg(g,"rect",{class:"plate",x:-61,y:-36,width:122,height:72,rx:14});
+    svg(g,"ellipse",{cx:0,cy:-4,rx:31,ry:22,fill:color});
+    svg(g,"use",{href:"#"+symbol,transform:"translate(0 -8) scale(.79)"});
+    svg(g,"text",{y:24,"text-anchor":"middle","font-size":14,"font-weight":700},label);
+    nodes.set(key,g);
+  }
+  role("platform",360,center,"hub","平台", "#e0d8fa");
+  function flank(actors,prefix,x,symbol,label,color){
+    actors.forEach((a,i)=>{
+      const y=center+(i-(actors.length-1)/2)*87;
+      const d=x<360?"M170 "+y+" C238 "+y+" 239 "+center+" 295 "+center:"M550 "+y+" C486 "+y+" 482 "+center+" 425 "+center;
+      const key=prefix+a.id;
+      paths.set(key,svg(el("roads"),"path",{class:"road",d}));
+      role(key,x,y,symbol,label+" #"+a.id,color);
+    });
+  }
+  flank(frame.sellers,"s",107,"shop","商家","#f8cd79");
+  flank(frame.customers,"c",613,"cat","顾客","#c7dfae");
+}
+let position=0,playing=false,lastTime=null,raf=0;
+const reduced=matchMedia("(prefers-reduced-motion: reduce)").matches;
+function draw(){
+  const index=Math.min(Math.floor(position),scenes.length-1);
+  const scene=scenes[index];
+  if(!scene)return;
+  if(tick!==scene.frame.tick){arrange(scene.frame);tick=scene.frame.tick;}
+  if(shown!==index){
+    shown=index;
+    const {frame,phase,title,facts,records,from,to,label}=scene;
+    el("tick").textContent="Tick "+frame.tick;
+    el("clock").textContent="逻辑时间 "+frame.time;
+    el("stage").textContent=phase;el("title").textContent=title;el("facts").textContent=facts;
+    el("records").replaceChildren();
+    for(const row of records.length?records:[facts]){const li=document.createElement("li");li.textContent=row;el("records").append(li);}
+    for(const [key,node] of nodes) node.setAttribute("class","node "+(key===from||key===to?"active":"dim"));
+    el("route").replaceChildren();el("packet").replaceChildren();token=null;wire=null;
+    if(to){
+      const source=paths.get(from==="platform"?to:from);
+      wire=svg(el("route"),"path",{class:"wire",d:source.getAttribute("d"),pathLength:1});
+      token=svg(el("packet"),"g",{});
+      svg(token,"rect",{class:"parcel",x:-30,y:-10,width:60,height:20,rx:10});
+      svg(token,"text",{class:"parcelText","text-anchor":"middle",y:4},label);
+    }
+    el("pos").textContent="第 "+(index+1)+" 幕";
+    el("prev").disabled=index===0;el("next").disabled=index===scenes.length-1;
+  }
+  if(token){
+    const progress=reduced?.5:Math.min(1,Math.max(0,(position-index-.08)/.78));
+    const along=scene.from==="platform"?1-progress:progress;
+    const point=wire.getPointAtLength(along*wire.getTotalLength());
+    token.setAttribute("transform","translate("+point.x+" "+point.y+")");
+    wire.setAttribute("stroke-dasharray",progress+" 1");
+    wire.setAttribute("stroke-dashoffset",scene.from==="platform"?progress-1:0);
+  }
+  el("seek").value=position;
+}
+function pause(){playing=false;cancelAnimationFrame(raf);el("play").textContent=position===scenes.length?"重播":"播放";}
+function advance(now){
+  if(!playing)return;
+  if(lastTime!==null)position=Math.min(scenes.length,position+(now-lastTime)*Number(el("speed").value)/2800);
+  lastTime=now;draw();
+  if(position>=scenes.length)pause();else raf=requestAnimationFrame(advance);
+}
+function play(){
+  if(position>=scenes.length)position=0;
+  playing=true;lastTime=null;el("play").textContent="暂停";raf=requestAnimationFrame(advance);
+}
+function go(point){position=Math.max(0,Math.min(point,scenes.length));pause();draw();}
+el("play").onclick=()=>playing?pause():play();
+el("prev").onclick=()=>go(shown-1);el("next").onclick=()=>go(shown+1);
+el("seek").oninput=e=>go(Number(e.target.value));
+document.addEventListener("visibilitychange",()=>{if(document.hidden&&playing)pause();});
+el("meta").textContent=data.dataset+" · "+({random:"随机召回与排序",bm25:"BM25 搜索"}[data.backend]||data.backend)+" · "+data.frames.length+" 个已完成 Tick";
+el("seek").max=scenes.length;el("total").textContent="共 "+scenes.length+" 幕";
+if(scenes.length){draw();if(!reduced)play();}else{
+  el("title").textContent="暂无已完成的 Tick";
+  for(const id of ["play","prev","next","seek"])el(id).disabled=true;
+}
+</script></body></html>

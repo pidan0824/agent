@@ -1,0 +1,169 @@
+"""Share preparation, not stage-specific ranking or mutable model inputs."""
+from copy import deepcopy
+import unittest
+from unittest.mock import patch
+
+from agent_simulation.datasets.samples.customer import sample_from_request
+from agent_simulation.agents.retrieval.history import prepare_customer_history, customer_history
+from agent_simulation.agents.retrieval.retrieval_text import event_text
+
+
+class Encoder:
+    def __init__(self):
+        self.documents, self.queries = [], []
+
+    def __call__(self, text):
+        self.documents.append(text)
+        return [1., float(len(text) % 7 + 1)]
+
+    def encode_query(self, text):
+        self.queries.append(text)
+        return [1., 2. if text == '保温杯' else 3.]
+
+
+def request():
+    events = [dict(user_id=7,session_id=i,time_index=i,query=f'旧搜索{i}',
+                   clicked_items=[],purchased_items=[]) for i in range(1,41)]
+    return dict(query_input={'profile':{'user_id':7},'history_cutoff_exclusive':50,
+                            'short_term_memory':{'search_history':events},
+                            'provenance':{'request_ids':list(range(1,41))}},
+                query_target={'query':'保温杯'},assigned_split='train',
+                response_input={'displayed_items':[{'item_id':101,'item_title':'保温杯'}]},
+                response_target={'clicked_item_ids':[101],'purchased_item_ids':[]})
+
+
+class SharedCustomerHistoryTests(unittest.TestCase):
+    def test_response_batches_share_formatting_but_not_mutable_input_or_labels(self):
+        from agent_simulation.datasets.samples.customer import split_supervision
+        from agent_simulation.agents.prompts.customer import factor_history, messages
+        source = request()
+        source['response_input']['displayed_items'] = [
+            {'item_id': i, 'item_title': '保温杯'} for i in range(101, 230)]
+        _, response = sample_from_request('fixture', 50, source, history_embedder=Encoder(), render=False)
+        with patch('agent_simulation.agents.prompts.customer.factor_history', wraps=factor_history) as factor:
+            batches = split_supervision(response)
+        self.assertEqual(factor.call_count, 1)
+        for batch in batches:
+            self.assertEqual(batch['messages'], messages(batch['input'], batch['target'], response=True))
+            self.assertEqual(batch['batching']['request_weight'], 1 / len(batches))
+        expected = deepcopy(batches[1]['input'])
+        batches[0]['input']['short_term_memory']['search_history'][0]['query'] = 'changed'
+        self.assertEqual(batches[1]['input'], expected)
+
+    def test_consecutive_decisions_only_prepare_newly_evicted_events(self):
+        events = request()['query_input']['short_term_memory']['search_history']
+        encoder = Encoder()
+        with patch('agent_simulation.agents.retrieval.history.event_text', wraps=event_text) as render:
+            prepared = prepare_customer_history(events[:20], (), cutoff=21, recent_n=10, user_id=7)
+            prepared.retrieve(embedder=encoder)
+            self.assertEqual((render.call_count, len(encoder.documents)), (10, 10))
+            prepared.update(events[:21], (), cutoff=22)
+            actual = prepared.retrieve('保温杯', embedder=encoder)
+            self.assertEqual((render.call_count, len(encoder.documents)), (11, 11))
+            prepared.update(events[:21], (), cutoff=23)
+            prepared.retrieve('手机', embedder=encoder)
+            self.assertEqual((render.call_count, len(encoder.documents)), (11, 11))
+        cold = prepare_customer_history(events[:21], (), cutoff=22, recent_n=10, user_id=7)
+        self.assertEqual(actual, cold.retrieve('保温杯', embedder=Encoder()))
+
+    def test_corrections_and_rewind_invalidate_candidates_without_stale_facts(self):
+        events = request()['query_input']['short_term_memory']['search_history']
+        prepared = prepare_customer_history(events, (), cutoff=50, recent_n=10, user_id=7)
+        corrected = deepcopy(events)
+        corrected[0]['query'] = '修正搜索'
+        prepared.update(corrected, (), cutoff=50)
+        self.assertEqual(prepared.candidates[0]['records'][0]['query'], '修正搜索')
+        simulated = [dict(user_id=7, settled_step=1, query='仿真', clicked_items=[], purchased_items=[])]
+        prepared.update(corrected, simulated, cutoff=50, simulation_before=2)
+        cold = prepare_customer_history(corrected, simulated, cutoff=50, recent_n=10, user_id=7, simulation_before=2)
+        self.assertEqual(prepared.retrieve(embedder=None), cold.retrieve(embedder=None))
+        prepared.update(events[:15], (), cutoff=16)
+        cold = prepare_customer_history(events[:15], (), cutoff=16, recent_n=10, user_id=7)
+        self.assertEqual(prepared.retrieve(embedder=None), cold.retrieve(embedder=None))
+
+    def test_append_only_stream_reads_new_suffix_and_matches_full_snapshot(self):
+        events = request()['query_input']['short_term_memory']['search_history']
+        prepared = prepare_customer_history(events[:20], (), cutoff=21, recent_n=10, user_id=7)
+
+        class NewSuffixOnly(list):
+            def __getitem__(self, key):
+                if isinstance(key, slice) and (key.start or 0) < 20:
+                    raise AssertionError("Append-only update reread a stored prefix")
+                return super().__getitem__(key)
+
+        prepared.update(NewSuffixOnly(events[:21]), (), cutoff=22, append_only=True)
+        cold = prepare_customer_history(events[:21], (), cutoff=22, recent_n=10, user_id=7)
+        self.assertEqual(prepared.recent_history(), cold.recent_history())
+        self.assertEqual(prepared.retrieve(embedder=None), cold.retrieve(embedder=None))
+        before = prepared.retrieve(embedder=None)
+        for history, cutoff in ((events[:20], 22), (events[:22], 22)):
+            with self.assertRaises(ValueError):
+                prepared.update(history, (), cutoff=cutoff, append_only=True)
+            self.assertEqual(prepared.retrieve(embedder=None), before)
+        # Inserting observed events before existing simulated history must rebuild.
+        simulated = [dict(user_id=7, settled_step=1, query='仿真', clicked_items=[], purchased_items=[])]
+        prepared.update(events[:21], simulated, cutoff=23, simulation_before=2, append_only=True)
+        prepared.update(events[:22], simulated, cutoff=23, simulation_before=2, append_only=True)
+        cold = prepare_customer_history(events[:22], simulated, cutoff=23, recent_n=10,
+                                        user_id=7, simulation_before=2)
+        self.assertEqual(prepared.recent_history(), cold.recent_history())
+        self.assertEqual(prepared.retrieve(embedder=None), cold.retrieve(embedder=None))
+
+    def test_pair_prepares_once_and_encodes_documents_once(self):
+        source=request();encoder=Encoder()
+        with patch('agent_simulation.datasets.samples.customer.prepare_customer_history',wraps=prepare_customer_history) as prepare, \
+             patch('agent_simulation.agents.retrieval.history.event_text',wraps=event_text) as render:
+            query,response=sample_from_request('fixture',50,source,history_embedder=encoder)
+        self.assertEqual(prepare.call_count,1)
+        self.assertEqual(render.call_count,30)
+        self.assertEqual(len(encoder.documents),30)
+        self.assertEqual(len(encoder.queries),2)
+        self.assertNotIn('保温杯',encoder.queries[0])
+        self.assertEqual(encoder.queries[1],'保温杯')
+        for stage,index in [('query',0),('response',1)]:
+            standalone=sample_from_request('fixture',50,source,stage=stage,history_embedder=Encoder())
+            self.assertEqual(standalone[index],(query,response)[index])
+
+    def test_deferred_rendering_only_builds_the_final_query_and_response_messages(self):
+        from agent_simulation.datasets.samples.customer import split_supervision
+        from agent_simulation.datasets.labels import expand_record
+        from agent_simulation.agents.prompts.customer import encode_input
+        source = request()
+        source['response_input']['displayed_items'] = [
+            {'item_id':i,'item_title':f'商品{i}'} for i in range(101,230)]
+        eager_query, eager_response = sample_from_request('fixture',50,source,history_embedder=Encoder())
+        expected = split_supervision(eager_response)
+        with patch('agent_simulation.agents.prompts.customer.encode_input', wraps=encode_input) as render:
+            query,response = sample_from_request('fixture',50,source,history_embedder=Encoder(),render=False)
+            self.assertNotIn('messages',query)
+            self.assertNotIn('messages',response)
+            render.assert_not_called()
+            actual = list(expand_record('customer', (query, response)))
+        self.assertEqual(render.call_count, len(actual))
+        self.assertEqual(actual, [eager_query, *expected])
+
+    def test_response_query_cannot_change_query_input_or_label_independent_history(self):
+        source=request();original=deepcopy(source)
+        first=sample_from_request('fixture',50,source,history_embedder=Encoder())
+        changed=deepcopy(source);changed['query_target']={'query':'手机壳'}
+        changed['response_target']={'clicked_item_ids':[],'purchased_item_ids':[101]}
+        second=sample_from_request('fixture',50,changed,history_embedder=Encoder())
+        self.assertEqual(first[0]['input'],second[0]['input'])
+        self.assertEqual(first[0]['messages'][:-1],second[0]['messages'][:-1])
+        self.assertEqual(source,original)
+        first[0]['input']['short_term_memory']['search_history'][0]['query']='mutated'
+        self.assertNotEqual(first[0]['input']['short_term_memory'],first[1]['input']['short_term_memory'])
+
+    def test_ranked_results_do_not_mutate_the_shared_pool(self):
+        events=request()['query_input']['short_term_memory']['search_history']
+        prepared=prepare_customer_history(events,(),cutoff=50,recent_n=30,user_id=7)
+        first=prepared.retrieve('保温杯',embedder=None)
+        expected=deepcopy(first)
+        first['segments'][0]['records'][0]['query']='mutated'
+        self.assertEqual(prepared.retrieve('保温杯',embedder=None),expected)
+        self.assertTrue(all('search_text' in row and 'match' not in row for row in prepared.candidates))
+        with self.assertRaisesRegex(ValueError,'snapshot differs'):
+            customer_history(events,(),cutoff=51,recent_n=30,user_id=7,prepared=prepared)
+
+
+if __name__=='__main__':unittest.main()

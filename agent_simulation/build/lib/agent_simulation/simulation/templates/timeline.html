@@ -1,0 +1,127 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>市场回放 · 电商仿真沙箱</title>
+<style>
+:root{color-scheme:light;--ink:#162e32;--muted:#496568;--teal:#006e64;--line:#cddbd5;--paper:#f6f7f1;--sand:#fffdf6}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.65 system-ui,"PingFang SC",sans-serif}main{max-width:1080px;margin:auto;padding:0 28px 56px}header{border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;padding:19px 0;font-size:13px}.brand{display:flex;gap:9px;align-items:center;font-weight:700}.mark{width:16px;height:16px;border:4px solid var(--teal);border-radius:50%;box-shadow:4px -3px 0 #e9ae56}h1{font-size:clamp(32px,5vw,51px);letter-spacing:-.055em;margin:8px 0 5px;line-height:1.2}h2,h3,h4,p{margin:0}h2{font-size:23px}h3{font-size:18px}h4{font-size:15px}.over{font:700 11px/1.4 ui-monospace,monospace;letter-spacing:.13em;color:var(--teal)}.hero{padding:30px 0 24px}.meta,.detail{color:var(--muted);font-size:14px}.meta{margin-top:10px}.transport{border-radius:15px;background:#183c3b;color:white;padding:18px 23px;margin-bottom:22px}.transport .row{display:flex;align-items:center;gap:12px}.time{margin-left:auto;font:14px ui-monospace,monospace}.control,.phase{border:1px solid #91aaa8;border-radius:7px;background:transparent;color:inherit;padding:7px 13px;font:inherit;cursor:pointer}.control:disabled,.phase:disabled{opacity:.4;cursor:default}#play{background:#d5f1d5;border-color:#d5f1d5;color:#173a37;font-weight:700}.scale{display:flex;align-items:center;gap:15px;margin-top:15px;font-size:12px;color:#d1dfda}.scale{white-space:nowrap}.scale input{flex:1;min-width:0;accent-color:#b5e7c4;cursor:pointer}.phasebar{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 22px}.phase{background:white;color:var(--muted);border-color:var(--line)}.phase[aria-pressed=true]{border-color:var(--teal);background:#e1efe6;color:#034f47;font-weight:700}.intro{margin:8px 0 18px}.layout{display:grid;grid-template-columns:minmax(0,1fr) 255px;gap:20px}.card,aside{padding:20px 22px;background:white;border:1px solid var(--line);border-radius:12px}.card+.card{margin-top:12px}aside{align-self:start;background:#f0f3e9}aside h3{margin:4px 0 12px}aside p{font-size:14px;color:var(--muted)}.tag{display:inline-block;background:#eaf2ea;border-radius:4px;padding:2px 7px;color:#205c4e;font-size:12px}.cardtitle{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.item{border-top:1px solid #e3e9e4;padding:8px 0;display:flex;align-items:baseline;gap:10px}.item b{font:12px ui-monospace,monospace;color:var(--muted);min-width:22px}.item span:first-of-type{flex:1;overflow-wrap:anywhere}.num{font:600 14px ui-monospace,monospace;white-space:nowrap}.sum{display:flex;gap:18px;flex-wrap:wrap;margin:12px 0}.metric{display:grid;color:var(--muted);font-size:12px}.metric strong{font:600 25px ui-monospace,monospace;color:var(--ink)}details{margin-top:9px}summary{color:var(--teal);cursor:pointer}.query{font-size:18px;font-weight:650;overflow-wrap:anywhere}button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid #d99835;outline-offset:3px}footer{margin-top:28px;color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding-top:12px}
+@media(max-width:700px){main{padding:0 14px 32px}.hero{padding:20px 0}.layout{grid-template-columns:1fr}.transport{padding:12px}.transport .row{gap:6px}.control,.phase{padding:6px 9px}.time{font-size:11px}.card,aside{padding:15px}.item{flex-wrap:wrap}.item span:first-of-type{min-width:65%}.phasebar{gap:5px}}
+</style></head><body><main>
+<header><span class="brand"><i class="mark"></i>电商仿真沙箱</span><span id="mode"></span></header>
+<div class="hero"><div class="over">MARKET REPLAY</div><h1>顾客与商家的仿真时间轴</h1><p class="meta" id="meta"></p></div>
+<section class="transport" aria-label="回放控制"><div class="row"><button class="control" id="play">播放</button><button class="control" id="prev">上一步</button><button class="control" id="next">下一步</button><span class="time" id="time"></span></div>
+<label class="scale">起点<input id="scrub" type="range" min="0" value="0" aria-label="选择回放位置">终点</label></section>
+<div class="phasebar" id="phases"></div><div class="over" id="index"></div><h2 id="headline" aria-live="polite"></h2><p class="intro detail" id="intro"></p>
+<div class="layout"><div id="cards"></div><aside><div class="over">EPISODE NOTES</div><h3>如何读这条时间轴</h3><p>每个 Tick，商家先根据此前已结算的反馈决定价格。平台按生效价格展示商品，顾客完成选择后，环境按店铺汇总本次反馈。</p><p style="margin-top:12px">时间索引表示仿真顺序。价格保留记录中的数值，购买按记录计数。</p><p class="meta" id="end"></p></aside></div><footer>数据来自本地 Episode 已完成的 Tick。展示顺序取自该次仿真返回的列表。</footer>
+</main><script type="application/json" id="data">__EPISODE__</script>
+<script>
+"use strict";
+const live = __LIVE__, $ = id => document.getElementById(id), phases = ["商家定价", "顾客搜索与选择", "经营反馈结算"];
+let data = JSON.parse($("data").textContent), step = 0, timer = null;
+const count = () => data.frames.length * 3;
+function element(name, text, cls) { const e = document.createElement(name); if (text != null)
+    e.textContent = text; if (cls)
+    e.className = cls; return e; }
+function stop() { clearInterval(timer); timer = null; $("play").textContent = "播放"; }
+function move(to) { stop(); step = Math.max(0, Math.min(to, count() - 1)); render(); }
+function card(title, badge) { const box = element("article", null, "card"), row = element("div", null, "cardtitle"); row.append(element("h3", title), element("span", badge, "tag")); box.append(row); $("cards").append(box); return box; }
+function metric(box, labels, values) { const row = element("div", null, "sum"); labels.forEach((v, i) => { const m = element("span", null, "metric"); m.append(element("strong", values[i]), document.createTextNode(v)); row.append(m); }); box.append(row); }
+function itemLine(parent, n, title, tail) { const row = element("div", null, "item"); row.append(element("b", n), element("span", title), element("span", tail, "num")); parent.append(row); }
+const value = x => x == null ? "未知" : String(x);
+function itemsOf(frame) { return frame ? frame.customers.flatMap(c => c.items || []) : []; }
+function totals(rows) { return [rows.length, rows.reduce((n, x) => n + x.click, 0), rows.reduce((n, x) => n + x.buy, 0)]; }
+function render() {
+    const last = count() - 1, frame = data.frames[Math.floor(step / 3)], phase = step % 3;
+    $("mode").textContent = live ? "本机实时回放" : "本地日志回放";
+    $("meta").textContent = data.dataset + "　/　" + ({ bm25: "BM25 搜索", random: "随机召回与排序" }[data.backend] || data.backend) + "　/　已完成 " + data.frames.length + " 个 Tick";
+    $("end").textContent = "运行状态 · " + ({ max_ticks: "已达到设定终点", all_customers_exited: "全部顾客已退出" }[data.end] || ({ failed: "运行失败，仅展示已结算轮次", running: "正在执行", ready: "等待下一轮" }[data.status] || data.status));
+    $("scrub").max = Math.max(0, last);
+    $("scrub").value = step;
+    $("scrub").disabled = !frame;
+    $("prev").disabled = step === 0;
+    $("next").disabled = step >= last;
+    $("play").disabled = !frame;
+    $("phases").replaceChildren();
+    $("cards").replaceChildren();
+    if (!frame) {
+        $("headline").textContent = "等待首个 Tick 完成";
+        $("index").textContent = $("time").textContent = $("intro").textContent = "";
+        return;
+    }
+    phases.forEach((s, i) => { const b = element("button", "0" + (i + 1) + "　" + s, "phase"); b.setAttribute("aria-pressed", String(i === phase)); b.onclick = () => move(step - phase + i); $("phases").append(b); });
+    $("time").textContent = "Tick " + frame.tick + " · " + frame.time;
+    $("index").textContent = "TICK " + String(frame.tick).padStart(2, "0") + "　/　阶段 " + (phase + 1) + " OF 3";
+    $("headline").textContent = phases[phase];
+    $("intro").textContent = ["先看各店收到的上一轮反馈，再看本轮生效的价格。", "按顾客查看搜索词、实际展示顺序和选择结果。", "本轮全部顾客完成选择后，按展示商品所属店铺归集。"][phase];
+    if (phase === 0) {
+        const previous = data.frames[Math.floor(step / 3) - 1];
+        for (const s of frame.sellers) {
+            const b = card("商家 #" + s.id, s.wait ? "本轮不行动" : s.prices.length ? "提交价格" : "价格保持");
+            if (previous) {
+                const t = totals(itemsOf(previous).filter(x => x.shop === s.id));
+                b.append(element("p", "上轮反馈　曝光 " + t[0] + " · 点击 " + t[1] + " · 购买 " + t[2], "detail"));
+            }
+            else {
+                b.append(element("p", "首次决策使用截止点前的历史。", "detail"));
+            }
+            for (const p of s.prices)
+                itemLine(b, "#", p.title + " · " + p.id, value(p.before) + " → " + value(p.after));
+        }
+    }
+    if (phase === 1) {
+        for (const c of frame.customers) {
+            const b = card("顾客 #" + c.id, { search: "发起搜索", exit: "主动退出", no_action: "本轮等待" }[c.action]);
+            if (c.action !== "search")
+                continue;
+            b.append(element("p", c.query, "query"));
+            metric(b, ["展示商品", "点击记录", "购买记录"], totals(c.items));
+            const d = element("details");
+            d.append(element("summary", "查看展示列表 · 请求 #" + c.request));
+            c.items.forEach((x, i) => itemLine(d, i + 1, x.title + " · 店 " + x.shop, "价 " + value(x.price) + "　" + ([x.click ? "点击" : "", x.buy ? "购买" : ""].filter(Boolean).join(" / ") || "未选")));
+            b.append(d);
+        }
+    }
+    if (phase === 2) {
+        const items = itemsOf(frame);
+        for (const s of frame.sellers) {
+            const b = card("商家 #" + s.id, "已结算"), own = items.filter(x => x.shop === s.id);
+            metric(b, ["曝光记录", "点击记录", "购买记录"], totals(own));
+            const reqs = frame.customers.filter(c => (c.items || []).some(i => i.shop === s.id)).map(c => "#" + c.request);
+            b.append(element("p", reqs.length ? "来自搜索请求 " + reqs.join("、") : "本店本轮没有商品获得展示。", "detail"));
+        }
+    }
+}
+$("prev").onclick = () => move(step - 1);
+$("next").onclick = () => move(step + 1);
+$("scrub").oninput = e => move(Number(e.target.value));
+$("play").onclick = () => { if (timer) {
+    stop();
+    return;
+} if (step === count() - 1)
+    step = 0; render(); $("play").textContent = "暂停"; timer = setInterval(() => { if (step >= count() - 1) {
+    stop();
+    return;
+} step++; render(); if (step === count() - 1)
+    stop(); }, 2200); };
+render();
+async function poll() { try {
+    const r = await fetch("/episode", { headers: { "If-None-Match": '"' + data.stamp + '"' } });
+    if (r.status === 200) {
+        const d = await r.json();
+        const following = step === Math.max(0, count() - 1);
+        data = d;
+        if (following)
+            step = Math.max(0, count() - 1);
+        render();
+    }
+    else if (r.status !== 304) {
+        throw new Error("unavailable");
+    }
+}
+catch {
+    $("mode").textContent = "连接中断 · 保留上次回放";
+}
+finally {
+    if (!["complete", "failed"].includes(data.status))
+        setTimeout(poll, 2500);
+} }
+if (live && !["complete", "failed"].includes(data.status))
+    setTimeout(poll, 2500);
+</script></body></html>
