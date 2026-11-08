@@ -212,6 +212,35 @@ class LoRATrainingTests(unittest.TestCase):
         )
         return BehaviorTrainer(model=model, args=args)
 
+    def test_loss_parts_add_up_and_train_evaluation_does_not_update_weights(self):
+        batch = tensor_batch()
+        batch["answer_parts"] = torch.tensor([[-1, -1, 0, 1], [-1, -1, 2, -1]])
+        batch["stages"] = torch.tensor([1, 1])
+        rows = [{k: v[i] for k, v in batch.items()} for i in range(2)]
+        def collator(items):
+            return {k: torch.stack([row[k] for row in items]) for k in batch}
+        collator.loss_breakdown = True
+        with tempfile.TemporaryDirectory() as folder:
+            model = tiny_model()
+            trainer = self.trainer(model, folder)
+            trainer.data_collator = collator
+            trainer.eval_dataset = rows
+            trainer.train_evaluation_data = rows
+            before = {k: v.detach().clone() for k, v in model.named_parameters()}
+            metrics = trainer.evaluate()
+            for prefix in ("eval_response", "train_eval_response"):
+                self.assertEqual(metrics[prefix + "_rows"], 2)
+                self.assertEqual(metrics[prefix + "_weight"], 1.25)
+                for part in ("structure", "click_id", "purchase_id"):
+                    self.assertEqual(metrics[f"{prefix}_{part}_tokens"], 1)
+                self.assertAlmostEqual(metrics[prefix + "_answer_loss"], sum(
+                    metrics[f"{prefix}_{part}_loss_contribution"]
+                    for part in ("structure", "click_id", "purchase_id")), places=6)
+            self.assertAlmostEqual(metrics["eval_loss"] * 2 / 1.25, metrics["eval_response_answer_loss"], places=5)
+            self.assertTrue(any("train_eval_response_purchase_id_token_loss" in r for r in trainer.state.log_history))
+            for name, value in model.named_parameters():
+                torch.testing.assert_close(value, before[name])
+
     def test_answer_mask_and_weights_match_hand_computation(self):
         logits = torch.tensor([[[2.0, 0.0], [0.0, 2.0]], [[1.0, 0.0], [2.0, 0.0]]])
         target = torch.tensor([[0, 1], [1, -100]])

@@ -2,6 +2,8 @@
 
 
 import json
+import re
+import numpy as np
 import random
 import sys
 import time
@@ -123,9 +125,10 @@ def _buffered_shuffle(source, size, rng):
 class TokenStream(torch.utils.data.IterableDataset):
     """Read prepared NPZ shards in deterministic epoch order."""
 
-    def __init__(self, root, role, split, *, seed=42, shuffle_buffer=0, verify=False):
+    def __init__(self, root, role, split, *, seed=42, shuffle_buffer=0, verify=False, stage=None):
         super().__init__()
         self.root, self.seed, self.epoch = root / role / split, seed, 0
+        self.stage = stage
         self.shuffle_buffer = shuffle_buffer
         spec = json.loads((root / "identity.json").read_text())
         self.files = []
@@ -141,7 +144,11 @@ class TokenStream(torch.utils.data.IterableDataset):
                 if verify:
                     require(sha256(path) == f["sha256"], "Changed token shard: " + str(path))
                 self.files.append(path)
-                self.size += f["rows"]
+                if stage is None:
+                    self.size += f["rows"]
+                else:
+                    with np.load(path, allow_pickle=False) as shard:
+                        self.size += sum(str(sid).startswith(stage + ":") for sid in shard["ids"])
 
     def __len__(self):
         return self.size
@@ -155,7 +162,8 @@ class TokenStream(torch.utils.data.IterableDataset):
         files = list(self.files)
         if self.shuffle_buffer:
             rng.shuffle(files)
-        rows = (sample for path in files for sample in read_shard(path))
+        rows = (sample for path in files for sample in read_shard(path)
+                if self.stage is None or sample.sample_id.startswith(self.stage + ":"))
         yield from _buffered_shuffle(rows, self.shuffle_buffer, rng)
 
 
@@ -177,11 +185,27 @@ class EvaluationStream(torch.utils.data.IterableDataset):
                     yield sample
 
 
+def response_token_parts(tokenizer, tokens):
+    """0: structure (including terminator), 1: click ID, 2: purchase ID."""
+    text = tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+    encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    if encoded["input_ids"] != list(tokens):
+        raise ValueError("Cannot align answer tokens for loss breakdown")
+    spans = []
+    for field in re.finditer(r'"(clicked_item_ids|purchased_item_ids)"\s*:\s*\[([^]]*)\]', text):
+        part = 1 if field[1] == "clicked_item_ids" else 2
+        spans.extend((field.start(2) + m.start(), field.start(2) + m.end(), part)
+                     for m in re.finditer(r"\d+", field[2]))
+    return [next((part for left, right, part in spans if start < right and end > left), 0)
+            for start, end in encoded["offset_mapping"]]
+
+
 class TensorCollator:
     """Keep IDs and provenance outside model kwargs; preserve request weights."""
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, *, loss_breakdown=False):
         self.tokenizer = tokenizer
+        self.loss_breakdown = loss_breakdown
 
     def __call__(self, samples):
         if isinstance(samples[0], PreparedRow):
@@ -194,8 +218,19 @@ class TensorCollator:
                 ids[i, :n] = torch.from_numpy(sample.tokens)
                 mask[i, :n] = 1
                 labels[i, start:n] = ids[i, start:n]
-            return {"input_ids": ids, "attention_mask": mask, "labels": labels,
-                    "sample_weights": torch.tensor([s.weight for s in samples], dtype=torch.float32)}
+            result = {"input_ids": ids, "attention_mask": mask, "labels": labels,
+                      "sample_weights": torch.tensor([s.weight for s in samples], dtype=torch.float32)}
+            if self.loss_breakdown:
+                stages = [s.sample_id.split(":", 1)[0] for s in samples]
+                parts = torch.full_like(ids, -1)
+                for i, sample in enumerate(samples):
+                    start, n = sample.answer_start, len(sample.tokens)
+                    values = (response_token_parts(self.tokenizer, sample.tokens[start:])
+                              if stages[i] == "response" else [0] * (n - start))
+                    parts[i, start:n] = torch.tensor(values)
+                result["answer_parts"] = parts
+                result["stages"] = torch.tensor([("query", "response", "seller").index(s) for s in stages])
+            return result
         batch = collate(samples, self.tokenizer)
         result = {
             key: torch.tensor(value, dtype=torch.long)
@@ -211,8 +246,8 @@ def prepare_datasets(args, tokenizer, data_check, eval_split, *, resume_epoch_si
         if args.train_samples or args.data_workers:
             raise ValueError("Use the finished token cache without caps or live workers")
         train_data = TokenStream(args.token_cache, args.role, "train", seed=args.seed,
-                                 shuffle_buffer=args.shuffle_buffer)
-        evaluation_data = TokenStream(args.token_cache, args.role, eval_split)
+                                 shuffle_buffer=args.shuffle_buffer, stage=getattr(args, "stage", None))
+        evaluation_data = TokenStream(args.token_cache, args.role, eval_split, stage=getattr(args, "stage", None))
         return train_data, evaluation_data, len(train_data)
 
     workers = getattr(args, "data_workers", 0)

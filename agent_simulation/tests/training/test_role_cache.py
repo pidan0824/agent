@@ -40,6 +40,30 @@ class RoleCacheTests(unittest.TestCase):
         data = SimpleNamespace(tokenizer=SimpleNamespace(pad_token_id=0))
         return args, data, spec
 
+    def test_stage_filter_preserves_response_weights_and_epoch_order(self):
+        from agent_simulation.training.data_loader import TokenStream
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "identity.json").write_text(json.dumps({"buckets": 1}))
+            args = SimpleNamespace(output=root, reserve_gib=0)
+            writer = RecordWriter(args, "customer", "train", 0, expected=2)
+            for request in (1, 2):
+                writer.add(str(request), [
+                    PreparedRow(f"{stage}:{request}:{batch}", np.array([1, 2, 3], dtype=np.int32), 2, weight)
+                    for stage, batch, weight in (("query", 0, 1.), ("response", 1, .5), ("response", 2, .5))
+                ])
+            writer.finish()
+            query = TokenStream(root, "customer", "train", stage="query")
+            response = TokenStream(root, "customer", "train", stage="response", shuffle_buffer=3)
+            self.assertEqual(len(query), 2)
+            self.assertEqual(len(response), 4)
+            self.assertEqual(sum(r.weight for r in response), 2.)
+            response.set_epoch(2)
+            first = [r.sample_id for r in response]
+            response.set_epoch(2)
+            self.assertEqual(first, [r.sample_id for r in response])
+            self.assertTrue(all(s.startswith("response:") for s in first))
+
     def test_each_complete_role_passes_both_training_entry_checks(self):
         for role in ('customer', 'seller'):
             with self.subTest(role=role), tempfile.TemporaryDirectory() as tmp:

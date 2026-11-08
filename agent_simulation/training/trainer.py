@@ -1,5 +1,6 @@
 """Weighted answer loss, checkpointing and evaluation on the configured selection split."""
 
+import math
 from pathlib import Path
 import torch
 from torch.nn import functional as F
@@ -8,7 +9,7 @@ from transformers import Trainer, TrainerCallback, TrainingArguments
 from agent_simulation.training.data_loader import TensorCollator
 
 
-def answer_losses(logits, targets):
+def answer_losses(logits, targets, *, return_tokens=False):
     """Average token cross-entropy inside each answer, ignoring padding and prompts."""
     valid = targets.ne(-100)
     counts = valid.sum(-1)
@@ -20,7 +21,9 @@ def answer_losses(logits, targets):
         reduction="none",
         ignore_index=-100,
     )
-    return (losses.reshape_as(targets) * valid).sum(-1) / counts
+    tokens = losses.reshape_as(targets)
+    means = (tokens * valid).sum(-1) / counts
+    return (means, tokens) if return_tokens else means
 
 
 class EpochCheckpoint(TrainerCallback):
@@ -60,6 +63,63 @@ class BehaviorTrainer(Trainer):
         super().__init__(*args, **kwargs)
         # This subclass consumes the accumulation denominator, not model.forward.
         self.model_accepts_loss_kwargs = True
+        self._loss_totals = None
+        self.train_evaluation_data = None
+        self.schedule_epochs = None
+
+    def create_scheduler(self, num_training_steps, optimizer=None):
+        if self.schedule_epochs is not None:
+            num_training_steps = math.ceil(num_training_steps * self.schedule_epochs / self.args.num_train_epochs)
+        return super().create_scheduler(num_training_steps, optimizer)
+
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+        metrics = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+        if self.train_evaluation_data is not None and metric_key_prefix == "eval":
+            metrics.update(super().evaluate(self.train_evaluation_data, ignore_keys, "train_eval"))
+        return metrics
+
+    def evaluation_loop(self, *args, metric_key_prefix="eval", **kwargs):
+        self._loss_totals = {} if getattr(self.data_collator, "loss_breakdown", False) else None
+        try:
+            result = super().evaluation_loop(*args, metric_key_prefix=metric_key_prefix, **kwargs)
+            for stage, totals in (self._loss_totals or {}).items():
+                prefix = f"{metric_key_prefix}_{stage}"
+                rows, weight, answer = totals["rows"], totals["weight"], totals["answer"]
+                result.metrics.update({prefix + "_rows": rows, prefix + "_weight": weight,
+                                       prefix + "_answer_loss": answer / weight})
+                if stage == "response":
+                    for part, (tokens, weighted_tokens, loss, contribution) in totals["parts"].items():
+                        result.metrics.update({
+                            f"{prefix}_{part}_tokens": tokens,
+                            f"{prefix}_{part}_weighted_tokens": weighted_tokens,
+                            f"{prefix}_{part}_token_loss": loss / weighted_tokens if weighted_tokens else None,
+                            f"{prefix}_{part}_loss_contribution": contribution / weight,
+                        })
+            return result
+        finally:
+            self._loss_totals = None
+
+    def _record_loss_parts(self, inputs, targets, token_losses, positions):
+        parts = inputs["answer_parts"][:, positions + 1].detach().cpu()
+        valid = targets.ne(-100).detach().cpu()
+        losses = token_losses.detach().double().cpu()
+        for i, (stage, weight) in enumerate(zip(inputs["stages"].tolist(), inputs["sample_weights"].tolist())):
+            stage = ("query", "response", "seller")[stage]
+            totals = self._loss_totals.setdefault(stage, {"rows": 0, "weight": 0., "answer": 0.,
+                "parts": {p: [0, 0., 0., 0.] for p in ("structure", "click_id", "purchase_id")}})
+            count = int(valid[i].sum())
+            totals["rows"] += 1
+            totals["weight"] += weight
+            totals["answer"] += weight * float(losses[i][valid[i]].sum()) / count
+            if stage == "response":
+                for number, name in enumerate(totals["parts"]):
+                    selected = valid[i] & parts[i].eq(number)
+                    n, loss = int(selected.sum()), float(losses[i][selected].sum())
+                    item = totals["parts"][name]
+                    item[0] += n
+                    item[1] += weight * n
+                    item[2] += weight * loss
+                    item[3] += weight * loss / count
 
     def _get_num_items_in_batch(self, batch_samples, device):
         return sum(batch["labels"].shape[0] for batch in batch_samples)
@@ -91,7 +151,12 @@ class BehaviorTrainer(Trainer):
             use_cache=False,
             logits_to_keep=positions,
         )
-        losses = answer_losses(outputs.logits, labels[:, positions + 1])
+        targets = labels[:, positions + 1]
+        if self._loss_totals is not None:
+            losses, tokens = answer_losses(outputs.logits, targets, return_tokens=True)
+            self._record_loss_parts(inputs, targets, tokens, positions)
+        else:
+            losses = answer_losses(outputs.logits, targets)
         denominator = num_items_in_batch if num_items_in_batch is not None else labels.shape[0]
         loss = (losses * weights).sum() / denominator
         return (loss, outputs) if return_outputs else loss
@@ -116,7 +181,7 @@ def make_trainer(model, tokenizer, args, train_data, eval_data, *, evaluate_each
         save_strategy=strategy,
         save_steps=interval,
         logging_steps=1,
-        save_total_limit=2,
+        save_total_limit=getattr(args, "keep_checkpoints", 2) or None,
         save_only_model=False,
         load_best_model_at_end=evaluate,
         metric_for_best_model="eval_loss" if evaluate else None,
@@ -144,12 +209,14 @@ def make_trainer(model, tokenizer, args, train_data, eval_data, *, evaluate_each
     if isinstance(train_data, torch.utils.data.IterableDataset):
         train_data = EpochStream(train_data)
         callbacks.append(RestoreShuffleEpoch())
-    return BehaviorTrainer(
+    trainer = BehaviorTrainer(
         model=model,
         args=options,
         train_dataset=train_data,
         eval_dataset=eval_data,
         processing_class=tokenizer,
-        data_collator=TensorCollator(tokenizer),
+        data_collator=TensorCollator(tokenizer, loss_breakdown=getattr(args, "loss_breakdown", False)),
         callbacks=callbacks,
     )
+    trainer.schedule_epochs = getattr(args, "lr_schedule_epochs", None)
+    return trainer

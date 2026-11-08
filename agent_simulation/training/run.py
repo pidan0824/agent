@@ -60,7 +60,7 @@ def check_cached_data(args, data, shards, *, verify=False):
     checks, counts = [], {}
     eval_split = selection_split(args.dataset)
     for split in ("train", eval_split):
-        stream = TokenStream(args.token_cache, args.role, split, verify=verify)
+        stream = TokenStream(args.token_cache, args.role, split, verify=verify, stage=getattr(args, "stage", None))
         if not len(stream):
             raise ValueError('Empty cached supervision split: ' + split)
         counts[split] = len(stream)
@@ -78,6 +78,10 @@ def check_cached_data(args, data, shards, *, verify=False):
 def check_data(args):
     """Bind training inputs, optionally scanning files and collating sample rows."""
     verify = args.command == "check" or getattr(args, "verify", False)
+    if getattr(args, "stage", None) and (args.role != "customer" or not args.token_cache):
+        raise ValueError("Stage selection requires Customer token cache")
+    if (getattr(args, "loss_breakdown", False) or getattr(args, "evaluate_train", False)) and not args.token_cache:
+        raise ValueError("Loss diagnostics require a token cache")
     config = json.loads((args.model / "config.json").read_text())
     if (config.get("model_type"), config.get("hidden_size"), config.get("num_hidden_layers")) != (
         "qwen2",
@@ -142,6 +146,10 @@ def training_identity(args, data_check, eval_split):
         for k, v in vars(args).items()
         if k not in ("command", "resume", "verify")
     }
+    for key, default in (("stage", None), ("loss_breakdown", False), ("evaluate_train", False),
+                         ("keep_checkpoints", 2), ("lr_schedule_epochs", None)):
+        if value.get(key) == default:
+            value.pop(key, None)
     if value.get("init_adapter") is None:
         value.pop("init_adapter", None)
     value["dataset_manifest_sha256"] = sha256(args.dataset / "manifest.json")
@@ -264,6 +272,8 @@ def select_customer_checkpoint(args, checkpoints):
 def train(args):
     if getattr(args, "empty_cache_steps", None) is not None and args.empty_cache_steps < 1:
         raise ValueError("Cache release interval must be positive")
+    if getattr(args, "lr_schedule_epochs", None) is not None and (args.max_steps or args.lr_schedule_epochs < args.epochs):
+        raise ValueError("Learning-rate schedule epochs must cover all training epochs")
     budget = args.max_steps if args.max_steps is not None else args.epochs
     if min(budget, args.eval_steps, args.batch_size, args.accumulation, args.rank) < 1:
         raise ValueError("Positive step, batch, accumulation and rank values required")
@@ -352,6 +362,9 @@ def train(args):
         trainer = make_trainer(
             model, tokenizer, args, train_data, evaluation_data, evaluate_each_epoch=True
         )
+        if getattr(args, "evaluate_train", False):
+            trainer.train_evaluation_data = TokenStream(
+                args.token_cache, args.role, "train", stage=getattr(args, "stage", None))
         initial_metrics = trainer.evaluate() if not args.resume else None
         if initial_metrics is not None:
             write_report(args.output / "initial_evaluation.json", initial_metrics)
@@ -406,6 +419,8 @@ def parser():
             default=Path(__file__).resolve().parents[2] / "models/Qwen2.5-3B-Instruct-tokenizer",
         )
         q.add_argument("--role", choices=("seller", "customer"), required=True)
+        q.add_argument("--stage", choices=("query", "response"),
+                       help="Train/evaluate one Customer stage from an existing token cache")
         q.add_argument(
             "--eval-samples", "--validation-samples", dest="validation_samples",
             type=int,
@@ -429,6 +444,10 @@ def parser():
                        help="Checkpoint interval for explicit step-budget runs")
         q.add_argument("--learning-rate", type=float, default=1e-6)
         q.add_argument("--rank", type=int, default=64)
+        q.add_argument("--loss-breakdown", action="store_true", help="Report stage and Response token-group evaluation losses")
+        q.add_argument("--evaluate-train", action="store_true", help="Measure full Train loss at each evaluation with frozen checkpoint weights")
+        q.add_argument("--keep-checkpoints", type=int, default=2, help="Retained complete checkpoints; 0 keeps all")
+        q.add_argument("--lr-schedule-epochs", type=int, help="Optional longer learning-rate decay horizon for matched experiments")
         q.add_argument("--batch-size", type=int, default=1)
         q.add_argument("--accumulation", type=int, default=16)
         q.add_argument(

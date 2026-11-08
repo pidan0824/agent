@@ -297,3 +297,28 @@ Customer 背景商品描述可用 `--compact-customer-background` 构建对照�
 该选项只改变模型可见投影，不改原始事实或监督答案。缓存记录这一选项，必须写入
 独立目录；不会覆盖完整信息版。只构建 Customer 时使用 `--role customer`。
 训练和运行时消息函数共用这项投影选项，运行时默认行为仍不变。
+
+### Customer 分阶段 LoRA 对照
+
+旧上下文实验直接读取原 `runs/lite_2pct_goal/tokens`，用训练入口 `--stage query`
+或 `--stage response` 选择样本，不重新渲染 Prompt，不重分批，也不调整 Response 的
+`1/batch_count` 权重。两个独立输出目录都从冻结的 Qwen Base 初始化自己的 LoRA。
+训练阶段的隔离不改变 History、Retrieval、Platform 或 Environment。
+
+`--loss-breakdown` 在评估的同一次前向计算中记录 Query/Response 各自的答案 Loss，
+以及 Response 的结构、点击 ID、购买 ID 三组 Token Loss。ID 分组依据真实答案中
+数字的字符跨度；结构组包含字段名、标点、空列表和结束符，因此并非全部是无业务
+含义的固定格式。分组 Token Loss 按请求权重加权后除以该组 Token 权重；另记录
+各组对答案平均 Loss 的贡献，三组贡献之和等于 Response 答案 Loss。没有 ID 的
+样本不虚构该组 Token。诊断不改变反向传播的原有答案平均 CE。
+
+`--evaluate-train` 在初始评估和每轮 Test 评估后，用同一时刻的权重、关闭 dropout，
+完整计算 Train Loss；不更新参数，也不消费或修改训练流的 shuffle 状态。
+指标与 epoch/step 一起记录到 Trainer 的 `log_history`，保存于各 checkpoint 的
+`trainer_state.json`，初始值保存于 `initial_evaluation.json`。Test 仍用于选择
+checkpoint，并非独立于选择过程的最终测试集。`--keep-checkpoints 0` 保留所有完整
+checkpoint（含 optimizer/scheduler/RNG），不只保存 Adapter 权重。
+
+本次旧上下文对照实际训练 5 轮，使用 `--lr-schedule-epochs 10`，匹配旧联合训练
+“按 10 轮衰减、停在第 5 轮”的每轮学习率进度。默认未指定此选项时，学习率仍按
+正常训练步数衰减。Response-only 先运行，随后运行 Query-only；Seller 不在队列中。
