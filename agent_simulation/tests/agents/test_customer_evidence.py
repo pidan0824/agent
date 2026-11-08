@@ -69,6 +69,47 @@ class CustomerEvidenceTests(unittest.TestCase):
         prepared=prepare_history(project_customer(response))
         self.assertEqual(messages(response,response=True),messages(response,response=True,prepared_history=prepared))
 
+    def test_compact_background_preserves_batches_labels_and_other_context(self):
+        from agent_simulation.datasets.labels import expand_record
+
+        original = state()
+        original["behavioral_summary"] = {
+            "observed_time_index": 6,
+            "statistics_30d": {"exposures": 100, "clicks": 4, "orders": 1, "gmv_raw": 90},
+            "recent_clicked_item_ids": [1, 1, 2],
+            "recent_purchased_item_ids": [1],
+            "item_details": [dict(item_id=i, item_title="杯子", brand_name="品牌",
+                                  category_level3_name="水杯", category_level3_id=8,
+                                  seller_id=20, category_level1_name="日用") for i in (1, 2)],
+        }
+        original.update(query="杯子", displayed_items=[
+            {"item_id": i, "price_raw": 100 + i} for i in range(1, 69)
+        ])
+        query = dict(sample_id="query:1", input=original, target={"query": "杯子"})
+        query["messages"] = messages(original, query["target"])
+        response = dict(sample_id="response:1", input=original,
+                        target={"clicked_item_ids": [1, 68], "purchased_item_ids": [68]})
+        before = deepcopy((query, response))
+        full = list(expand_record("customer", (query, response)))
+        compact = list(expand_record("customer", (query, response), compact_background=True))
+        self.assertEqual(len(compact), 3)
+        for left, right in zip(full, compact, strict=True):
+            self.assertEqual(left["sample_id"], right["sample_id"])
+            self.assertEqual(left["target"], right["target"])
+            self.assertEqual(left.get("batching"), right.get("batching"))
+            a, b = (decode_input(row["messages"][1]["content"]) for row in (left, right))
+            details = a["behavioral_summary"]["item_details"]
+            a["behavioral_summary"]["item_details"] = [
+                {k: v for k, v in item.items()
+                 if k in ("item_id", "item_title", "brand_name", "category_level3_name")}
+                for item in details
+            ]
+            self.assertEqual(a, b)
+            self.assertEqual(right["messages"][1], customer_decision_messages(
+                right["input"], response=right["sample_id"].startswith("response"),
+                compact_background=True)[1])
+        self.assertEqual((query, response), before)
+
     def test_customer_encoder_rejects_a_projection_with_an_audit_sidecar(self):
         visible = project_customer(state())
         with self.assertRaisesRegex(ValueError, "Customer context must be an object"):

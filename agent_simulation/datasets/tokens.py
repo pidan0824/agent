@@ -57,8 +57,9 @@ def validate_release(root, directory, seed, *, role=None, tokenizer_path=None):
     expected = selected_identity(directory, selection, selection_hash, seed, spec['buckets'],
                                  tokenizer_digest=digest)
     require(selection['dataset_manifest_sha256'] == expected['dataset'], 'Selected cache source differs')
-    if 'background_sha256' in spec:
-        expected['background_sha256'] = spec['background_sha256']
+    for key in ('background_sha256', 'compact_customer_background'):
+        if key in spec:
+            expected[key] = spec[key]
     require(spec == expected,
             'Token cache dataset, seed or candidate selection differs')
     complete = root / 'complete.json'
@@ -275,7 +276,9 @@ def build_splits(args, role, bucket, splits):
             require(actual == record, 'Selected label sequence differs')
             try:
                 rows = []
-                for sample in expand_record(role, raw):
+                for sample in expand_record(
+                    role, raw, compact_background=getattr(args, 'compact_customer_background', False),
+                ):
                     require(sample['split'] == split, 'Wrong selected split')
                     rows.append(PreparedRow.from_sample(sample, data.tokenizer))
             except ContextCapacityError as error:
@@ -299,6 +302,8 @@ def parse_args():
     parser.add_argument('--verify', action='store_true',
                         help='Verify source and candidate checksums, including resumed shards')
     parser.add_argument('--role', choices=('customer', 'seller'))
+    parser.add_argument('--compact-customer-background', action='store_true',
+                        help='Keep ID, title, brand and leaf category in Customer background item descriptions')
     parser.add_argument('--workers', type=int,
                         help='Default: 1 on GPU or 24 on CPU; workers each load their own encoder')
     parser.add_argument('--buckets', type=int, default=32)
@@ -343,6 +348,8 @@ def preflight(args):
     catalog = Path(json.loads((args.dataset / 'manifest.json').read_text())['catalog'])
     spec['background_sha256'] = sha256(catalog / 'facts/customer_background.parquet')
     spec['tokenizer_sha256'] = cache_tokenizer_digest(args.tokenizer)
+    if getattr(args, 'compact_customer_background', False):
+        spec['compact_customer_background'] = True
     return spec, splits
 
 

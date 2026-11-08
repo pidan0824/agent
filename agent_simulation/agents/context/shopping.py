@@ -75,7 +75,7 @@ def displayed_details(displayed, item_ids):
     }
 
 
-def project_customer(state):
+def project_customer(state, *, compact_background=False):
     """Keep event boundaries and clocks while omitting internal search metadata."""
     require(isinstance(state, dict), "Customer context must be an object")
     profile = state.get("profile", {})
@@ -96,6 +96,16 @@ def project_customer(state):
         return result
 
     visible = dict(state)
+    background = state.get("behavioral_summary")
+    if compact_background and background is not None:
+        fields = ("item_id", "item_title", "brand_name", "category_level3_name")
+        visible["behavioral_summary"] = {
+            **background,
+            "item_details": [
+                {key: item[key] for key in fields if key in item}
+                for item in background["item_details"]
+            ],
+        }
     displayed = visible.get("displayed_items", ())
     if any("price_provenance" in item for item in displayed):
         visible["displayed_items"] = [

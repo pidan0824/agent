@@ -111,17 +111,18 @@ class SFTDataset:
                 yield self.check_sample(sample)
 
 
-def expand_record(role, record):
+def expand_record(role, record, *, compact_background=False):
     if role == "seller":
         yield record
     elif role == "customer":
         query, response = record
         if query is not None:
-            if "messages" not in query:
-                query = {**query, "messages": messages(query["input"], query["target"])}
+            if "messages" not in query or compact_background:
+                query = {**query, "messages": messages(
+                    query["input"], query["target"], compact_background=compact_background)}
             yield query
         if response is not None:
-            yield from split_supervision(response)
+            yield from split_supervision(response, compact_background=compact_background)
     else:
         raise ValueError("Unknown supervision role")
 

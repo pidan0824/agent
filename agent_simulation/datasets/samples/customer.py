@@ -81,7 +81,7 @@ def sample_from_request(dataset, session, r, *, history_embedder=DEFAULT_HISTORY
     return query, response
 
 
-def split_supervision(sample):
+def split_supervision(sample, *, compact_background=False):
     """Intersect original labels only after computing label-blind partitions."""
     batches = response_batches(sample["input"])
     history = prepare_history(project_customer(sample["input"])) if len(batches) > 1 else None
@@ -93,7 +93,8 @@ def split_supervision(sample):
         }
         row = dict(sample)
         row.update(input=state, target=target,
-                   messages=messages(state, target, response=True, prepared_history=history))
+                   messages=messages(state, target, response=True, prepared_history=history,
+                                     compact_background=compact_background))
         row["batching"] = {
             "parent_sample_id": sample["sample_id"],
             "index": index + 1,

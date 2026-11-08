@@ -204,10 +204,10 @@ def decode_input(text):
 
 def messages(
     state, target=None, *, response=False, query_output=QUERY_OUTPUT, query_task=QUERY_TASK,
-    prepared_history=None,
+    prepared_history=None, compact_background=False,
 ):
     from agent_simulation.agents.context.shopping import project_customer
-    visible = project_customer(state)
+    visible = project_customer(state, compact_background=compact_background)
     content = encode_input(visible, prepared_history=prepared_history)
     notes = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE
     if '"history_encoding":' in content:
@@ -240,10 +240,12 @@ def messages(
     return result
 
 
-def customer_decision_messages(context, *, response=False, prepared_history=None):
+def customer_decision_messages(
+    context, *, response=False, prepared_history=None, compact_background=False,
+):
     return messages(
         context,
-        response=response, prepared_history=prepared_history,
+        response=response, prepared_history=prepared_history, compact_background=compact_background,
         query_output=(QUERY_RUNTIME_OUTPUT if "decision_time" in context else QUERY_OUTPUT),
         query_task=(QUERY_RUNTIME_TASK if "decision_time" in context else QUERY_TASK),
     )

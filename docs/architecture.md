@@ -289,3 +289,11 @@ python -m agent_simulation.data.build.catalog --config data/kuaisearch/lite/conf
 关联，不在快照里重复存储。新 Prompt 必须生成到新的 Token 缓存目录；构建时绑定背景
 文件摘要，防止续建时混入旧上下文分片。训练读取旧缓存仍使用其原有 Token，不重扫数据。
 旧模型生成评估若使用新上下文，应作为新的输入条件记录，不能混入原评估输出目录。
+
+
+Customer 背景商品描述可用 `--compact-customer-background` 构建对照缓存：保留
+`item_id`、`item_title`、`brand_name`、`category_level3_name`；近期点击/购买 ID、
+30 天统计、搜索历史、检索和当前展示商品均保持不变。默认仍保留完整商品描述。
+该选项只改变模型可见投影，不改原始事实或监督答案。缓存记录这一选项，必须写入
+独立目录；不会覆盖完整信息版。只构建 Customer 时使用 `--role customer`。
+训练和运行时消息函数共用这项投影选项，运行时默认行为仍不变。
