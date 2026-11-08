@@ -4,11 +4,11 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import duckdb
 
-from agent_simulation.datasets.labels import SFTDataset
-from agent_simulation.datasets.labels import build_labels
+from agent_simulation.datasets.labels import SFTDataset, export
+from agent_simulation.datasets.build_labels import build_labels
 from agent_simulation.tests.fixtures import TokenizerFixture
 
 
@@ -42,22 +42,35 @@ class DatasetTests(unittest.TestCase):
         self.temp.cleanup()
 
     def prepare(self):
-        with patch('agent_simulation.datasets.labels.Catalog', self.Stub):
+        with patch('agent_simulation.datasets.build_labels.Catalog', self.Stub):
             return build_labels(self.directory, self.output)
 
     def test_release_rejects_missing_fact_and_can_retry_at_same_path(self):
         catalog = self.Stub(self.directory)
         catalog.connection.execute("DELETE FROM seller_history WHERE item_id=1 AND time_index=10")
-        with patch("agent_simulation.datasets.labels.Catalog", return_value=catalog):
+        with patch("agent_simulation.datasets.build_labels.Catalog", return_value=catalog):
             with self.assertRaises(ValueError):
                 build_labels(self.directory, self.output)
         self.assertFalse(self.output.exists())
         self.assertEqual(self.prepare()["seller"]["train"], 2)
 
+    def test_preview_can_retry_at_same_path_after_rendering_failure(self):
+        preview = self.root / "preview"
+        sample = {"messages": [{"content": "system"}, {"content": "user"}, {"content": "answer"}],
+                  "tools": []}
+        reader = Mock()
+        reader.sample.side_effect = [sample, ValueError("missing sample"), sample]
+        with patch("agent_simulation.datasets.labels.SFTDataset", return_value=reader):
+            with self.assertRaisesRegex(ValueError, "missing sample"):
+                export(self.output, self.tokenizer, ["query:7", "query:9"], preview)
+            self.assertFalse(preview.exists())
+            export(self.output, self.tokenizer, ["query:7"], preview)
+        self.assertTrue((preview / "query_7_model_input.txt").is_file())
+
     def test_one_request_cannot_be_published_in_two_splits(self):
         catalog = self.Stub(self.directory)
         catalog.connection.execute("INSERT INTO customer_splits VALUES (7, 'validation')")
-        with patch("agent_simulation.datasets.labels.Catalog", return_value=catalog):
+        with patch("agent_simulation.datasets.build_labels.Catalog", return_value=catalog):
             with self.assertRaisesRegex(ValueError, "split"):
                 build_labels(self.directory, self.output)
         self.assertFalse(self.output.exists())

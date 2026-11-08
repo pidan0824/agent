@@ -57,7 +57,7 @@ class CustomerStageContextTests(unittest.TestCase):
             direct = customer_sample(catalog, 4, stage="query")[0]
             data = SFTDataset.__new__(SFTDataset)
             data.catalog, data.tokenizer = catalog, TokenizerFixture()
-            separate = [data.sample("query:4"), *data.response_samples(4)]
+            separate = [data.sample("query:4"), *data.request_samples(4, stage="response")]
             with patch.object(catalog, "request", wraps=catalog.request) as read:
                 self.assertEqual(data.request_samples(4), separate)
                 read.assert_called_once()
