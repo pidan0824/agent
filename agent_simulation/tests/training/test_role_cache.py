@@ -141,8 +141,9 @@ class RoleCacheTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Resume package versions differ'):
                     train(cli)
                 load.assert_not_called()
-                # Recorded source hashes are no longer a condition for resuming.
-                saved = {**bound, "training_code_sha256": {"run.py": "old source hash"}}
+                # Old metadata can include the retired full-Train evaluation flag.
+                saved = {**bound, "training_code_sha256": {"run.py": "old source hash"},
+                         "evaluate_train": True}
                 config.write_text(json.dumps(dict(identity=saved, packages=packages)))
                 load.side_effect = RuntimeError("reached weight loading")
                 with patch('agent_simulation.training.run.load_tokenizer', return_value=data.tokenizer):

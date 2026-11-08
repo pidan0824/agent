@@ -312,10 +312,10 @@ Customer 背景商品描述可用 `--compact-customer-background` 构建对照�
 各组对答案平均 Loss 的贡献，三组贡献之和等于 Response 答案 Loss。没有 ID 的
 样本不虚构该组 Token。诊断不改变反向传播的原有答案平均 CE。
 
-`--evaluate-train` 在初始评估和每轮 Test 评估后，用同一时刻的权重、关闭 dropout，
-完整计算 Train Loss；不更新参数，也不消费或修改训练流的 shuffle 状态。
-指标与 epoch/step 一起记录到 Trainer 的 `log_history`，保存于各 checkpoint 的
-`trainer_state.json`，初始值保存于 `initial_evaluation.json`。Test 仍用于选择
+`epoch_train_loss` 是该轮训练过程记录的 optimizer-step Loss 平均值，
+`epoch_train_steps` 记录参与汇总的步数。每轮 Train 和 Test 指标都写入 checkpoint 的
+`trainer_state.json`，初始 Test 指标保存于 `initial_evaluation.json`。续训从旧配置中
+去掉 `--evaluate-train` 参数即可，已有的训练步日志仍参与同一轮汇总。Test 仍用于选择
 checkpoint，并非独立于选择过程的最终测试集。`--keep-checkpoints 0` 保留所有完整
 checkpoint（含 optimizer/scheduler/RNG），不只保存 Adapter 权重。
 

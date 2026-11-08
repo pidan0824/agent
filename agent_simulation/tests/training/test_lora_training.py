@@ -176,6 +176,15 @@ class LoRATrainingTests(unittest.TestCase):
                 self.assertEqual(resume_checkpoint(directory, Path("latest")).name, "checkpoint-30")
                 self.assertLessEqual(len(list(directory.glob("checkpoint-*"))), 2)
             self.assertEqual(ref.state.best_metric, restored.state.best_metric)
+            for trainer in (ref, restored):
+                state = json.loads((Path(trainer.state.best_model_checkpoint).parent
+                                    / "checkpoint-30/trainer_state.json").read_text())
+                last = next(entry for entry in state["log_history"] if entry["step"] == 30 and "loss" in entry)
+                self.assertEqual(last["epoch_train_steps"], 3)
+            def epoch_two_loss(trainer):
+                return next(entry["epoch_train_loss"] for entry in trainer.state.log_history
+                            if entry["epoch"] == 2.0 and "epoch_train_loss" in entry)
+            self.assertEqual(epoch_two_loss(ref), epoch_two_loss(restored))
             def weights(directory):
                 return load_file(directory / "checkpoint-30/adapter_model.safetensors")
             for key, value in weights(reference).items():
@@ -227,7 +236,7 @@ class LoRATrainingTests(unittest.TestCase):
             self.assertAlmostEqual(trainer.lr_scheduler.get_last_lr()[0], args.learning_rate / 2)
             self.assertTrue(all((p / "optimizer.pt").exists() for p in Path(folder).glob("checkpoint-*")))
 
-    def test_loss_parts_add_up_and_train_evaluation_does_not_update_weights(self):
+    def test_loss_parts_add_up_and_evaluation_does_not_update_weights(self):
         batch = tensor_batch()
         batch["answer_parts"] = torch.tensor([[-1, -1, 0, 1], [-1, -1, 2, -1]])
         batch["stages"] = torch.tensor([1, 1])
@@ -240,19 +249,16 @@ class LoRATrainingTests(unittest.TestCase):
             trainer = self.trainer(model, folder)
             trainer.data_collator = collator
             trainer.eval_dataset = rows
-            trainer.train_evaluation_data = rows
             before = {k: v.detach().clone() for k, v in model.named_parameters()}
             metrics = trainer.evaluate()
-            for prefix in ("eval_response", "train_eval_response"):
-                self.assertEqual(metrics[prefix + "_rows"], 2)
-                self.assertEqual(metrics[prefix + "_weight"], 1.25)
-                for part in ("structure", "click_id", "purchase_id"):
-                    self.assertEqual(metrics[f"{prefix}_{part}_tokens"], 1)
-                self.assertAlmostEqual(metrics[prefix + "_answer_loss"], sum(
-                    metrics[f"{prefix}_{part}_loss_contribution"]
-                    for part in ("structure", "click_id", "purchase_id")), places=6)
+            self.assertEqual(metrics["eval_response_rows"], 2)
+            self.assertEqual(metrics["eval_response_weight"], 1.25)
+            for part in ("structure", "click_id", "purchase_id"):
+                self.assertEqual(metrics[f"eval_response_{part}_tokens"], 1)
+            self.assertAlmostEqual(metrics["eval_response_answer_loss"], sum(
+                metrics[f"eval_response_{part}_loss_contribution"]
+                for part in ("structure", "click_id", "purchase_id")), places=6)
             self.assertAlmostEqual(metrics["eval_loss"] * 2 / 1.25, metrics["eval_response_answer_loss"], places=5)
-            self.assertTrue(any("train_eval_response_purchase_id_token_loss" in r for r in trainer.state.log_history))
             for name, value in model.named_parameters():
                 torch.testing.assert_close(value, before[name])
 

@@ -64,7 +64,6 @@ class BehaviorTrainer(Trainer):
         # This subclass consumes the accumulation denominator, not model.forward.
         self.model_accepts_loss_kwargs = True
         self._loss_totals = None
-        self.train_evaluation_data = None
         self.schedule_epochs = None
 
     def create_scheduler(self, num_training_steps, optimizer=None):
@@ -72,11 +71,20 @@ class BehaviorTrainer(Trainer):
             num_training_steps = math.ceil(num_training_steps * self.schedule_epochs / self.args.num_train_epochs)
         return super().create_scheduler(num_training_steps, optimizer)
 
-    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
-        metrics = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
-        if self.train_evaluation_data is not None and metric_key_prefix == "eval":
-            metrics.update(super().evaluate(self.train_evaluation_data, ignore_keys, "train_eval"))
-        return metrics
+    def log(self, logs, start_time=None):
+        epoch = self.state.epoch
+        if "loss" in logs and epoch is not None:
+            ending = epoch % 1 == 0 or self.control.should_training_stop or self.control.should_epoch_stop
+            if ending:
+                start = math.ceil(epoch) - 1
+                # With logging_steps=1, history contains one loss per optimizer step,
+                # including steps restored from a checkpoint inside this epoch.
+                losses = [entry["loss"] for entry in self.state.log_history
+                          if "loss" in entry and start < entry.get("epoch", 0) <= epoch]
+                losses.append(logs["loss"])
+                logs["epoch_train_loss"] = math.fsum(losses) / len(losses)
+                logs["epoch_train_steps"] = len(losses)
+        return super().log(logs, start_time=start_time)
 
     def evaluation_loop(self, *args, metric_key_prefix="eval", **kwargs):
         self._loss_totals = {} if getattr(self.data_collator, "loss_breakdown", False) else None

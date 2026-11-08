@@ -80,7 +80,7 @@ def check_data(args):
     verify = args.command == "check" or getattr(args, "verify", False)
     if getattr(args, "stage", None) and (args.role != "customer" or not args.token_cache):
         raise ValueError("Stage selection requires Customer token cache")
-    if (getattr(args, "loss_breakdown", False) or getattr(args, "evaluate_train", False)) and not args.token_cache:
+    if getattr(args, "loss_breakdown", False) and not args.token_cache:
         raise ValueError("Loss diagnostics require a token cache")
     config = json.loads((args.model / "config.json").read_text())
     if (config.get("model_type"), config.get("hidden_size"), config.get("num_hidden_layers")) != (
@@ -146,7 +146,7 @@ def training_identity(args, data_check, eval_split):
         for k, v in vars(args).items()
         if k not in ("command", "resume", "verify")
     }
-    for key, default in (("stage", None), ("loss_breakdown", False), ("evaluate_train", False),
+    for key, default in (("stage", None), ("loss_breakdown", False),
                          ("keep_checkpoints", 2), ("lr_schedule_epochs", None)):
         if value.get(key) == default:
             value.pop(key, None)
@@ -298,7 +298,9 @@ def train(args):
     if args.resume:
         checkpoint = resume_checkpoint(args.output, args.resume, device=args.device)
         config = json.loads((args.output / "run_config.json").read_text())
-        saved_identity = {k: v for k, v in config["identity"].items() if k != "training_code_sha256"}
+        # Retired evaluation-only settings do not affect the saved optimizer or data stream.
+        saved_identity = {k: v for k, v in config["identity"].items()
+                          if k not in ("training_code_sha256", "evaluate_train")}
         if saved_identity.get("init_adapter"):
             adapter = checkpoint
     if adapter is not None:
@@ -362,9 +364,6 @@ def train(args):
         trainer = make_trainer(
             model, tokenizer, args, train_data, evaluation_data, evaluate_each_epoch=True
         )
-        if getattr(args, "evaluate_train", False):
-            trainer.train_evaluation_data = TokenStream(
-                args.token_cache, args.role, "train", stage=getattr(args, "stage", None))
         initial_metrics = trainer.evaluate() if not args.resume else None
         if initial_metrics is not None:
             write_report(args.output / "initial_evaluation.json", initial_metrics)
@@ -445,7 +444,6 @@ def parser():
         q.add_argument("--learning-rate", type=float, default=1e-6)
         q.add_argument("--rank", type=int, default=64)
         q.add_argument("--loss-breakdown", action="store_true", help="Report stage and Response token-group evaluation losses")
-        q.add_argument("--evaluate-train", action="store_true", help="Measure full Train loss at each evaluation with frozen checkpoint weights")
         q.add_argument("--keep-checkpoints", type=int, default=2, help="Retained complete checkpoints; 0 keeps all")
         q.add_argument("--lr-schedule-epochs", type=int, help="Optional longer learning-rate decay horizon for matched experiments")
         q.add_argument("--batch-size", type=int, default=1)
