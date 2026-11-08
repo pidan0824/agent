@@ -30,7 +30,8 @@ from agent_simulation.data.common import sha256
 
 def check_cached_data(args, data, shards, *, verify=False):
     """Read cached split counts and optionally verify files and sample rows."""
-    spec = validate_release(args.token_cache, args.dataset, args.seed, role=args.role)
+    spec = validate_release(args.token_cache, args.dataset, args.seed, role=args.role,
+                            tokenizer_path=getattr(args, 'tokenizer', None))
     collator = TensorCollator(data.tokenizer) if verify else None
     checks, counts = [], {}
     eval_split = selection_split(args.dataset)
@@ -47,7 +48,7 @@ def check_cached_data(args, data, shards, *, verify=False):
                     weight=batch['sample_weights'].item()))
     return dict(role=args.role,counts=counts,count_unit='expanded_cached_rows',checks=checks,
         test_used=eval_split == 'test',weights_loaded=False,local_model_shards_present=shards,
-        tokenizer_matches_model=True,all_inputs_capacity_checked=False,
+        tokenizer_matches_model=True,capacity_checked_during_cache_build=True,
         token_cache_identity=spec,evaluation_selection='All evaluation rows in the frozen token cache; no resampling')
 
 

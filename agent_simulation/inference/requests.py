@@ -69,7 +69,7 @@ def _prompt_digest(messages, tools):
 
 
 @lru_cache(maxsize=8)
-def _tokenizer_identity(tokenizer, template):
+def tokenizer_identity(tokenizer, template):
     encoded = tokenizer.backend_tokenizer.to_str() + json.dumps(
         [template, tokenizer.special_tokens_map], sort_keys=True, ensure_ascii=False
     )
@@ -81,7 +81,7 @@ def _attach_tokens(request, tokenizer, tokens):
         request["_prompt_tokens"] = {
             "ids": list(tokens),
             "source": _prompt_digest(request["messages"], request["tools"]),
-            "tokenizer": _tokenizer_identity(tokenizer, tokenizer.chat_template),
+            "tokenizer": tokenizer_identity(tokenizer, tokenizer.chat_template),
         }
 
 
@@ -93,7 +93,7 @@ def read_tokens(request, tokenizer):
         "Prepared prompt content changed",
     )
     require(
-        prepared["tokenizer"] == _tokenizer_identity(tokenizer, tokenizer.chat_template),
+        prepared["tokenizer"] == tokenizer_identity(tokenizer, tokenizer.chat_template),
         "Prepared prompt tokenizer differs",
     )
     return prepared["ids"]

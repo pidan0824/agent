@@ -20,11 +20,16 @@ from agent_simulation.datasets.labels import (
 )
 from agent_simulation.datasets.tokenization import encode_tokens
 from agent_simulation.inference import resolve_device
-from agent_simulation.inference.requests import ContextCapacityError
+from agent_simulation.inference.requests import ContextCapacityError, load_tokenizer, tokenizer_identity
 from agent_simulation.logs import write_report
 
 
-def selected_identity(directory, selection, selection_hash, seed, buckets):
+def cache_tokenizer_digest(path):
+    tokenizer = load_tokenizer(str(path), local_files_only=True)
+    return tokenizer_identity(tokenizer, tokenizer.chat_template)
+
+
+def selected_identity(directory, selection, selection_hash, seed, buckets, *, tokenizer_digest=None):
     require(selection.get('schema') == 'sft-split-candidates-v2', 'Expected split candidate manifest')
     require(seed == selection['seed'], 'Candidate seed differs; use the frozen selection seed')
     partitions = [ordered_splits(entries) for entries in selection['roles'].values()]
@@ -33,10 +38,12 @@ def selected_identity(directory, selection, selection_hash, seed, buckets):
                 validation_records=0, buckets=buckets)
     spec.update(selection_sha256=selection_hash, coverage='selected_complete_records',
                 capacity_exclusion='whole_selected_record_only', selection_splits=list(partitions[0]))
+    if tokenizer_digest is not None:
+        spec['tokenizer_sha256'] = tokenizer_digest
     return spec
 
 
-def validate_release(root, directory, seed, *, role=None):
+def validate_release(root, directory, seed, *, role=None, tokenizer_path=None):
     """Read and verify the cache identity, selection and completion markers."""
     spec = json.loads((root / 'identity.json').read_text())
     seed = spec['seed'] if seed is None else seed
@@ -44,7 +51,11 @@ def validate_release(root, directory, seed, *, role=None):
     selection_hash = sha256(path)
     require(selection_hash == spec['selection_sha256'], 'Selected cache manifest changed')
     selection = json.loads(path.read_text())
-    expected = selected_identity(directory, selection, selection_hash, seed, spec['buckets'])
+    digest = spec.get('tokenizer_sha256')
+    if digest is not None and tokenizer_path is not None:
+        require(digest == cache_tokenizer_digest(tokenizer_path), 'Token cache tokenizer or chat template differs')
+    expected = selected_identity(directory, selection, selection_hash, seed, spec['buckets'],
+                                 tokenizer_digest=digest)
     require(selection['dataset_manifest_sha256'] == expected['dataset'], 'Selected cache source differs')
     require(spec == expected,
             'Token cache dataset, seed or candidate selection differs')
@@ -327,13 +338,17 @@ def preflight(args):
                 market = json.loads((args.market_cache / "manifest.json").read_text())
                 require(market["sources"] == sources, "Market cache source release differs")
                 attach_cache(data.catalog.connection, data.catalog.config, args.market_cache, verify_hashes=verify)
+    spec['tokenizer_sha256'] = cache_tokenizer_digest(args.tokenizer)
     return spec, splits
 
 
 def bind_release(args, spec):
     header = args.output / 'identity.json'
     if header.exists():
-        require(json.loads(header.read_text()) == spec, 'Different selected cache release')
+        saved = json.loads(header.read_text())
+        require(saved.get('tokenizer_sha256') == spec['tokenizer_sha256'],
+                'Token cache tokenizer or chat template differs or was not recorded; choose a new output directory')
+        require(saved == spec, 'Different selected cache release')
     else:
         write_report(header, spec)
     copied = args.output / 'candidate_manifest.json'

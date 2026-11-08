@@ -174,17 +174,12 @@ def prepare_supply(connection, features, seller_labels, split):
 
 def reserve_supply(connection, customer_path, target_quotas, count, seed, split):
     connection.execute("""
-        CREATE OR REPLACE TEMP TABLE required_seller AS
-        SELECT s.record_id FROM supply_quotes s
+        INSERT INTO selected_ids
+        SELECT s.record_id,sha256(s.record_id||':'||CAST(? AS VARCHAR)) FROM supply_quotes s
         SEMI JOIN (
             SELECT DISTINCT unnest(impressed_item_ids) AS item_id FROM read_parquet(?)
         ) shown USING(item_id)
-    """, [str(customer_path)])
-
-    connection.execute("""
-        INSERT INTO selected_ids
-        SELECT record_id,sha256(record_id||':'||CAST(? AS VARCHAR)) FROM required_seller
-    """, [seed])
+    """, [seed, str(customer_path)])
     reserved = dict(connection.execute(
         'SELECT stratum,count(*) FROM candidates SEMI JOIN selected_ids USING(record_id) GROUP BY stratum'
     ).fetchall())

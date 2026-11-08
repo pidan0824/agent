@@ -9,7 +9,9 @@ from unittest.mock import patch
 import duckdb
 import numpy as np
 from agent_simulation.data.common import literal, sha256
-from agent_simulation.datasets.tokens import bind_split_candidates, build_splits, preflight
+from agent_simulation.datasets.tokens import (
+    bind_release, bind_split_candidates, build_splits, cache_tokenizer_digest, preflight,
+)
 from agent_simulation.datasets.tokens import PreparedRow
 from agent_simulation.datasets.tokens import read_shard
 from agent_simulation.datasets.tokens import validate_release, selected_identity
@@ -62,16 +64,41 @@ class CandidateCacheTests(unittest.TestCase):
                                    market_cache=None, seed=42, buckets=1)
             candidate = root / 'customer-train-candidates.parquet'
             candidate.write_bytes(b'changed')
-            with patch('agent_simulation.datasets.tokens.SFTDataset') as load:
+            with patch('agent_simulation.datasets.tokens.SFTDataset') as load, \
+                 patch('agent_simulation.datasets.tokens.cache_tokenizer_digest', return_value='digest'):
                 preflight(args)
                 load.assert_not_called()
                 args.verify = True
                 with self.assertRaisesRegex(ValueError, 'Candidate file changed'):
                     preflight(args)
 
+    def test_cache_rejects_a_changed_chat_template(self):
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from transformers import PreTrainedTokenizerFast
 
-
-
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            dataset, spec = self.selected_fixture(root)
+            tokenizer_path = root / 'tokenizer'
+            tokenizer = PreTrainedTokenizerFast(
+                tokenizer_object=Tokenizer(WordLevel({'[UNK]': 0}, unk_token='[UNK]')),
+                unk_token='[UNK]', chat_template='{{ messages[0].content }}',
+            )
+            tokenizer.save_pretrained(tokenizer_path)
+            spec['tokenizer_sha256'] = cache_tokenizer_digest(tokenizer_path)
+            (root / 'identity.json').write_text(json.dumps(spec))
+            (root / 'complete.json').write_text(json.dumps(spec))
+            args = SimpleNamespace(output=root, candidates=root / 'candidate_manifest.json')
+            bind_release(args, spec)
+            self.assertEqual(validate_release(root, dataset, 42, tokenizer_path=tokenizer_path), spec)
+            tokenizer.chat_template = 'Changed: {{ messages[0].content }}'
+            tokenizer.save_pretrained(tokenizer_path)
+            changed = {**spec, 'tokenizer_sha256': cache_tokenizer_digest(tokenizer_path)}
+            with self.assertRaisesRegex(ValueError, 'chat template differs'):
+                bind_release(args, changed)
+            with self.assertRaisesRegex(ValueError, 'chat template differs'):
+                validate_release(root, dataset, 42, tokenizer_path=tokenizer_path)
     def test_training_requires_finished_cache_with_bound_candidate_manifest(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
