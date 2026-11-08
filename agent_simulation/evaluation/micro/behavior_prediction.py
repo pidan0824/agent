@@ -380,7 +380,6 @@ def run(args):
                 "complete": True,
                 "original_records_per_role": args.count if candidates is None else None,
                 "evaluated_records": {role: len(ids) for role, ids in selection.items()},
-                "metrics": metrics,
             },
         )
 

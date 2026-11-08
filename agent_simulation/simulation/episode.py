@@ -106,6 +106,7 @@ class Episode:
             int(actor) for actor, customer in state["customers"].items() if not customer.get("exit")
         )
         seller_cutoff = state["simulation_step"]
+        settled_phases = []
         try:
             trace["sellers"], baseline = self._seller_proposals(sellers)
             # No Seller can see another Seller's proposal until this barrier.
@@ -117,6 +118,7 @@ class Episode:
                 for run in trace["sellers"]:
                     self.seller.logs.save(run, "failed", f"Seller settlement aborted: {type(error).__name__}: {error}")
                 raise
+            settled_phases.append("seller")
             for run, (_, args), result in zip(proposals, quotes, applied):
                 run["applied_result"] = result
                 run["tools"].append({"name": "submit_prices", "arguments": args, "result": result})
@@ -126,7 +128,7 @@ class Episode:
             customer_cutoff = customer_state["simulation_step"]
             trace["customers"] = self._customer_decisions(customers, state=customer_state)
             # All response decisions precede all new feedback and memory updates.
-            self.customer.settle_staged(trace["customers"])
+            self.customer.settle_staged(trace["customers"], on_settled=lambda: settled_phases.append("customer"))
             with self.runtime.record_tick(trace) as state:
                 require(not state["pending"], "Cannot finish Tick with unsettled searches")
                 for role, runs, cutoff in (
@@ -150,9 +152,10 @@ class Episode:
                 trace["status"] = "complete"
         except Exception as error:
             trace.pop("termination_reason", None)
-            trace.update(status="failed", error=f"{type(error).__name__}: {error}")
+            trace.update(status="failed", error=f"{type(error).__name__}: {error}", settled_phases=settled_phases)
             with self.runtime.record_tick(trace) as state:
                 state["clock"]["status"] = "failed"
+                state["clock"]["settled_phases"] = settled_phases
             raise
         return deepcopy(trace)
 

@@ -126,6 +126,49 @@ class RoleCacheTests(unittest.TestCase):
                         train(cli)
                 load.assert_called_once()
 
+    def test_warm_start_validates_role_and_keeps_adapter_rank_on_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args, data, _ = self.fixture(root, "seller")
+            (root / "config.json").write_text("{}")
+            source = root / "source"
+            adapter = source / "adapter"
+            adapter.mkdir(parents=True)
+            adapter_config = json.dumps({"peft_type": "LORA", "r": 2})
+            (adapter / "adapter_config.json").write_text(adapter_config)
+            output = root / "training"
+            cli = ["train", "--model", str(root), "--dataset", str(args.dataset),
+                   "--role", "seller", "--token-cache", str(root), "--output", str(output), "--device", "cpu"]
+            warm = parser().parse_args([*cli, "--init-adapter", str(adapter)])
+            metadata = source / "run_config.json"
+            metadata.write_text(json.dumps({"identity": {"role": "customer"}}))
+            with self.assertRaisesRegex(ValueError, "Adapter training role differs"):
+                train(warm)
+
+            metadata.write_text(json.dumps({"identity": {"role": "seller"}}))
+            checked = check_cached_data(args, data, [])
+            with patch("agent_simulation.training.run.check_data", return_value=checked), \
+                 patch("agent_simulation.training.run.load_tokenizer", return_value=data.tokenizer), \
+                 patch("agent_simulation.training.run.load_base_model"), \
+                 patch("agent_simulation.training.run.PeftModel.from_pretrained",
+                       side_effect=RuntimeError("reached adapter loading")) as load:
+                with self.assertRaisesRegex(RuntimeError, "reached adapter loading"):
+                    train(warm)
+                self.assertEqual(load.call_args.args[1], adapter)
+                identity = json.loads((output / "run_config.json").read_text())["identity"]
+                self.assertEqual(identity["rank"], 2)
+                self.assertEqual(identity["init_adapter"], str(adapter.resolve()))
+
+                metadata.unlink()
+                checkpoint = output / "checkpoint-1"
+                checkpoint.mkdir()
+                (checkpoint / "adapter_config.json").write_text(adapter_config)
+                resume = parser().parse_args([*cli, "--resume", "latest"])
+                with patch("agent_simulation.training.run.resume_checkpoint", return_value=checkpoint):
+                    with self.assertRaisesRegex(RuntimeError, "reached adapter loading"):
+                        train(resume)
+                self.assertEqual(load.call_args.args[1], checkpoint)
+
     def test_global_identity_is_required_and_shard_checksums_are_optional(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -12,6 +12,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, set_seed
+from agent_simulation.inference.local.checkpoints import adapter_training_identity
 from agent_simulation.inference.requests import load_tokenizer
 from agent_simulation.inference import resolve_device
 from agent_simulation.logs import write_report
@@ -282,6 +283,20 @@ def train(args):
     if args.output.exists() and not args.resume:
         raise FileExistsError("Use a new output directory or explicitly resume its checkpoint")
     args.device = resolve_device(args.device).type
+    checkpoint = None
+    adapter = args.init_adapter
+    if args.resume:
+        checkpoint = resume_checkpoint(args.output, args.resume, device=args.device)
+        config = json.loads((args.output / "run_config.json").read_text())
+        saved_identity = {k: v for k, v in config["identity"].items() if k != "training_code_sha256"}
+        if saved_identity.get("init_adapter"):
+            adapter = checkpoint
+    if adapter is not None:
+        adapter_training_identity(adapter, args.role)
+        adapter_config = json.loads((adapter / "adapter_config.json").read_text())
+        if adapter_config["peft_type"] != "LORA":
+            raise ValueError("Expected a LoRA adapter")
+        args.rank = adapter_config["r"]
     # Bind the current data and model before loading weights.
     data_check = check_data(args)
     eval_split = selection_split(args.dataset)
@@ -290,11 +305,9 @@ def train(args):
         name: importlib.metadata.version(name)
         for name in ("torch", "transformers", "peft", "accelerate", "duckdb", "numpy", "tokenizers")
     }
-    checkpoint = None
     if args.resume:
-        checkpoint = resume_checkpoint(args.output, args.resume, device=args.device)
-        config = json.loads((args.output / "run_config.json").read_text())
-        saved_identity = {k: v for k, v in config["identity"].items() if k != "training_code_sha256"}
+        if adapter is not None:
+            identity["init_adapter"] = saved_identity["init_adapter"]
         if saved_identity != identity:
             raise ValueError("Resume data/model/config differs")
         if config["packages"] != packages:
@@ -324,8 +337,8 @@ def train(args):
     try:
         set_seed(args.seed)
         model = load_base_model(args)
-        if args.init_adapter:
-            model = PeftModel.from_pretrained(model, args.init_adapter, is_trainable=True)
+        if adapter is not None:
+            model = PeftModel.from_pretrained(model, adapter, is_trainable=True, local_files_only=True)
         else:
             model = get_peft_model(model, LoraConfig(
                 task_type="CAUSAL_LM",

@@ -60,6 +60,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "commit rejected"):
                 episode.step()
         self.assertEqual(self.runtime.snapshot()["active_prices"], prices)
+        self.assertEqual(self.runtime.snapshot()["clock"]["settled_phases"], [])
         logs = self.runtime.db.execute("SELECT status,error FROM agent_runs WHERE role='seller'").fetchall()
         self.assertEqual(len(logs), 3)
         self.assertTrue(all(status == "failed" and "commit rejected" in error for status, error in logs))
@@ -100,8 +101,8 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         episode = self.make_episode([WAIT] * 3, [WAIT] * 2, ticks=2)
         settle = self.customer.settle_staged
 
-        def settle_then_search(runs):
-            settle(runs)
+        def settle_then_search(runs, **kwargs):
+            settle(runs, **kwargs)
             self.runtime.execute("customer", 7, "search_products", {"query": "杯子"})
 
         with patch.object(self.customer, "settle_staged", side_effect=settle_then_search):
@@ -140,6 +141,8 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         state = self.runtime.snapshot()
         self.assertEqual(state["clock"]["status"], "failed")
         self.assertEqual(state["pending"], {})
+        trace = json.loads(self.runtime.db.execute("SELECT trace FROM ticks").fetchone()[0])
+        self.assertEqual(trace["settled_phases"], ["seller", "customer"])
         rows = self.runtime.db.execute(
             "SELECT actor,status,error,trace FROM agent_runs WHERE role='customer' ORDER BY actor"
         ).fetchall()
@@ -746,7 +749,8 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
             episode.step()
 
     def test_customer_failure_does_not_settle_other_customers(self):
-        episode = self.make_episode([WAIT] * 3, [answer({"query": "水杯"}), answer({"query": "水杯"}),
+        quote = answer({"prices": [{"item_id": 1, "price_raw": 90}]})
+        episode = self.make_episode([quote, WAIT, WAIT], [answer({"query": "水杯"}), answer({"query": "水杯"}),
             answer({"clicked_item_ids": [1], "purchased_item_ids": []}), answer({"action": "invalid"})])
         with self.assertRaises(ValueError):
             episode.step()
@@ -754,6 +758,10 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         self.assertEqual(state["feedback"], [])
         self.assertIn("7", state["pending"])
         self.assertEqual(state["clock"]["status"], "failed")
+        self.assertEqual(state["active_prices"]["1"]["price_raw"], 90)
+        self.assertEqual(state["clock"]["settled_phases"], ["seller"])
+        trace = json.loads(self.runtime.db.execute("SELECT trace FROM ticks").fetchone()[0])
+        self.assertEqual(trace["settled_phases"], ["seller"])
 
     def test_tick_tools_exclude_scheduling_and_batch_prices_wait(self):
 

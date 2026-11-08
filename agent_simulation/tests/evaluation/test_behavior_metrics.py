@@ -95,7 +95,9 @@ class BehaviorTests(unittest.TestCase):
             self.assertIn("999", failed["calls"][0]["response"]["content"])
             self.assertNotIn("prediction", failed)
             self.assertEqual(results["metrics"]["response"]["invalid_rate"], 0.5)
-            self.assertTrue((args.output / "completion.json").exists())
+            completion = json.loads((args.output / "completion.json").read_text())
+            self.assertTrue(completion["complete"])
+            self.assertNotIn("metrics", completion)
         self.assertEqual(model.complete.call_count, 5)
         self.assertEqual(data.close.call_count, 2)
 

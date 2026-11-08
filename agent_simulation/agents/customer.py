@@ -152,8 +152,8 @@ class CustomerAgent(BaseAgent):
             raise
         self.logs.save(run, "complete")
 
-    def settle_staged(self, runs):
-        """Commit all outcomes, record receipts, then reflect on the settled feedback."""
+    def settle_staged(self, runs, *, on_settled=None):
+        """Commit all outcomes, notify the caller, then record receipts and reflect."""
         runs = list(runs)
         staged = []
         for run in runs:
@@ -168,6 +168,8 @@ class CustomerAgent(BaseAgent):
                        for run, name, _ in staged if name == "submit_response"}
         try:
             results = self.runtime.settle_customers(actions, request_ids=request_ids)
+            if on_settled is not None:
+                on_settled()
             require(len(results) == len(staged), "Customer settlement result count mismatch")
             require(
                 all(result.get("request_id") == request_ids[run["actor"]]

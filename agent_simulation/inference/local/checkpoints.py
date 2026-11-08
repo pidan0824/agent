@@ -7,6 +7,15 @@ from pathlib import Path
 from agent_simulation.data.common import require, sha256
 
 
+def adapter_training_identity(directory, expected_role):
+    require(expected_role in {"customer", "seller"}, "Unknown adapter role")
+    metadata = Path(directory).parent / "run_config.json"
+    require(metadata.is_file(), "Cannot verify adapter role: missing training run_config.json")
+    identity = json.loads(metadata.read_text())["identity"]
+    require(identity.get("role") == expected_role, "Adapter training role differs from the requested Agent")
+    return identity
+
+
 def attach_adapter(model, directory, *, expected_role=None, name="default", checkpoint=None):
     """Mount a verified local adapter for offline evaluation or routed Episode inference."""
     import torch
@@ -17,12 +26,7 @@ def attach_adapter(model, directory, *, expected_role=None, name="default", chec
     existing = isinstance(model.model, PeftModel)
     require(not existing or (name != "default" and name not in model.model.peft_config), "A LoRA adapter is already attached")
     if expected_role is not None:
-        require(expected_role in {"customer", "seller"}, "Unknown adapter role")
-        metadata = directory.parent / "run_config.json"
-        require(metadata.is_file(), "Cannot verify adapter role: missing training run_config.json")
-        training = json.loads(metadata.read_text())["identity"]
-        require(training.get("role") == expected_role,
-                "Adapter training role differs from the requested Agent")
+        training = adapter_training_identity(directory, expected_role)
         if checkpoint is not None:
             files = checkpoint["files"]
             shards = {p: entry["sha256"] for p, entry in files.items() if p.endswith(".safetensors")}
