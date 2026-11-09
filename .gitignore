@@ -20,3 +20,5 @@ __pycache__/
 !/data/kuaisearch/lite/config.json
 /data/kuaisearch/full/*
 !/data/kuaisearch/full/config.json
+
+/agent_simulation/build/

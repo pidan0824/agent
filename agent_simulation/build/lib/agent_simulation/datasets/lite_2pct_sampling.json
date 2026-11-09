@@ -1,9 +1,0 @@
-{
-  "schema": "sft-split-sampling-config-v1",
-  "seed": 42,
-  "fractions": {"train": 0.02, "test": 0.02},
-  "strata": {
-    "customer": ["action", "history_band"],
-    "seller": ["action", "history_band"]
-  }
-}

@@ -1,9 +1,0 @@
-{
-  "official_repository": "https://github.com/benchen4395/KuaiSearch",
-  "official_commit": "88a545d6ada3a9a237e2b231b3321ddb83deb0a2",
-  "paper": "https://arxiv.org/html/2602.11518v1",
-  "source_sha256": {
-    "ranking/datasets.py": "57bb35f53c1bbcddc0e1e4f786eb21ec1b9640cc98634ab70df02d234b8b5926",
-    "ranking/models.py": "508271d720125a059f071b7f786f2ccfc61980df89f69cea6145ffda03fc8856"
-  }
-}
