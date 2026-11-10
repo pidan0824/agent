@@ -22,6 +22,7 @@ from agent_simulation.environment.batching import response_batch_policy
 from agent_simulation.training.data_loader import (
     prepare_datasets,
     action_multipliers,
+    ACTION_WEIGHTS,
     TensorCollator,
     TokenStream,
 )
@@ -147,6 +148,7 @@ def training_identity(args, data_check, eval_split):
         for k, v in vars(args).items()
         if k not in ("command", "resume", "verify")
     }
+    # Only neutral weights are omitted: new defaults must not silently resume an unweighted run.
     for key, default in (("stage", None), ("loss_breakdown", False),
                          ("keep_checkpoints", 2), ("lr_schedule_epochs", None),
                          ("activation_offload_tokens", None), ("click_weight", 1.0),
@@ -282,12 +284,9 @@ def select_customer_checkpoint(args, checkpoints):
 
 
 def train(args):
-    multipliers = tuple(getattr(args, key, 1.0) for key in
-                        ("click_weight", "purchase_weight", "price_change_weight"))
-    if any(not math.isfinite(value) or value < 1 for value in multipliers):
+    multipliers = {key: getattr(args, key, default) for key, default in ACTION_WEIGHTS.items()}
+    if any(not math.isfinite(value) or value < 1 for value in multipliers.values()):
         raise ValueError("Action weights must be finite and at least 1")
-    if max(multipliers) > 1 and not args.token_cache:
-        raise ValueError("Action weighting requires a completed token cache")
     if getattr(args, "empty_cache_steps", None) is not None and args.empty_cache_steps < 1:
         raise ValueError("Cache release interval must be positive")
     if getattr(args, "lr_schedule_epochs", None) is not None and (args.max_steps or args.lr_schedule_epochs < args.epochs):
@@ -308,6 +307,11 @@ def train(args):
         raise ValueError("Parallel readers require the complete training pool")
     if args.shuffle_buffer < 0:
         raise ValueError("Invalid shuffle buffer")
+    relevant_weight = (multipliers['price_change_weight'] if args.role == "seller" else
+                       1.0 if getattr(args, "stage", None) == "query" else
+                       max(multipliers['click_weight'], multipliers['purchase_weight']))
+    if relevant_weight > 1 and not args.token_cache:
+        raise ValueError("Action weighting requires a completed token cache")
     if args.output.exists() and not args.resume:
         raise FileExistsError("Use a new output directory or explicitly resume its checkpoint")
     args.device = resolve_device(args.device).type
@@ -478,9 +482,9 @@ def parser():
         q.add_argument("--save-steps", "--eval-steps", dest="eval_steps", type=int, default=100,
                        help="Checkpoint interval for explicit step-budget runs")
         q.add_argument("--learning-rate", type=float, default=1e-6)
-        q.add_argument("--click-weight", type=float, default=1.0, help="Training loss multiplier for Customer click rows")
-        q.add_argument("--purchase-weight", type=float, default=1.0, help="Training loss multiplier for Customer purchase rows")
-        q.add_argument("--price-change-weight", type=float, default=1.0, help="Training loss multiplier for Seller quote changes")
+        q.add_argument("--click-weight", type=float, default=ACTION_WEIGHTS["click_weight"], help="Training loss multiplier for Customer click rows (default: 2)")
+        q.add_argument("--purchase-weight", type=float, default=ACTION_WEIGHTS["purchase_weight"], help="Training loss multiplier for Customer purchase rows (default: 4)")
+        q.add_argument("--price-change-weight", type=float, default=ACTION_WEIGHTS["price_change_weight"], help="Training loss multiplier for Seller quote changes (default: 2)")
         q.add_argument("--rank", type=int, default=64)
         q.add_argument("--loss-breakdown", action="store_true", help="Report stage and Response token-group evaluation losses")
         q.add_argument("--keep-checkpoints", type=int, default=2, help="Retained complete checkpoints; 0 keeps all")

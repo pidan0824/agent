@@ -16,6 +16,9 @@ from agent_simulation.datasets.tokenization import IGNORE_INDEX, collate
 from agent_simulation.datasets.labels import bind_split_history, SFTDataset, record_samples
 from agent_simulation.datasets.tokens import PreparedRow, read_shard
 
+ACTION_WEIGHTS = {"click_weight": 2.0, "purchase_weight": 4.0, "price_change_weight": 2.0}
+
+
 class WorkerRecords(torch.utils.data.IterableDataset):
     """Each worker owns whole actor buckets, or disjoint complete evaluation records."""
 
@@ -167,8 +170,8 @@ class TokenStream(torch.utils.data.IterableDataset):
 def action_multipliers(args, tokenizer, train_data):
     """Index positive observed actions once from the frozen training stream."""
     if args.role == "customer":
-        click = getattr(args, "click_weight", 1.0)
-        purchase = getattr(args, "purchase_weight", 1.0)
+        click = getattr(args, "click_weight", ACTION_WEIGHTS["click_weight"])
+        purchase = getattr(args, "purchase_weight", ACTION_WEIGHTS["purchase_weight"])
         if max(click, purchase) == 1 or train_data.stage == "query":
             return {}
         result = {}
@@ -182,7 +185,7 @@ def action_multipliers(args, tokenizer, train_data):
                 result[row.sample_id] = factor
         return result
 
-    factor = getattr(args, "price_change_weight", 1.0)
+    factor = getattr(args, "price_change_weight", ACTION_WEIGHTS["price_change_weight"])
     if factor == 1:
         return {}
     keys = []
@@ -191,23 +194,11 @@ def action_multipliers(args, tokenizer, train_data):
             keys.extend(tuple(map(int, sid.split(":")[1:])) for sid in shard["ids"])
     sellers, items, times = map(list, zip(*keys))
     with closing(SFTDataset(args.dataset, None)) as data:
-        rows = data.catalog.connection.execute("""
-            WITH keys AS (
-                SELECT unnest(?::BIGINT[]) seller_id, unnest(?::BIGINT[]) item_id,
-                       unnest(?::BIGINT[]) time_index
-            ), targets AS (
-                SELECT k.*, h.price_raw FROM keys k
-                JOIN seller_history h USING (seller_id, item_id, time_index)
-            ), earlier AS (
-                SELECT h.seller_id, h.item_id, h.time_index, h.price_raw
-                FROM seller_history h SEMI JOIN keys k USING (seller_id, item_id)
-                WHERE h.price_status = 'observed' AND h.price_raw > 0 AND isfinite(h.price_raw)
-            )
-            SELECT t.seller_id, t.item_id, t.time_index FROM targets t
-            ASOF JOIN earlier h ON t.seller_id = h.seller_id AND t.item_id = h.item_id
-                                  AND t.time_index > h.time_index
-            WHERE t.price_raw <> h.price_raw
-        """, [sellers, items, times]).fetchall()
+        from agent_simulation.datasets.sampling import changed_seller_records
+        rows = changed_seller_records(data.catalog.connection, """
+            SELECT unnest(?::BIGINT[]) seller_id, unnest(?::BIGINT[]) item_id,
+                   unnest(?::BIGINT[]) time_index
+        """, [sellers, items, times])
     return {f"seller:{seller}:{item}:{time}": factor for seller, item, time in rows}
 
 

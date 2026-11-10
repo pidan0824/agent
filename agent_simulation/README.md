@@ -750,16 +750,31 @@ Customer 与 Seller 共用 32,768 tokens 的项目总预算，至少预留 2,048
 
 Customer 的近期行为背景现在统一使用商品 ID、标题、品牌和三级类目名称，SFT Query、Response 与仿真共用这一表示。原始曝光列表、统计、近期点击/购买 ID 的顺序和重复、真实行为标签不变；完整背景属性仍留在原数据中。已删除仅在缓存构建时开启的紧凑背景开关。
 
-沿用原相对时间 2% 的 train/test 候选清单，不重新抽样。新缓存使用独立目录；旧缓存的 Prompt 不会因代码更新自动改变。先运行缓存构建，完成后再运行训练，两步互不自动触发：
+原相对时间2%的 Train/Test 窗口不变。Customer Train/Test 和 Seller Test 保持原清单；Seller Train 在构造上下文之前保留全部观测价变化样本，并按 `SHA256(record_id:seed)` 固定抽取最多四倍数量的持平样本。这里的变化相对于同商品严格更早的最近有效报价，无效价格不会成为比较基准。只筛选监督目标，完整历史和公开市场供给仍从原 Catalog 读取。
+
+先生成独立候选清单（输出目录必须尚不存在；已有清单可直接用于后续构造）：
+
+```bash
+source /root/autodl-tmp/zhz/llm_simulation/env.sh
+python -m agent_simulation.datasets.sampling \
+  --dataset runs/lite-relative-time-2pct/sft \
+  --candidates runs/lite-relative-time-2pct/token-records/manifest.json \
+  --output runs/lite-relative-time-2pct/token-records-seller-4to1 \
+  --seller-keep-ratio 4
+```
+
+当前2%清单中，Seller Train 从255,894条缩至25,360条，包括5,072条变化、20,288条持平。Seller Test 6,692条、Customer Train 10,656条及Test 311条不变。该清单不再要求每条Customer曝光都对应一条被选中的Seller训练标签；商品事实与公开历史报价仍完整保留。
+
+新缓存使用独立目录；旧缓存不覆盖、不续写。下列命令只构造Token，不启动训练：
 
 ```bash
 source /root/autodl-tmp/zhz/llm_simulation/env.sh
 python -m agent_simulation.datasets.tokens \
   --dataset runs/lite-relative-time-2pct/sft \
-  --candidates runs/lite-relative-time-2pct/token-records/manifest.json \
+  --candidates runs/lite-relative-time-2pct/token-records-seller-4to1/manifest.json \
   --tokenizer models/Qwen3.5-9B \
   --market-cache runs/lite-relative-time-2pct/token-market \
-  --output runs/lite-relative-time-2pct/tokens-Qwen3.5-9B-context \
+  --output runs/lite-relative-time-2pct/tokens-Qwen3.5-9B-actions \
   --workers 1
 ```
 
@@ -768,3 +783,11 @@ python -m agent_simulation.datasets.tokens \
 历史检索保留现有 BGE/RRF：Customer 最近 10 条独立呈现，较早候选不含这些记录；Query 阶段按近期搜索主题检索，Response 按当前 Query 检索。Seller 按本品属性及经营变化检索本店历史，排除已展示的本品近期片段。最多五个片段是控制输入规模的设置，并不代表每条都高度相关；本次没有凭空增加相似度阈值或新的检索 Agent。
 
 服务器 `env.sh` 将现有 BGE 向量缓存的数据库上限设为 8 GiB，复用已有约 7.2 GiB 的向量文件；原默认 2 GiB 无法打开该文件。磁盘预留和淘汰机制继续沿用现有实现。此配置不创建新缓存层，也不删除已有向量。
+
+### 训练行为权重
+
+Customer Response 默认权重为未记录点击/购买1、有点击无购买2、有购买4；同时有点击和购买取4，不叠乘。Query保持1。每个Response Batch原有的 `1 / batch_count` 权重继续保留，额外系数乘在整条答案的平均Token损失上，不是单独给购买ID加权。日志中未记录互动不等于用户明确拒绝商品。
+
+Seller观测价变化权重为2，持平为1。筛选与加权复用同一套严格更早有效价格比较。额外权重只应用于训练，Test损失和行为指标保持原口径。默认参数为 `--click-weight 2 --purchase-weight 4 --price-change-weight 2`，可显式设为1做无加权对照。行为加权读取完成的Token缓存；Query-only不要求行为权重索引。
+
+新的样本选择和权重是新的实验设置，不直接续训旧配置的Checkpoint。旧Token缓存、训练产物和原候选目录均保留。上述筛选不会调用BGE、上下文模型或Tokenizer；下一步构造时才为保留的监督目标准备上下文。

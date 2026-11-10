@@ -19,6 +19,65 @@ from agent_simulation.datasets.tokens import PreparedRow
 
 
 class SplitSamplingTests(unittest.TestCase):
+    def test_seller_training_filter_keeps_changes_test_and_complete_history(self):
+        from agent_simulation.datasets import sampling
+        from agent_simulation.datasets.tokens import bind_split_candidates
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset, source = root/'dataset', root/'source'
+            dataset.mkdir(); source.mkdir()
+            database = root/'facts.duckdb'
+            (dataset/'manifest.json').write_text(json.dumps({'catalog': str(database)}))
+            roles = {role: {} for role in ('customer', 'seller')}
+            with duckdb.connect(str(database)) as c:
+                c.execute('''CREATE TABLE seller_history AS
+                    SELECT 1 seller_id,2 item_id,i time_index,
+                        CASE WHEN i=10 THEN NULL WHEN i<11 THEN 100. WHEN i<21 THEN 150. ELSE 300. END price_raw,
+                        CASE WHEN i=10 THEN 'invalid_price' ELSE 'observed' END price_status
+                    FROM range(22) t(i)''')
+                c.execute('''CREATE TABLE seller_targets AS SELECT seller_id,item_id,time_index,
+                    CASE WHEN time_index<21 THEN 'train' ELSE 'test' END assigned_split
+                    FROM seller_history WHERE time_index>0 AND price_status='observed' ''')
+                for role in roles:
+                    for split in ('train', 'test'):
+                        path = source/f'{role}-{split}-candidates.parquet'
+                        query = ("SELECT 'seller:1:2:'||time_index record_id,1 actor_id,seller_id,item_id,"
+                                 "time_index history_cutoff_exclusive FROM seller_targets "
+                                 f"WHERE assigned_split='{split}'" if role == 'seller' else
+                                 "SELECT '7' record_id,7 actor_id,7 session_id,21 history_cutoff_exclusive")
+                        n, = c.execute(f'COPY ({query}) TO {literal(path)} (FORMAT PARQUET)').fetchone()
+                        roles[role][split] = dict(file=path.name, records=n, sha256=sha256(path))
+            original = {p.name: p.read_bytes() for p in source.iterdir()}
+            manifest = source/'manifest.json'
+            manifest.write_text(json.dumps(dict(schema=sampling.SCHEMA, seed=42, roles=roles,
+                dataset_manifest_sha256=sha256(dataset/'manifest.json'))))
+
+            def catalog(_):
+                connection = duckdb.connect(str(database))
+                return SimpleNamespace(connection=connection, close=connection.close)
+
+            with patch.object(sampling, 'Catalog', side_effect=catalog), \
+                 patch('agent_simulation.agents.context.context_model', side_effect=AssertionError('No context construction')):
+                result = sampling.select_seller_training(dataset, manifest, root/'selected')
+                sampling.select_seller_training(dataset, manifest, root/'repeat')
+            self.assertEqual(result['seller_train_sampling'], dict(unchanged_per_changed=4,
+                source_records=19, source_changed=1, source_unchanged=18, kept_changed=1, kept_unchanged=4))
+            for filename, content in original.items():
+                self.assertEqual((source/filename).read_bytes(), content)
+                self.assertEqual((root/'selected'/filename).read_bytes(), (root/'repeat'/filename).read_bytes())
+                if filename != 'seller-train-candidates.parquet':
+                    self.assertEqual((root/'selected'/filename).read_bytes(), content)
+            with duckdb.connect(str(database)) as c:
+                paths = {split: root/'selected'/f'seller-{split}-candidates.parquet' for split in ('train', 'test')}
+                selected = bind_split_candidates(c, paths, 'seller', 0, 1)
+                self.assertEqual(len(selected), 6)
+                self.assertIn(('seller:1:2:11', 'train'), selected)
+                self.assertIn(('seller:1:2:21', 'test'), selected)
+                self.assertEqual(c.execute('SELECT time_index FROM seller_history ORDER BY time_index').fetchall(),
+                                 [(i,) for i in range(22)])
+                self.assertEqual(c.execute(f'SELECT count(*) FROM "{database.stem}".main.seller_targets').fetchone()[0], 20)
+                self.assertEqual(c.execute('SELECT count(*) FROM seller_targets').fetchone()[0], 6)
+
     def test_pipeline_extracts_each_role_once_and_keeps_split_membership(self):
         from agent_simulation.datasets import sampling as sampling
         with tempfile.TemporaryDirectory() as tmp, duckdb.connect() as c:

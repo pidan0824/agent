@@ -44,6 +44,28 @@ def tensor_batch():
 
 
 class LoRATrainingTests(unittest.TestCase):
+    def test_default_action_weights_boost_response_rows_without_changing_request_weights(self):
+        from types import SimpleNamespace
+        import numpy as np
+        from agent_simulation.datasets.tokens import PreparedRow
+        from agent_simulation.training.data_loader import action_multipliers
+        args = parser().parse_args(['train', '--dataset', 'unused', '--model', 'unused',
+                                    '--role', 'customer', '--output', 'unused'])
+        self.assertEqual((args.click_weight, args.purchase_weight, args.price_change_weight), (2., 4., 2.))
+        class Stream(list):
+            stage = None
+        samples = Stream()
+        for i, (clicked, purchased) in enumerate((([], []), ([1], []), ([], [2]), ([1], [2]))):
+            answer = json.dumps(dict(clicked_item_ids=clicked, purchased_item_ids=purchased))
+            samples.append(PreparedRow(f'response:{i}', np.array(list(map(ord, answer))), 0, .5))
+        samples.append(PreparedRow('query:0', np.array([0]), 0, 1.))
+        tokenizer = SimpleNamespace(decode=lambda values, **kw: ''.join(chr(int(v)) for v in values))
+        self.assertEqual(action_multipliers(args, tokenizer, samples),
+                         {'response:1': 2., 'response:2': 4., 'response:3': 4.})
+        self.assertEqual([s.weight for s in samples], [.5, .5, .5, .5, 1.])
+        samples.stage = 'query'
+        self.assertEqual(action_multipliers(args, tokenizer, samples), {})
+
     def test_official_protocol_uses_test_only_in_evaluation_stream(self):
         from types import SimpleNamespace
         from unittest.mock import Mock

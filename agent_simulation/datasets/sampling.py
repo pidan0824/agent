@@ -329,12 +329,96 @@ def select(dataset, output, config_path):
     return result
 
 
+def changed_seller_records(connection, keys_sql, parameters=()):
+    """Compare target quotes with the strictly earlier latest valid quote."""
+    return connection.execute(f"""
+        WITH keys AS ({keys_sql}), targets AS (
+            SELECT k.*, h.price_raw FROM keys k
+            JOIN seller_history h USING (seller_id, item_id, time_index)
+        ), earlier AS (
+            SELECT h.seller_id, h.item_id, h.time_index, h.price_raw
+            FROM seller_history h SEMI JOIN keys k USING (seller_id, item_id)
+            WHERE h.price_status='observed' AND h.price_raw>0 AND isfinite(h.price_raw)
+        )
+        SELECT t.seller_id, t.item_id, t.time_index FROM targets t
+        ASOF JOIN earlier h ON t.seller_id=h.seller_id AND t.item_id=h.item_id
+                              AND t.time_index>h.time_index
+        WHERE t.price_raw<>h.price_raw
+    """, parameters).fetchall()
+
+
+def select_seller_training(dataset, candidates, output, *, keep_ratio=4):
+    """Thin only unchanged Seller Train labels before any context/model work."""
+    dataset, candidates, output = map(lambda p: Path(p).resolve(), (dataset, candidates, output))
+    require(type(keep_ratio) is int and keep_ratio >= 0, 'Seller keep ratio must be a nonnegative integer')
+    require(not output.exists(), 'Choose a new candidate directory')
+    source = json.loads(candidates.read_text())
+    require(source['schema'] == SCHEMA, 'Expected split candidate manifest')
+    require(source['dataset_manifest_sha256'] == sha256(dataset/'manifest.json'), 'Candidate dataset differs')
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.'+output.name+'-', dir=output.parent) as temp:
+        staging = Path(temp)/'release'
+        staging.mkdir()
+        roles = {role: {} for role in source['roles']}
+        for role, splits in source['roles'].items():
+            for split, entry in splits.items():
+                if (role, split) != ('seller', 'train'):
+                    shutil.copyfile(candidates.parent/entry['file'], staging/entry['file'])
+                    roles[role][split] = dict(entry)
+        filename = source['roles']['seller']['train']['file']
+        manifest = json.loads((dataset/'manifest.json').read_text())
+        with closing(Catalog(manifest['catalog'])) as catalog:
+            c = catalog.connection
+            c.execute('CREATE TEMP TABLE train_candidates AS SELECT * FROM read_parquet(?)',
+                      [str(candidates.parent/filename)])
+            changed = changed_seller_records(c, '''SELECT seller_id,item_id,
+                history_cutoff_exclusive AS time_index FROM train_candidates''')
+            require(changed, 'No observed price changes in the selected Seller Train window')
+            c.execute('CREATE TEMP TABLE changed_seller(seller_id BIGINT,item_id BIGINT,time_index BIGINT)')
+            c.executemany('INSERT INTO changed_seller VALUES (?,?,?)', changed)
+            c.execute('''CREATE TEMP TABLE marked AS SELECT t.*, c.time_index IS NOT NULL AS price_changed
+                FROM train_candidates t LEFT JOIN changed_seller c
+                ON t.seller_id=c.seller_id AND t.item_id=c.item_id AND t.history_cutoff_exclusive=c.time_index''')
+            total, changes = c.execute('SELECT count(*),count(*) FILTER (WHERE price_changed) FROM marked').fetchone()
+            kept = min(total-changes, changes*keep_ratio)
+            c.execute(f'''COPY (
+                WITH kept_unchanged AS (
+                    SELECT record_id FROM marked WHERE NOT price_changed
+                    ORDER BY sha256(record_id || ':' || {literal(source['seed'])}),record_id LIMIT {kept}
+                )
+                SELECT * EXCLUDE(price_changed) FROM marked
+                WHERE price_changed OR record_id IN (SELECT record_id FROM kept_unchanged)
+                ORDER BY actor_id,history_cutoff_exclusive,item_id
+            ) TO {literal(staging/filename)} (FORMAT PARQUET)''')
+        roles['seller']['train'] = dict(file=filename, records=changes+kept, sha256=sha256(staging/filename))
+        result = dict(schema=SCHEMA, seed=source['seed'], roles=roles,
+                      dataset_manifest_sha256=source['dataset_manifest_sha256'],
+                      source_candidates_sha256=sha256(candidates),
+                      seller_train_sampling=dict(unchanged_per_changed=keep_ratio, source_records=total,
+                          source_changed=changes, source_unchanged=total-changes,
+                          kept_changed=changes, kept_unchanged=kept),
+                      selection='All changed Seller Train quotes; unchanged quotes ordered by SHA256(record_id:seed). Customer and Test unchanged.',
+                      history='Only supervision targets are filtered; all eligible earlier facts remain available.')
+        write_report(staging/'manifest.json', result)
+        staging.rename(output)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('dataset', 'output', 'config'):
+    for name in ('dataset', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--config', type=Path, help='Build the original stratified candidate pool')
+    mode.add_argument('--candidates', type=Path, help='Keep Customer/Test and thin unchanged Seller Train targets')
+    parser.add_argument('--seller-keep-ratio', type=int, default=4,
+                        help='Maximum unchanged Seller Train targets per changed target (default: 4)')
     args = parser.parse_args()
-    select(args.dataset, args.output, args.config)
+    if args.candidates:
+        result = select_seller_training(args.dataset, args.candidates, args.output, keep_ratio=args.seller_keep_ratio)
+        print(json.dumps(result['seller_train_sampling'], ensure_ascii=False))
+    else:
+        select(args.dataset, args.output, args.config)
 
 
 if __name__ == '__main__':
