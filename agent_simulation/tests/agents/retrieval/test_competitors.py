@@ -283,37 +283,41 @@ class ModelCompetitorTests(unittest.TestCase):
     def test_model_can_select_zero_or_more_than_three_without_changing_quotes(self):
         from agent_simulation.agents.context import ContextModel
         from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
-        candidates = [dict(product(i, 20), reference_price_raw=i * 10) for i in range(2, 8)]
+        focal = dict(product(1, 10), item_title="适配iPhone 15的保护壳")
+        candidates = [dict(product(i, 20), reference_price_raw=i * 10,
+                           item_title="适配iPhone 14的保护壳") for i in range(2, 8)]
+        pair = {"item_id": 2, "focal_detail": "iPhone 15", "competitor_detail": "iPhone 14"}
         before = deepcopy(candidates)
-        for ids in ([], [2, 3, 4, 5], [2, 3, 4, 5, 6]):
+        for ids, invalid in (
+            ([], pair),
+            ([2, 3, 4, 5], dict(pair, item_id=6)),
+            ([2, 3, 4, 5, 6], dict(pair, competitor_detail="iPhone 16")),
+            ([2, 3, 4, 5, 6], dict(pair, focal_detail=focal["item_title"])),
+            ([2, 3, 4, 5, 6], dict(pair, item_id=3)),
+        ):
             selection = {str(item): True for item in ids}
             if len(ids) == 4:
                 selection['6'] = False
-            client = ScriptedModel([answer({
-                'selected_items': selection,
-                'market_overview': '均价999元。市场价格覆盖不完整。',
-                'comparability': '选择了64个竞品。适配iPhone 15，规格仍有缺失。',
-                'price_position': '价格范围1到900元。报价处于主流价格带上沿，规格差异尚不明确。',
-            })])
+            result = {"selected_items": selection, "comparability": [pair, invalid]}
+            client = ScriptedModel([answer(result)])
             client.tokenizer = TokenizerFixture()
             model = ContextModel('fixture', competitor_candidates=5, client=client)
-            selected, analysis = model.competitors(product(1, 10), candidates, {'median_price': 100})
+            selected, analysis = model.competitors(focal, candidates)
             self.assertEqual([p['item_id'] for p in selected], ids)
             self.assertEqual(analysis['candidates_considered'], 5)
             self.assertEqual(analysis['selected_count'], len(ids))
             self.assertEqual(analysis['selected_observed_price_raw_range'], [min(ids)*10, max(ids)*10] if ids else None)
-            self.assertEqual(analysis['comparability'], '适配iPhone 15，规格仍有缺失。')
-            self.assertEqual(analysis['market_overview'], '市场价格覆盖不完整。')
-            self.assertIn('价格带上沿', analysis['price_position'])
+            self.assertEqual(analysis.get('comparability', []), [pair] if ids else [])
             import json
             from agent_simulation.agents.prompts.context_format import unpack
             payload = json.loads(client.requests[0]['messages'][1]['content'])
             self.assertIn('$table', payload['candidates'])
-            self.assertEqual(unpack(payload)['candidates'], candidates[:5])
+            self.assertEqual(unpack(payload)['candidates'], [
+                {k: p[k] for k in ("item_id", "item_title", "brand_name")} for p in candidates[:5]
+            ])
             self.assertEqual(len(client.requests), 1)
             from agent_simulation.inference.local.qwen import action_parser
-            output = json.dumps({'selected_items': selection, **{k: analysis[k] for k in
-                                ('market_overview', 'comparability', 'price_position')}}, ensure_ascii=False)
+            output = json.dumps(result, ensure_ascii=False)
             parser = action_parser(client.requests[0]['json_schema'], 1536, ''.join(set(output)))
             for char in output:
                 self.assertIn(char, parser.get_allowed_characters())

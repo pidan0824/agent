@@ -39,8 +39,8 @@ SELLER_EVIDENCE_NOTE = (
     'Price quantiles are per product; own_quote.percentile is a 0..1 midrank of the observed own price. '
     'known_products includes unknown prices, while products counts valid quotes. same_brand is a subset. '
     'largest_shop_product_share measures offer concentration, not sales share. '
-    'Generated market_overview, comparability and price_position interpret those facts and may be wrong. '
-    'Use original statistics and quote cards when they conflict. Logged exposures do not establish attention; '
+    'Competitor comparability lists title excerpts for the target and the specified item. '
+    'Use observed_market and original quote cards for prices. Logged exposures do not establish attention; '
     'missing clicks or purchases do not establish rejection. Older competitor references are not current quotes. '
     'decision.requested_item_ids gives the quote scope.'
 )
