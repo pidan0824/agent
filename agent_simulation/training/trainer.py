@@ -1,9 +1,11 @@
 """Weighted answer loss, checkpointing and evaluation on the configured selection split."""
 
 import math
+from itertools import repeat
 from pathlib import Path
 import torch
 from torch.nn import functional as F
+from accelerate.utils import gather_object
 from transformers import Trainer, TrainerCallback, TrainingArguments
 
 from agent_simulation.training.data_loader import TensorCollator, RESPONSE_FORMAT_WEIGHT
@@ -40,21 +42,27 @@ class EpochCheckpoint(TrainerCallback):
 
 
 class EpochStream(torch.utils.data.IterableDataset):
-    """Keep Accelerate's replacement skip-loader from resetting the underlying shuffle epoch."""
+    """Keep shuffle state on resume and give every rank a full last batch."""
 
-    def __init__(self, stream):
-        self.stream = stream
+    def __init__(self, stream, multiple=1):
+        self.stream, self.multiple = stream, multiple
 
     def __len__(self):
-        return len(self.stream)
+        size = len(self.stream)
+        return size + (-size % self.multiple)
 
     def __iter__(self):
-        return iter(self.stream)
+        yield from self.stream
+        if self.multiple > 1:
+            yield from repeat(None, -len(self.stream) % self.multiple)
 
 
 class RestoreShuffleEpoch(TrainerCallback):
-    def on_epoch_begin(self, args, state, control, train_dataloader, **kwargs):
-        train_dataloader.dataset.stream.set_epoch(int(state.epoch or 0))
+    def __init__(self, stream):
+        self.stream = stream
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        self.stream.set_epoch(int(state.epoch or 0))
 
 
 class BehaviorTrainer(Trainer):
@@ -67,6 +75,7 @@ class BehaviorTrainer(Trainer):
         # compute_loss already divides by the number of examples across all microbatches.
         self.accelerator.gradient_accumulation_steps = 1
         self._loss_totals = None
+        self._evaluating = False
         self.schedule_epochs = None
         self.activation_offload_tokens = None
 
@@ -97,11 +106,21 @@ class BehaviorTrainer(Trainer):
                 logs["epoch_train_steps"] = len(losses)
         return super().log(logs, start_time=start_time)
 
-    def evaluation_loop(self, *args, metric_key_prefix="eval", **kwargs):
+    def evaluation_loop(self, dataloader, *args, metric_key_prefix="eval", **kwargs):
         self._loss_totals = {} if getattr(self.data_collator, "loss_breakdown", False) else None
+        self._evaluating = True
         try:
-            result = super().evaluation_loop(*args, metric_key_prefix=metric_key_prefix, **kwargs)
-            for stage, totals in (self._loss_totals or {}).items():
+            result = super().evaluation_loop(dataloader, *args, metric_key_prefix=metric_key_prefix, **kwargs)
+            totals_by_stage = self._loss_totals or {}
+            if self.args.world_size > 1:
+                dataset = dataloader.dataset.dataset
+                # Trainer averages over the full padded batches. Only real rows contribute loss.
+                samples = len(dataset.stream)
+                result.metrics[f"{metric_key_prefix}_loss"] *= len(dataset) / samples
+                result = result._replace(num_samples=samples)
+                if self._loss_totals is not None:
+                    totals_by_stage = self._merge_loss_totals(gather_object([self._loss_totals]))
+            for stage, totals in totals_by_stage.items():
                 prefix = f"{metric_key_prefix}_{stage}"
                 rows, weight, answer = totals["rows"], totals["weight"], totals["answer"]
                 result.metrics.update({prefix + "_rows": rows, prefix + "_weight": weight,
@@ -117,6 +136,22 @@ class BehaviorTrainer(Trainer):
             return result
         finally:
             self._loss_totals = None
+            self._evaluating = False
+
+    @staticmethod
+    def _merge_loss_totals(by_rank):
+        merged = {}
+        for rank_totals in by_rank:
+            for stage, totals in rank_totals.items():
+                if stage not in merged:
+                    merged[stage] = totals
+                    continue
+                current = merged[stage]
+                for field in ("rows", "weight", "answer"):
+                    current[field] += totals[field]
+                for part, values in totals["parts"].items():
+                    current["parts"][part] = [a + b for a, b in zip(current["parts"][part], values)]
+        return merged
 
     def _record_loss_parts(self, inputs, targets, token_losses, positions, effective_weights, token_weights):
         parts = inputs["answer_parts"][:, positions + 1].detach().cpu()
@@ -126,6 +161,8 @@ class BehaviorTrainer(Trainer):
         for i, (stage, request_weight, weight) in enumerate(zip(
             inputs["stages"].tolist(), inputs["sample_weights"].tolist(), effective_weights.tolist()
         )):
+            if weight == 0:
+                continue
             stage = ("query", "response", "seller")[stage]
             totals = self._loss_totals.setdefault(stage, {"rows": 0, "weight": 0., "answer": 0.,
                 "parts": {p: [0, 0., 0., 0.] for p in ("structure", "click_id", "purchase_id", "decision")}})
@@ -144,7 +181,16 @@ class BehaviorTrainer(Trainer):
                     item[3] += weight * loss / count
 
     def _get_num_items_in_batch(self, batch_samples, device):
-        return sum(batch["labels"].shape[0] for batch in batch_samples)
+        if self._evaluating:
+            # Trainer reports a mean over physical rows; remove padding once for the full evaluation.
+            return sum(batch["labels"].shape[0] for batch in batch_samples)
+        count = sum(batch["real_rows"].sum() if "real_rows" in batch else batch["labels"].shape[0]
+                    for batch in batch_samples)
+        if self.args.world_size > 1:
+            # DDP averages gradients across ranks, so divide by global real rows / ranks.
+            count = self.accelerator.reduce(torch.as_tensor(count, device=device), reduction="sum")
+            count = count / self.args.world_size
+        return count
 
     def _save_rng_state(self, output_dir):
         super()._save_rng_state(output_dir)
@@ -164,6 +210,8 @@ class BehaviorTrainer(Trainer):
             raise ValueError("Invalid sample weights")
         if "action_multipliers" in inputs:
             weights = weights * inputs["action_multipliers"]
+        if "real_rows" in inputs:
+            weights = weights.masked_fill(~inputs["real_rows"], 0)
         # Qwen can project only positions needed to predict answer tokens. Context
         # attention remains complete; neither facts nor supervised tokens are cut.
         positions = labels[:, 1:].ne(-100).any(0).nonzero().flatten()
@@ -228,15 +276,18 @@ def make_trainer(model, tokenizer, args, train_data, eval_data, *, evaluate_each
         seed=args.seed,
         data_seed=args.seed,
         optim="adamw_torch",
+        accelerator_config={"dispatch_batches": False},
+        ddp_find_unused_parameters=False,
     )
-    if options.device.type != args.device or options.world_size != 1:
-        raise ValueError(
-            "This entry point requires one explicit device/process; no implicit fallback"
-        )
+    if options.device.type != args.device or options.n_gpu > 1:
+        raise ValueError("Select one device, or use torchrun with one process per GPU")
     callbacks = [EpochCheckpoint()]
-    if isinstance(train_data, torch.utils.data.IterableDataset):
-        train_data = EpochStream(train_data)
-        callbacks.append(RestoreShuffleEpoch())
+    if hasattr(train_data, "set_epoch"):
+        callbacks.append(RestoreShuffleEpoch(train_data))
+    if isinstance(train_data, torch.utils.data.IterableDataset) or options.world_size > 1:
+        train_data = EpochStream(train_data, options.world_size * args.batch_size if options.world_size > 1 else 1)
+    if evaluate and options.world_size > 1:
+        eval_data = EpochStream(eval_data, options.world_size * args.batch_size)
     trainer = BehaviorTrainer(
         model=model,
         args=options,

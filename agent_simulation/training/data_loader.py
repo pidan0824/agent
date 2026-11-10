@@ -258,6 +258,12 @@ class TensorCollator:
         self.action_weights = action_weights or {}
 
     def __call__(self, samples):
+        real_rows = [sample is not None for sample in samples]
+        if not all(real_rows):
+            # A two-token row keeps the last distributed forward/backward in sync.
+            pad = self.tokenizer.pad_token_id
+            dummy = PreparedRow("query:padding", np.array([pad, pad], dtype=np.int32), 1, 1.0)
+            samples = [sample if sample is not None else dummy for sample in samples]
         if not isinstance(samples[0], PreparedRow):
             samples = [PreparedRow.from_sample(sample, self.tokenizer) for sample in samples]
         length = max(len(s.tokens) for s in samples)
@@ -271,6 +277,8 @@ class TensorCollator:
             labels[i, start:n] = ids[i, start:n]
         result = {"input_ids": ids, "attention_mask": mask, "labels": labels,
                   "sample_weights": torch.tensor([s.weight for s in samples], dtype=torch.float32)}
+        if not all(real_rows):
+            result["real_rows"] = torch.tensor(real_rows, dtype=torch.bool)
         if self.action_weights:
             result["action_multipliers"] = torch.tensor([
                 self.action_weights.get(sample.sample_id, 1.0) for sample in samples

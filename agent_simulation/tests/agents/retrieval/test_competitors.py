@@ -354,3 +354,16 @@ class ModelCompetitorTests(unittest.TestCase):
         client.tokenizer = TokenizerFixture()
         selected, _ = ContextModel("fixture", client=client).competitors(focal, [matching, wrong_value])
         self.assertEqual(selected, [matching])
+
+    def test_kit_matches_other_sizes_and_pack_counts_but_not_a_single_item(self):
+        from agent_simulation.agents.context import ContextModel
+        from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
+
+        focal = dict(product(1, 10), item_title="XL粉扑四件套")
+        other_kit = dict(product(2, 20), item_title="L号粉扑三件套装")
+        single = dict(product(3, 30), item_title="大号粉扑单个")
+        client = ScriptedModel([answer({"match_terms": ["粉扑"], "selected_items": [2, 3],
+                                        "market_overview": ""})])
+        client.tokenizer = TokenizerFixture()
+        selected, _ = ContextModel("fixture", client=client).competitors(focal, [other_kit, single])
+        self.assertEqual(selected, [other_kit])

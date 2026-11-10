@@ -5,9 +5,12 @@ import argparse
 import importlib.metadata
 import json
 import math
+import os
 import torch
 from itertools import islice
 from pathlib import Path
+from accelerate import PartialState
+from accelerate.utils import broadcast_object_list
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoConfig, AutoModelForCausalLM, set_seed
 from agent_simulation.inference.local.checkpoints import adapter_training_identity
@@ -178,8 +181,8 @@ def training_identity(args, data_check, eval_split):
     return value
 
 
-def resume_checkpoint(output, requested, *, device="cpu"):
-    """Select a completed single-process PEFT training snapshot in this run."""
+def resume_checkpoint(output, requested, *, device="cpu", world_size=1):
+    """Select a complete PEFT snapshot with RNG state from every rank."""
     output = output.resolve()
     latest = requested == Path("latest")
     if latest:
@@ -192,7 +195,9 @@ def resume_checkpoint(output, requested, *, device="cpu"):
             raise ValueError("Resume must name a numbered checkpoint in this output directory")
         # Trainer writes trainer_state.json last, after the weights, optimizer, scheduler and RNG.
         required = ("adapter_config.json", "adapter_model.safetensors", "optimizer.pt",
-                    "scheduler.pt", "rng_state.pth", "trainer_state.json")
+                    "scheduler.pt", "trainer_state.json")
+        required += (("rng_state.pth",) if world_size == 1 else
+                     tuple(f"rng_state_{rank}.pth" for rank in range(world_size)))
         if device == "mps":
             required += ("mps_rng_state.pt",)
         if all((path / name).is_file() and (path / name).stat().st_size for name in required):
@@ -256,17 +261,27 @@ def train(args):
                        max(multipliers['click_weight'], multipliers['purchase_weight']))
     if relevant_weight > 1 and not args.token_cache:
         raise ValueError("Action weighting requires a completed token cache")
-    if args.output.exists() and not args.resume:
-        raise FileExistsError("Use a new output directory or explicitly resume its checkpoint")
     args.device = resolve_device(args.device).type
+    distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    if distributed and (not args.token_cache or args.device != "cuda"):
+        raise ValueError("Distributed training requires CUDA and a finished token cache")
+    if args.device == "cuda" and not distributed and torch.cuda.device_count() > 1:
+        raise ValueError("Select one GPU with CUDA_VISIBLE_DEVICES, or launch torchrun with one process per GPU")
+    state = PartialState() if distributed else None
+    world_size = state.num_processes if state else 1
+    main = state is None or state.is_main_process
+    if main and args.output.exists() and not args.resume:
+        raise FileExistsError("Use a new output directory or explicitly resume its checkpoint")
     offload = getattr(args, "activation_offload_tokens", None)
     if offload is not None and (offload < 1 or args.device != "cuda" or not args.gradient_checkpointing):
         raise ValueError("Activation offload requires a positive token threshold, CUDA and gradient checkpointing")
     checkpoint = None
     adapter = args.init_adapter
     if args.resume:
-        checkpoint = resume_checkpoint(args.output, args.resume, device=args.device)
         config = json.loads((args.output / "run_config.json").read_text())
+        if config["identity"].get("world_size", 1) != world_size:
+            raise ValueError("Resume with the original number of training processes")
+        checkpoint = resume_checkpoint(args.output, args.resume, device=args.device, world_size=world_size)
         # Retired evaluation-only settings do not affect the saved optimizer or data stream.
         saved_identity = {k: v for k, v in config["identity"].items()
                           if k not in ("training_code_sha256", "evaluate_train")}
@@ -286,9 +301,15 @@ def train(args):
             raise ValueError("Expected a LoRA adapter")
         args.rank = adapter_config["r"]
     # Bind the current data and model before loading weights.
-    data_check = check_data(args)
     eval_split = selection_split(args.dataset)
-    identity = training_identity(args, data_check, eval_split)
+    data_check = check_data(args) if main else None
+    identity = training_identity(args, data_check, eval_split) if main else None
+    if state:
+        # Only rank zero reads and hashes the full base model release.
+        metadata = [data_check, identity]
+        broadcast_object_list(metadata)
+        data_check, identity = metadata
+        identity["world_size"] = world_size
     if relevant_weight > 1:
         # Earlier checkpoints selected by unweighted loss cannot share the best-metric state.
         identity["evaluation_action_weights"] = True
@@ -314,7 +335,7 @@ def train(args):
     if samples_per_epoch == 0:
         raise ValueError("Empty training epoch")
     action_weights = action_multipliers(args, tokenizer, train_data, evaluation_data)
-    if not args.resume:
+    if main and not args.resume:
         args.output.mkdir(parents=True)
         write_report(
             args.output / "run_config.json",
@@ -330,6 +351,8 @@ def train(args):
                 "lora_reference": "PolicySim rank 64; targets/alpha/dropout are explicit project choices",
             },
         )
+    if state:
+        state.wait_for_everyone()
     try:
         set_seed(args.seed)
         model = load_base_model(args)
@@ -347,15 +370,18 @@ def train(args):
                 bias="none",
                 target_modules=targets,
             ))
-        model.print_trainable_parameters()
+        if main:
+            model.print_trainable_parameters()
         trainer = make_trainer(
             model, tokenizer, args, train_data, evaluation_data, evaluate_each_epoch=True,
             action_weights=action_weights,
         )
         initial_metrics = trainer.evaluate() if not args.resume else None
-        if initial_metrics is not None:
+        if main and initial_metrics is not None:
             write_report(args.output / "initial_evaluation.json", initial_metrics)
         result = trainer.train(resume_from_checkpoint=str(checkpoint) if checkpoint else None)
+        if not main:
+            return None
         best = trainer.state.best_model_checkpoint
         if best is None or not math.isfinite(trainer.state.best_metric):
             raise ValueError("No checkpoint with finite evaluation loss")
@@ -381,7 +407,8 @@ def train(args):
         )
         return metrics
     except Exception as error:
-        write_outcome(args.output, completed=False, payload={"status": "incomplete", "error": repr(error)})
+        if main:
+            write_outcome(args.output, completed=False, payload={"status": "incomplete", "error": repr(error)})
         raise
 
 
@@ -466,4 +493,6 @@ def parser():
 
 if __name__ == "__main__":
     a = parser().parse_args()
-    print(json.dumps(check_data(a) if a.command == "check" else train(a), ensure_ascii=False))
+    result = check_data(a) if a.command == "check" else train(a)
+    if result is not None:
+        print(json.dumps(result, ensure_ascii=False))

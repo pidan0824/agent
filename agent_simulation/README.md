@@ -558,7 +558,7 @@ Token 缓存绑定对应的标签清单和候选清单。小规模合并／分�
 当前计划是完整 2% 的 Customer 和 Seller 各训练 10 个 epoch。以下命令仅在新版本对应角色的 Token 缓存完成后执行；目前该缓存尚未构造。以 Seller 为例：
 
 ```bash
-./agent_simulation/python.sh -m agent_simulation.training.run train \
+CUDA_VISIBLE_DEVICES=0 ./agent_simulation/python.sh -m agent_simulation.training.run train \
   --dataset data/kuaisearch/lite/sft --model models/Qwen2.5-3B-Instruct \
   --token-cache runs/lite_sft_tokens \
   --seed 42 --role seller --output runs/seller_2pct \
@@ -568,7 +568,19 @@ Token 缓存绑定对应的标签清单和候选清单。小规模合并／分�
 
 这条命令消费候选缓存中的全部已接受 train／test，test 用于选模。不传 `--token-cache` 时，默认读取整个标签池。
 
-默认 LoRA rank=64、学习率=1e-6，参考 [PolicySim §4.1.4](https://arxiv.org/html/2603.19649v1#S4.SS1.SSS4)。`q/k/v/o_proj`、alpha=2×rank、dropout=0.05、微批大小=1、梯度累积=16 是当前显式配置，不称为官方复现。训练只支持单进程、单设备，实际使用的设备会写入续训身份。
+默认 LoRA rank=64、学习率=1e-6，参考 [PolicySim §4.1.4](https://arxiv.org/html/2603.19649v1#S4.SS1.SSS4)。`q/k/v/o_proj`、alpha=2×rank、dropout=0.05、微批大小=1、梯度累积=16 是当前显式配置，不称为官方复现。支持单设备训练和同机 CUDA 多卡 DDP。DDP 每张卡各加载一份基座，处理不同样本并同步 LoRA 梯度，要求已完成的角色 Token 缓存。
+
+两张卡训练 Customer 时用同一条训练命令和已完成的新缓存，通过 `torchrun` 启动每卡一个进程：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc-per-node=2 -m agent_simulation.training.run train \
+  --dataset data/kuaisearch/lite/sft --model models/Qwen3-32B \
+  --token-cache runs/customer_tokens --role customer --output runs/customer_ddp \
+  --device cuda --dtype bfloat16 --epochs 5 --batch-size 1 --accumulation 8 \
+  --activation-offload-tokens 20000 --loss-breakdown
+```
+
+批大小和梯度累积按卡设置。上例每步最多使用 16 条真实样本，末批的填充行不计入 loss 或评估。多卡 checkpoint 保存每个进程的随机状态，续训沿用原卡数和训练参数；改卡数时可用 `--init-adapter` 新开运行。每卡都需要足够显存放一份模型。
 
 小规模试训可用 `--train-samples` 和 `--eval-samples` 控制记录数。设备缓存压力较大时，可用 `--empty-cache-steps 1` 启用 Transformers 的未使用缓存释放机制；样本、答案和 loss 保持原样，该参数记入运行配置。
 
@@ -709,7 +721,7 @@ Seller 每个批次根据本批商品和市场上下文报价。默认市场摘�
 
 市场摘要覆盖同类目其他店铺的全部合格近期报价，提供有效报价商品/店铺数、未知价格覆盖、价格最小值/P25/中位数/P75/最大值、报价索引范围及中位索引。本商品最近观测价在该分布中的分位为0..1，价格相同时使用中位秩；不足两件可比商品时不报告分位。同品牌参照是全类目统计的子集，不代表规格一致；无品牌或未知品牌不归成同品牌竞争组。店铺商品占比仅衡量报价商品集中度，不代表销量份额。最新无效报价保持未知，不用旧有效价格补齐。
 
-上下文模型在一次调用内从目标标题摘出 1 至 3 个能说明商品类型与必要规格的短词组，再选择直接替代商品的 ID 和市场比较角度。入选标题须能匹配这些词组，比较时统一大小写、全半角和空白，并识别运营商常用简称。词组只用于当次筛选，商品标题始终显示原文。入选依据是原始标题明确支持相同商品类型、用途和可比的销售单位。影响替代性的规格（如适配型号、充值运营商与面额、套装件数）须有匹配依据。无合适竞品时可以返回空列表。Seller 用入选商品的原始标题、报价和观测时间作比较。市场概况按模型选中的角度，由已有统计呈现中部报价与上端极值、同品牌与全类目中位数、报价覆盖或店铺供给集中度。报价位置复用已计算的价格带，计算与同品牌中位数的差值，并明确窗口前旧报价。两部分仍进入 Seller 上下文，标记为 derived_analysis。
+上下文模型在一次调用内从目标标题摘出 1 至 3 个能说明商品类型与必要规格的短词组，再选择直接替代商品的 ID 和市场比较角度。入选标题须能匹配这些词组，比较时统一大小写、全半角和空白，并识别运营商常用简称。目标标题明确标注套装时，候选也须明确是套装，允许套盒、件套或套装等不同写法。词组只用于当次筛选，商品标题始终显示原文。原始标题须支持相同购物用途和可比较的销售形态。套装之间可以比较不同尺寸或件数；适配型号、话费运营商和面额等决定用途或计价单位的条件仍须匹配。无合适竞品时可以返回空列表。Seller 用入选商品的原始标题、报价和观测时间作比较。市场概况按模型选中的角度，由已有统计呈现中部报价与上端极值、同品牌与全类目中位数、报价覆盖或店铺供给集中度。报价位置复用已计算的价格带，计算与同品牌中位数的差值，并明确窗口前旧报价。两部分仍进入 Seller 上下文，标记为 derived_analysis。
 
 Customer 的背景商品表可供完全相同商品 ID 和标题复用：item_title 中的 {title_ref:i} 指向 behavioral_summary.item_details[i]。编码时同时比较直接表格与引用形式，计入说明开销，只选择更短的形式；解码恢复原始标题。品牌、类目、价格、事件顺序和原始重复 ID 不变，不按商品 ID 合并不同历史快照。共用来源说明只写一次，长期记忆说明只在有记忆时加入。
 

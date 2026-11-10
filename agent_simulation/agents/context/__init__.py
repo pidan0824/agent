@@ -196,7 +196,13 @@ class ContextModel:
             return [], {"source": "model_summary", "candidates_considered": 0,
                         "selected_count": 0, "selected_observed_price_raw_range": None}
         views = market_comparisons(market)
-        task = (
+        def title_key(text):
+            return "".join(normalize("NFKC", text).casefold().split())
+
+        focal_title = title_key(focal.get("item_title") or "")
+        kit_markers = ("套装", "套盒", "件套", "套组", "组合装")
+        focal_is_kit = any(marker in focal_title for marker in kit_markers)
+        selection = (
             "Find direct substitutes for the same specific purchase. First return match_terms, one to three "
             "short fragments copied from the focal title. Use separate fragments for the product type and "
             "essential variants. Pick the shortest useful wording so different word order still matches. "
@@ -211,6 +217,16 @@ class ContextModel:
             "instead of a long phrase or full title. "
             "Next return selected_items. Include only IDs for the same product type with all match_terms in "
             "their titles. Exclude incompatible items and repeated listings. Return [] if none qualifies. "
+        )
+        if focal_is_kit:
+            selection = (
+                "Select kits serving the same concrete use. For match_terms, copy one core product noun "
+                "from the focal title, such as 粉扑 or 梳. Size, brand, and piece count can differ. "
+                "Include only kits with that product and the same use. A single item, accessory, "
+                "or product used in a different way does not qualify. Skip duplicates. "
+                "Return the qualifying IDs in selected_items, or [] when no kit is comparable. "
+            )
+        task = selection + (
             "For market_overview, choose the most useful key in market_comparisons, or an empty string if none applies. "
             "Use the supplied price_position_facts and market comparisons as given. "
             "In each $table, columns defines row positions and shared applies to every row. Return only JSON."
@@ -228,7 +244,7 @@ class ContextModel:
                 raise ContextCapacityError("One competitor record exceeds the context model input budget")
             offered = offered[:len(offered) // 2]
         schema = {"type": "object", "properties": {
-            "match_terms": {"type": "array", "minItems": 1, "maxItems": 3,
+            "match_terms": {"type": "array", "minItems": 1, "maxItems": 1 if focal_is_kit else 3,
                             "items": {"type": "string", "minLength": 1, "maxLength": 32}},
             "selected_items": {"type": "array", "uniqueItems": True,
                 "items": {"type": "integer", "enum": [p["item_id"] for p in offered]}},
@@ -237,10 +253,6 @@ class ContextModel:
             "additionalProperties": False}
         result = self._ask(task, packed, schema)
         by_id = {p["item_id"]: p for p in offered}
-        def title_key(text):
-            return "".join(normalize("NFKC", text).casefold().split())
-
-        focal_title = title_key(focal.get("item_title") or "")
         terms = [title_key(term) for term in result["match_terms"]]
         selected = []
         if terms and all(term and term in focal_title for term in terms):
@@ -250,6 +262,8 @@ class ContextModel:
             for item in result["selected_items"]:
                 card = by_id[item]
                 title = title_key(card.get("item_title") or "")
+                if focal_is_kit and not any(marker in title for marker in kit_markers):
+                    continue
                 if all(term in title for term in terms):
                     selected.append(card)
         prices = [p["reference_price_raw"] for p in selected
