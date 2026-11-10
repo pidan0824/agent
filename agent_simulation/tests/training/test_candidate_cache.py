@@ -207,8 +207,10 @@ class CandidateCacheTests(unittest.TestCase):
     def test_late_response_overflow_discards_query_and_earlier_batches(self):
         from agent_simulation.datasets.labels import checked_record
         from agent_simulation.tests.fixtures import DisplayBudgetTokenizer
-        query={'sample_id':'query:1','input':{},'target':{'query':'杯子'}}
-        response={'sample_id':'response:1','input':{'displayed_items':[{'item_id':1},{'item_id':2}]},
+        history = {'short_term_memory': {'search_history': []}}
+        query={'sample_id':'query:1','input':history,'target':{'query':'杯子'}}
+        response={'sample_id':'response:1',
+                  'input':{**history,'displayed_items':[{'item_id':1},{'item_id':2}]},
                   'target':{'clicked_item_ids':[1],'purchased_item_ids':[]}}
         calls=[]
         def check(sample):
