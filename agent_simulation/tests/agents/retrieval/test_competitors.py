@@ -267,6 +267,21 @@ class CompetitorStabilityTests(unittest.TestCase):
 
 class ModelCompetitorTests(unittest.TestCase):
 
+    def test_quote_comparison_distinguishes_old_category_and_brand_references(self):
+        from agent_simulation.agents.context import quote_comparison, market_comparisons
+        market = {"window": {"start_inclusive": 100}, "recent": {
+            "own_quote": {"price_raw": 3980, "observation_index": 90, "price_band": "above_p75"},
+            "p25_price": 1099.25, "p75_price": 3867.5, "max_price": 28310,
+            "median_price": 1684.5, "same_brand": {"brand_name": "雅鹿", "median": 3994.5}}}
+        before = deepcopy(market)
+        text = quote_comparison(market)
+        self.assertIn("窗口前旧报价3980", text)
+        self.assertIn("高于类目中间一半报价区间", text)
+        self.assertIn("中位数3994.5相比低0.36%", text)
+        self.assertIn("brand_and_category", market_comparisons(market))
+        self.assertEqual(market, before)
+        self.assertEqual(quote_comparison({"recent": {"own_quote": {"price_raw": None}}}), "")
+
     def test_single_oversized_competitor_is_a_capacity_failure(self):
         from agent_simulation.agents.context import ContextModel
         from agent_simulation.inference.requests import ContextCapacityError
@@ -295,17 +310,14 @@ class ModelCompetitorTests(unittest.TestCase):
             ([2, 3, 4, 5, 6], dict(pair, focal_detail=focal["item_title"])),
             ([2, 3, 4, 5, 6], dict(pair, item_id=3)),
         ):
-            selection = {str(item): True for item in ids}
-            if len(ids) == 4:
-                selection['6'] = False
+            selection = list(ids)
             result = {"selected_items": selection, "comparability": [pair, invalid],
-                      "market_overview": "中间一半报价为20至50，最高报价70位于该区间之外。",
-                      "price_position": ""}
+                      "market_overview": "middle_and_upper_end"}
             client = ScriptedModel([answer(result)])
             client.tokenizer = TokenizerFixture()
             model = ContextModel('fixture', competitor_candidates=5, client=client)
             market = {"window": {"start_inclusive": 0, "end_exclusive": 10},
-                      "recent": {"p25_price": 20, "p75_price": 50, "max_price": 70}}
+                      "recent": {"products": 5, "p25_price": 20, "p75_price": 50, "max_price": 70}}
             selected, analysis = model.competitors(focal, candidates, market)
             self.assertEqual([p['item_id'] for p in selected], ids)
             self.assertEqual(analysis['candidates_considered'], 5)
@@ -317,7 +329,7 @@ class ModelCompetitorTests(unittest.TestCase):
             payload = json.loads(client.requests[0]['messages'][1]['content'])
             self.assertIn('$table', payload['candidates'])
             self.assertEqual(unpack(payload)['market'], market)
-            self.assertEqual(analysis['market_overview'], result['market_overview'])
+            self.assertEqual(analysis['market_overview'], '类目中间一半报价在20至50之间；最高报价70是上四分位报价的1.40倍。')
             self.assertNotIn('price_position', analysis)
             self.assertEqual(unpack(payload)['candidates'], candidates[:5])
             self.assertEqual(len(client.requests), 1)

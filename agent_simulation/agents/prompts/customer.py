@@ -1,7 +1,7 @@
 """Render shopping history, offers and responses as Customer messages."""
 
 from agent_simulation.agents.prompts.instructions import (
-    CUSTOMER_STEPS, FACT_RULES, HISTORY_NOTE, VALUE_NOTE, TABLE_NOTE,
+    CUSTOMER_STEPS, FACT_RULES, HISTORY_NOTE, VALUE_NOTE, TABLE_NOTE, MEMORY_NOTE, TITLE_NOTE,
     QUERY_TASK,
     QUERY_OUTPUT,
     RESPONSE_SYSTEM,
@@ -136,6 +136,41 @@ def _wire(value, path=()):
                       ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
+def _share_titles(value, background):
+    """Reference identical titles; every event, quote and other attribute stays in place."""
+    details = (background or {}).get("item_details", [])
+    titles = {(p["item_id"], p["item_title"]): i for i, p in enumerate(details)
+              if "item_id" in p and "item_title" in p}
+
+    def visit(node):
+        if isinstance(node, list):
+            return [visit(x) for x in node]
+        if not isinstance(node, dict):
+            return node
+        result = {key: visit(child) for key, child in node.items()}
+        key = (node.get("item_id"), node.get("item_title"))
+        if key in titles:
+            result["item_title"] = {"title_ref": titles[key]}
+        return result
+
+    if not titles:
+        return value
+    return visit(value)
+
+
+def _encoded_history(history, background=None):
+    compact = factor_history(history)
+    variants = [(history, 0), (compact, len(HISTORY_NOTE) + 1)]
+    if background and background.get("item_details"):
+        variants.extend([(_share_titles(history, background), len(TITLE_NOTE) + 1),
+                         (_share_titles(compact, background), len(TITLE_NOTE) + len(HISTORY_NOTE) + 2)])
+    encoded = []
+    for value, note_size in variants:
+        fields = {key: _wire(part, (key,)) for key, part in value.items()}
+        encoded.append((sum(map(len, fields.values())) + note_size, fields))
+    return min(encoded, key=lambda pair: pair[0])[1]
+
+
 def _prepare_display(state):
     """Serialize offers once per representation and share repeated category tuples."""
     items = state["displayed_items"]
@@ -173,7 +208,9 @@ def prepare_history(state, *, recent_summary=...):
     model = context_model()
     if model is not None:
         recent = history.get("short_term_memory", {})
-        summary = (model.summarize(recent.get("search_history", []), scope="Customer recent history")
+        summary = (model.summarize(recent.get("search_history", []), scope="Customer recent history",
+                                  compact={k: json.loads(v) for k, v in
+                                           _encoded_history({"short_term_memory": recent}).items()})
                    if recent_summary is ... else recent_summary)
         if summary is not None:
             history["short_term_memory"] = {**recent, "search_history": [], "summary": summary}
@@ -184,15 +221,13 @@ def prepare_history(state, *, recent_summary=...):
                     for memory in state.get("long_term_memory", ())
                     for evidence in memory.get("evidence_times", ()))
         if not cited:
-            summary = model.summarize(older.get("segments", []), scope="Customer retrieved older history")
+            summary = model.summarize(older.get("segments", []), scope="Customer retrieved older history",
+                                      compact={k: json.loads(v) for k, v in _encoded_history({
+                                          "short_term_memory": {"search_history": []},
+                                          "retrieved_context": {"history": older}}).items()})
             if summary is not None:
                 history["retrieved_context"] = {**retrieved, "history": {**older, "segments": [], "summary": summary}}
-    compact = factor_history(history)
-    encoded = {key: _wire(value, (key,)) for key, value in compact.items()}
-    original = {key: _wire(value, (key,)) for key, value in history.items()}
-    # The compact form also needs the reference instructions in the system prompt.
-    savings = sum(map(len, original.values())) - sum(map(len, encoded.values()))
-    return encoded if savings > len(HISTORY_NOTE) + 1 else original
+    return _encoded_history(history, state.get("behavioral_summary"))
 
 
 def encode_input(state, *, prepared_history=None):
@@ -200,6 +235,11 @@ def encode_input(state, *, prepared_history=None):
     require("$table" not in state, "Reserved shared-input table marker in source")
     history = prepare_history(state) if prepared_history is None else prepared_history
     display = _prepare_display(state) if "displayed_items" in state else {}
+    if display and (state.get("behavioral_summary") or {}).get("item_details"):
+        shared = _prepare_display({**state, "displayed_items": _share_titles(
+            state["displayed_items"], state["behavioral_summary"])})
+        if sum(map(len, shared.values())) + len(TITLE_NOTE) + 1 < sum(map(len, display.values())):
+            display = shared
     encoded = {**history, **display}
     return "{" + ",".join(
         json.dumps(key, ensure_ascii=False) + ":" + (encoded[key] if key in encoded else _wire(value, (key,)))
@@ -217,6 +257,20 @@ def decode_input(text):
                 require(type(i) is int and 0 <= i < len(groups), "Invalid displayed category reference")
                 require(not set(groups[i]).intersection(item), "Conflicting displayed category")
                 item.update(deepcopy(groups[i]))
+    details = (state.get("behavioral_summary") or {}).get("item_details", [])
+
+    def restore_titles(node):
+        if isinstance(node, list):
+            for child in node:
+                restore_titles(child)
+        elif isinstance(node, dict):
+            title = node.get("item_title")
+            if isinstance(title, dict) and "title_ref" in title:
+                node["item_title"] = details[title["title_ref"]]["item_title"]
+            for child in node.values():
+                restore_titles(child)
+
+    restore_titles(state)
     return state
 
 
@@ -230,6 +284,10 @@ def messages(
     notes = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE
     if '"history_encoding":' in content:
         notes += " " + HISTORY_NOTE
+    if '"title_ref"' in content:
+        notes += " " + TITLE_NOTE
+    if visible.get("long_term_memory"):
+        notes += " " + MEMORY_NOTE
     if '"display_categories":' in content:
         notes += " Current offers use category_ref to index display_categories (zero-based)."
     result = [

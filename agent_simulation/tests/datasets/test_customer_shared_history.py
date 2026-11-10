@@ -186,7 +186,7 @@ class ContextSummaryTests(unittest.TestCase):
         class Summaries:
             def __init__(self):
                 self.scopes = []
-            def summarize(self, records, *, scope):
+            def summarize(self, records, *, scope, compact=None):
                 self.scopes.append(scope)
                 return {"source": "model_summary", "text": scope} if records else None
 
@@ -207,6 +207,53 @@ class ContextSummaryTests(unittest.TestCase):
         client = ScriptedModel([answer(reply), answer(reply)])
         client.tokenizer = TokenizerFixture()
         return ContextModel("fixture", history_tokens=threshold, client=client), client
+
+    def test_compact_history_avoids_a_model_call_and_preserves_every_event(self):
+        import json
+        from agent_simulation.agents.prompts.customer import messages, decode_input, _encoded_history
+        product = {"item_id": 9, "item_title": "保温杯" * 100, "brand_name": "品牌", "price_raw": 100}
+        events = [{"time_index": i, "query": "杯子", "clicked_items": [deepcopy(product)],
+                   "purchased_items": []} for i in range(20)]
+        state = {"profile": {"user_id": 1}, "short_term_memory": {"search_history": events}}
+        model, client = self.model({"summary": "should not run"})
+        encoded = {k: json.loads(v) for k, v in _encoded_history(
+            {"short_term_memory": state["short_term_memory"]}).items()}
+        small = len(model.tokenizer.encode(json.dumps(
+            {"scope": "Customer recent history", "history": encoded},
+            ensure_ascii=False, separators=(",", ":")), add_special_tokens=False))
+        raw = sum(len(model.tokenizer.encode(json.dumps(e, ensure_ascii=False),
+                                            add_special_tokens=False)) for e in events)
+        self.assertLess(small, raw)
+        model.history_tokens = (small + raw) // 2
+        before = deepcopy(state)
+        with patch("agent_simulation.agents.context.context_model", return_value=model):
+            shown = decode_input(messages(state)[1]["content"])
+        self.assertEqual(client.requests, [])
+        self.assertEqual(shown, before)
+        self.assertEqual(state, before)
+
+    def test_title_sharing_keeps_old_titles_prices_and_background_sequences(self):
+        from agent_simulation.agents.prompts.customer import messages, decode_input
+        title = "同一商品的完整商品描述" * 20
+        background = {"observed_time_index": 10, "recent_clicked_item_ids": [9, 9],
+                      "recent_purchased_item_ids": [9], "statistics_30d": {"orders": 1},
+                      "item_details": [{"item_id": 9, "item_title": title, "brand_name": "新品牌"}]}
+        state = {"profile": {"user_id": 1}, "behavioral_summary": background,
+                 "short_term_memory": {"search_history": [
+                     {"time_index": i, "query": "杯子", "clicked_items": [
+                         {"item_id": 9, "item_title": title, "brand_name": "旧品牌", "price_raw": i}],
+                      "purchased_items": []} for i in range(3)]},
+                 "displayed_items": [{"item_id": 9, "item_title": title, "price_raw": 100},
+                                     {"item_id": 10, "item_title": "旧标题", "price_raw": None}]}
+        state["short_term_memory"]["search_history"].append(
+            {"time_index": 5, "query": "旧商品", "clicked_items": [
+                {"item_id": 9, "item_title": "旧标题", "price_raw": None}], "purchased_items": []})
+        before = deepcopy(state)
+        with patch("agent_simulation.agents.context.context_model", return_value=None):
+            result = messages(state, response=True)
+        self.assertIn('"title_ref"', result[1]["content"])
+        self.assertEqual(decode_input(result[1]["content"]), before)
+        self.assertEqual(state, before)
 
     def test_short_history_skips_generation_and_preserves_prompt(self):
         from agent_simulation.agents.prompts.customer import messages
@@ -294,7 +341,7 @@ class ContextSummaryTests(unittest.TestCase):
         from agent_simulation.agents.prompts.seller import seller_decision_messages, decode_input as seller_decode
 
         class LongHistory:
-            def summarize(self, records, *, scope):
+            def summarize(self, records, *, scope, compact=None):
                 return {"source": "model_summary", "text": "历史摘要"} if records else None
 
         customer = customer_fixture()

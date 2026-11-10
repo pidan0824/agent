@@ -9,7 +9,7 @@ from agent_simulation.agents.actions import price_schema
 from agent_simulation.agents.prompts.context_format import pack, unpack
 from agent_simulation.agents.prompts.instructions import (
     FACT_RULES, SELLER_STEPS, SELLER_EVIDENCE_NOTE, SELLER_SUPERVISED_SCOPE, SELLER_SYSTEM, SELLER_ANSWER_RULES,
-    SHOP_BATCH_NOTE, TABLE_NOTE, VALUE_NOTE,
+    SHOP_BATCH_NOTE, TABLE_NOTE, VALUE_NOTE, MEMORY_NOTE,
 )
 
 
@@ -77,6 +77,8 @@ def seller_messages(state, target=None, *, system=SELLER_SYSTEM, rules=SELLER_AN
                                recent_summary=summary)
     content = encode_input(visible)
     note = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE
+    if visible["history"].get("long_term_memory"):
+        note += " " + MEMORY_NOTE + " supporting_evidence_refs resolve to the corresponding evidence_ref blocks."
     messages = [
         {"role": "system", "content": system + rules + "\n" + note + SELLER_EVIDENCE_NOTE},
         {"role": "user", "content": content},
