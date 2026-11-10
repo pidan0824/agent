@@ -56,15 +56,25 @@ def seller_messages(state, target=None, *, system=SELLER_SYSTEM, rules=SELLER_AN
     if model is not None:
         # Summarize only historical evidence; original statistics and current quotes stay intact.
         history = visible["history"]
-        records = [{"scope": key, "record": record}
-                   for key in ("price_changes", "similar_evidence") for record in history[key]]
+        cited = {ref for memory in history.get("long_term_memory", ())
+                 for ref in memory["supporting_evidence_refs"]}
+        similar = history["similar_evidence"]
+        records = [{"scope": "price_changes", "record": record} for record in history["price_changes"]]
+        records.extend({"scope": "similar_evidence", "record": record}
+                       for record in similar if record["evidence_ref"] not in cited)
         summary = model.summarize(records, scope="Seller past price changes and retrieved business history")
         if summary is not None:
-            history.update(price_changes=[], similar_evidence=[], summary=summary)
+            history.update(price_changes=[], summary=summary,
+                           similar_evidence=[record for record in similar if record["evidence_ref"] in cited])
+        cited.update(record["recent_evidence_ref"] for record in history["price_changes"]
+                     if "recent_evidence_ref" in record)
         for product in visible["current_state"]["products"]:
-            summary = model.summarize(product["recent"], scope=f"Seller recent history for item {product['item_id']}")
+            recent = product["recent"]
+            summary = model.summarize([record for record in recent if record["evidence_ref"] not in cited],
+                                      scope=f"Seller recent history for item {product['item_id']}")
             if summary is not None:
-                product.update(recent=[], recent_summary=summary)
+                product.update(recent=[record for record in recent if record["evidence_ref"] in cited],
+                               recent_summary=summary)
     content = encode_input(visible)
     note = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE
     messages = [

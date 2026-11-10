@@ -257,3 +257,35 @@ class ContextSummaryTests(unittest.TestCase):
         self.assertEqual(len(client.requests), 1)
         self.assertEqual(json.loads(encoded["retrieved_context"])["history"]["summary"]["text"], "较早经历摘要")
         self.assertEqual(state, before)
+
+
+    def test_runtime_summaries_keep_cited_customer_and_seller_records(self):
+        from agent_simulation.tests.agents.test_customer_evidence import state as customer_fixture
+        from agent_simulation.tests.agents.test_seller_evidence import state as seller_fixture, memory
+        from agent_simulation.agents.prompts.customer import customer_decision_messages, decode_input as customer_decode
+        from agent_simulation.agents.prompts.seller import seller_decision_messages, decode_input as seller_decode
+
+        class LongHistory:
+            def summarize(self, records, *, scope):
+                return {"source": "model_summary", "text": "历史摘要"} if records else None
+
+        customer = customer_fixture()
+        citation = {"same_observations_in_retrieved_history": [{"segment_number": 1, "record_number": 1}]}
+        customer["long_term_memory"] = [{"content": "旧经历", "evidence_times": [citation]}]
+        seller = seller_fixture()
+        seller["short_term_memory"] = []
+        first = seller["retrieved_context"]["history"]["segments"][0]
+        second = {**first, "records": [dict(first["records"][0], index=2)]}
+        seller["retrieved_context"]["history"]["segments"] = [first, second]
+        m = memory(step=2)
+        m["evidence_times"][0]["same_observations_in_retrieved_history"] = [
+            {"segment_number": 2, "record_number": 1}]
+        seller["long_term_memory"] = [m]
+        with patch('agent_simulation.agents.context.context_model', return_value=LongHistory()):
+            c = customer_decode(customer_decision_messages(customer)[1]["content"])
+            s = seller_decode(seller_decision_messages(seller)[1]["content"])
+        self.assertTrue(c["retrieved_context"]["history"]["segments"][0]["records"])
+        self.assertEqual(c["long_term_memory"][0]["evidence_times"], [citation])
+        self.assertEqual([r["evidence_ref"] for r in s["history"]["similar_evidence"]], ["H2"])
+        self.assertEqual(s["history"]["long_term_memory"][0]["supporting_evidence_refs"], ["H2"])
+        self.assertIn("summary", s["history"])

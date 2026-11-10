@@ -269,14 +269,17 @@ class ModelCompetitorTests(unittest.TestCase):
     def test_model_can_select_zero_or_more_than_three_without_changing_quotes(self):
         from agent_simulation.agents.context import ContextModel
         from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
-        candidates = [product(i, 20) for i in range(2, 8)]
+        candidates = [dict(product(i, 20), reference_price_raw=i * 10) for i in range(2, 8)]
         before = deepcopy(candidates)
         for ids in ([], [2, 3, 4, 5]):
-            client = ScriptedModel([answer({'selected_item_ids': ids, 'summary': '按用途比较，规格仍有缺失。'})])
+            client = ScriptedModel([answer({'selected_item_ids': ids, 'summary': '选择了64个竞品。价格范围10到900元。适配iPhone 15，规格仍有缺失。'})])
             client.tokenizer = TokenizerFixture()
             model = ContextModel('fixture', client=client)
             selected, analysis = model.competitors(product(1, 10), candidates, {'median_price': 100})
             self.assertEqual([p['item_id'] for p in selected], ids)
             self.assertEqual(analysis['candidates_considered'], len(candidates))
+            self.assertEqual(analysis['selected_count'], len(ids))
+            self.assertEqual(analysis['selected_observed_price_raw_range'], [20, 50] if ids else None)
+            self.assertEqual(analysis['text'], '适配iPhone 15，规格仍有缺失。')
             self.assertEqual(selected, [p for p in candidates if p['item_id'] in ids])
         self.assertEqual(candidates, before)

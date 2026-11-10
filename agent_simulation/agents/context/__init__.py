@@ -2,7 +2,9 @@
 
 from functools import lru_cache
 import json
+import math
 import os
+import re
 from threading import Lock
 
 from agent_simulation.agents.schemas import strict_json
@@ -99,17 +101,17 @@ class ContextModel:
     def competitors(self, focal, cards, market=None):
         """Select any number of supplied public offers and explain comparability."""
         if not cards:
-            return [], {"source": "model_summary", "text": "没有符合时间和公开范围的候选商品。"}
+            return [], {"source": "model_summary", "candidates_considered": 0,
+                        "selected_count": 0, "selected_observed_price_raw_range": None}
         task = ("Select useful competitors for the focal product using purpose, specifications and "
                 "substitutability. There is no target count: choose zero, one or several as justified. "
                 "Avoid redundant near-identical offers unless a meaningful difference justifies them. "
                 "Do not select only similar prices or force one item per shop. Distinguish direct "
                 "comparables, substitutes and differences. Explain missing specifications. The candidate "
                 "list may be a subset of the category; do not present its prices as full-market statistics. "
-                "The summary should explain selection and qualitative differences; exact prices and market "
-                "statistics are retained separately, so do not restate numeric price ranges or compute "
-                "new statistics in the summary. A category median is never the focal product price. "
-                "If the focal price is missing, do not infer it or claim a price difference. "
+                "Explain only qualitative differences in purpose, style, brand, and specifications. "
+                "Do not state how many products or shops were selected or discuss prices, price differences "
+                "or market statistics. The program supplies counts and price ranges from the selected offers. "
                 "Do not decide the seller's final price. Return selected_item_ids and a summary.")
         offered = list(cards)
         payload = {"focal": focal, "market": market, "candidates": offered,
@@ -127,5 +129,23 @@ class ContextModel:
             "required": ["selected_item_ids", "summary"], "additionalProperties": False}
         result = self._ask(task, payload, schema)
         by_id = {p["item_id"]: p for p in offered}
-        return [by_id[item] for item in result["selected_item_ids"]], {
-            "source": "model_summary", "text": result["summary"], "candidates_considered": len(offered)}
+        selected = [by_id[item] for item in result["selected_item_ids"]]
+        prices = [p["reference_price_raw"] for p in selected
+                  if p.get("price_status") == "observed"
+                  and p.get("reference_price_raw") is not None
+                  and math.isfinite(p["reference_price_raw"]) and p["reference_price_raw"] > 0]
+        analysis = {
+            "source": "model_summary",
+            "candidates_considered": len(offered),
+            "selected_count": len(selected),
+            "selected_observed_price_raw_range": [min(prices), max(prices)] if prices else None,
+        }
+        # Keep price and count claims out of prose while allowing model numbers in product descriptions.
+        count_claim = (r"(?:选(?:择|出|中|取)?(?:了)?|挑选了?|共计?|一共|入选|包含)"
+                       r"\s*[0-9零〇一二三四五六七八九十百千两]+\s*(?:个|件|款|种|家|项|条)")
+        price_claim = r"价格|价位|报价|售价|标价|均价|价差|\d\s*元"
+        text = "".join(sentence for sentence in re.split(r"(?<=[。！？；])|\n+", result["summary"])
+                       if not re.search(count_claim + "|" + price_claim, sentence)).strip()
+        if text:
+            analysis["text"] = text
+        return selected, analysis

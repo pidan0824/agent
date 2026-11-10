@@ -178,9 +178,14 @@ def prepare_history(state):
             history["short_term_memory"] = {**recent, "search_history": [], "summary": summary}
         retrieved = history.get("retrieved_context", {})
         older = retrieved.get("history", {})
-        summary = model.summarize(older.get("segments", []), scope="Customer retrieved older history")
-        if summary is not None:
-            history["retrieved_context"] = {**retrieved, "history": {**older, "segments": [], "summary": summary}}
+        # Citations use segment and record positions. Keep their numbering intact.
+        cited = any(evidence.get("same_observations_in_retrieved_history")
+                    for memory in state.get("long_term_memory", ())
+                    for evidence in memory.get("evidence_times", ()))
+        if not cited:
+            summary = model.summarize(older.get("segments", []), scope="Customer retrieved older history")
+            if summary is not None:
+                history["retrieved_context"] = {**retrieved, "history": {**older, "segments": [], "summary": summary}}
     compact = factor_history(history)
     encoded = {key: _wire(value, (key,)) for key, value in compact.items()}
     original = {key: _wire(value, (key,)) for key, value in history.items()}
