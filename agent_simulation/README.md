@@ -129,9 +129,9 @@ Seller 默认使用 `--seller-price-batch-size 1`，每次明确要求一个目�
 两个角色完成训练并导出 adapter 后，运行 Episode 时可以将下列参数加入已有命令；这些是计划输出路径，目前尚未生成。两份 LoRA 在工作进程内共用同一底座，按请求角色选择。可只指定一个角色，另一角色使用底座。记忆总结也使用底座，训练数据只监督了行为动作。原始调用日志在启用角色路由时记录 `active_adapter`，底座行记为 `__base__`。
 
 ```bash
---model models/Qwen2.5-3B-Instruct \
---customer-adapter training_runs/customer_2pct_v14_recent/adapter \
---seller-adapter training_runs/seller_2pct_v14_recent/adapter
+--model models/Qwen3.5-9B \
+--customer-adapter result/customer_2pct/training/adapter \
+--seller-adapter result/seller_2pct/training/adapter
 ```
 
 每次运行只启动一个本机推理子进程，持有一份 Qwen 权重。它在短收集窗口内合并已经就绪的请求，每行保留自己的输出约束。Customer 和记忆总结也使用该服务。Seller 全部完成后才提交价格；报价超时或失败会使 Tick 失败，迟到的结果不能写回市场。
@@ -540,7 +540,7 @@ Token 缓存绑定对应的标签清单和候选清单。小规模合并／分�
 
 ### 运行入口
 
-统一入口是 `agent_simulation.training.run`。用 `--model` 选择本地 Qwen2.5、Qwen3 或 Qwen3.5 权重，默认读取该模型自带的 tokenizer。训练 Qwen3.5 使用其文本模型，LoRA 同时覆盖全注意力和线性注意力的输入、输出投影。Qwen3 和 Qwen3.5 的动作模板关闭 thinking，监督从 JSON 答案开始。
+统一入口是 `agent_simulation.training.run`。新 LoRA 训练默认使用 Qwen3.5-9B 及其 tokenizer。可用 `--model` 指定其他本地模型做对照。训练 Qwen3.5 使用其文本模型，LoRA 同时覆盖全注意力和线性注意力的输入、输出投影。Qwen3 和 Qwen3.5 的动作模板关闭 thinking，监督从 JSON 答案开始。
 
 更换模型时，用相应的 `--tokenizer models/<模型目录>` 构建新 Token 缓存，冻结标签和请求划分可以复用。CUDA 支持时默认采用 BF16，显式 `--dtype` 可以覆盖。项目默认上下文预算仍为 32,768 token。恢复旧检查点使用其训练时的模型、Tokenizer 和依赖版本。
 
@@ -548,36 +548,42 @@ Token 缓存绑定对应的标签清单和候选清单。小规模合并／分�
 
 ```bash
 ./agent_simulation/python.sh -m agent_simulation.training.run check \
-  --dataset data/kuaisearch/lite/sft --model models/Qwen2.5-3B-Instruct --role seller
+  --dataset runs/lite-relative-time-2pct/sft --role seller
 ./agent_simulation/python.sh -m agent_simulation.training.run check \
-  --dataset data/kuaisearch/lite/sft --model models/Qwen2.5-3B-Instruct --role customer
+  --dataset runs/lite-relative-time-2pct/sft --role customer
 ```
 
 `check` 校验版本及少量 train／评估记录的完整输入，不加载生成模型权重；传 `--token-cache` 时直接检查完成的缓存。当前评估 split 为 test，输出明确记录 `test_used=true`。它不是全量动态 Prompt 容量扫描。批量构造遇到超长记录时，记录并跳过，不截断或缩批重试；版本、标签或存储错误仍终止。
 
-当前计划是完整 2% 的 Customer 和 Seller 各训练 10 个 epoch。以下命令仅在新版本对应角色的 Token 缓存完成后执行；目前该缓存尚未构造。以 Seller 为例：
+训练和评估产物按实验写入 `result/<实验名>/`。训练目录 `training/` 保存 checkpoint、优化器、调度器、随机状态和导出的 adapter，`evaluation/` 保存预测和指标，`logs/` 保存日志。数据和 Token 缓存仍从 `runs/` 或已发布的数据目录读取。以 Seller 为例：
 
 ```bash
+run=result/seller_2pct
+mkdir -p "$run/logs"
+set -o pipefail
 CUDA_VISIBLE_DEVICES=0 ./agent_simulation/python.sh -m agent_simulation.training.run train \
-  --dataset data/kuaisearch/lite/sft --model models/Qwen2.5-3B-Instruct \
-  --token-cache runs/lite_sft_tokens \
-  --seed 42 --role seller --output runs/seller_2pct \
-  --device cuda --dtype bfloat16 --rank 64 --epochs 5
+  --dataset runs/lite-relative-time-2pct/sft \
+  --token-cache runs/lite-relative-time-2pct/tokens-Qwen3.5-9B \
+  --seed 42 --role seller --output "$run/training" \
+  --device cuda --dtype bfloat16 --rank 64 --epochs 5 2>&1 | tee -a "$run/logs/train.log"
 # Customer 使用 --role customer 和独立的 --output。
 ```
 
-这条命令消费候选缓存中的全部已接受 train／test，test 用于选模。不传 `--token-cache` 时，默认读取整个标签池。
+这条命令消费候选缓存中的全部已接受 train／test，test 用于选模。不传 `--token-cache` 时，默认读取整个标签池。运行行为评估时，将其 `--output` 指向同一实验下的 `evaluation/`，日志写到 `logs/eval.log`。续训使用该实验原有的训练目录和 `--resume latest`。
 
 默认 LoRA rank=64、学习率=1e-6，参考 [PolicySim §4.1.4](https://arxiv.org/html/2603.19649v1#S4.SS1.SSS4)。`q/k/v/o_proj`、alpha=2×rank、dropout=0.05、微批大小=1、梯度累积=16 是当前显式配置，不称为官方复现。支持单设备训练和同机 CUDA 多卡 DDP。DDP 每张卡各加载一份基座，处理不同样本并同步 LoRA 梯度，要求已完成的角色 Token 缓存。
 
 两张卡训练 Customer 时用同一条训练命令和已完成的新缓存，通过 `torchrun` 启动每卡一个进程：
 
 ```bash
+run=result/customer_ddp
+mkdir -p "$run/logs"
+set -o pipefail
 CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc-per-node=2 -m agent_simulation.training.run train \
-  --dataset data/kuaisearch/lite/sft --model models/Qwen3-32B \
-  --token-cache runs/customer_tokens --role customer --output runs/customer_ddp \
+  --dataset runs/lite-relative-time-2pct/sft \
+  --token-cache runs/lite-relative-time-2pct/tokens-Qwen3.5-9B --role customer --output "$run/training" \
   --device cuda --dtype bfloat16 --epochs 5 --batch-size 1 --accumulation 8 \
-  --activation-offload-tokens 20000 --loss-breakdown
+  --activation-offload-tokens 20000 --loss-breakdown 2>&1 | tee -a "$run/logs/train.log"
 ```
 
 批大小和梯度累积按卡设置。上例每步最多使用 16 条真实样本，末批的填充行不计入 loss 或评估。多卡 checkpoint 保存每个进程的随机状态，续训沿用原卡数和训练参数；改卡数时可用 `--init-adapter` 新开运行。每卡都需要足够显存放一份模型。
@@ -693,7 +699,7 @@ Lite 完整 Seller 测试标签池中，`369584/376438`（约 98.18%）相对上
 ./agent_simulation/python.sh -m agent_simulation.evaluation.micro.relevance \
   --reference data/kuaisearch/relevance/rank.test.jsonl \
   --predictions /path/to/pair_scores.jsonl --score-model '<checkpoint + revision>' \
-  --output runs/relevance_test.json
+  --output result/platform-relevance/evaluation/relevance_test.json
 ```
 
 `pair_scores.jsonl` 每行保留从 0 开始的 `source_row`、原 `query`、原 `text` 和 `score`。`--score-model` 可填写权重版本或 SHA-256，报告会保存该标识及输入文件的 SHA-256。

@@ -17,7 +17,7 @@
 | 2% 抽样配置 | [lite_2pct_sampling.json](agent_simulation/datasets/lite_2pct_sampling.json) |
 | seed=42 的 2% 候选，按展示商品配对 Customer 与 Seller | [candidates](data/kuaisearch/lite/candidates) |
 
-Git 包含四个标签 Parquet、四个候选 Parquet，以及各自的清单和校验值。完整训练输入由标签和事实表按需构造。数据清单中的绝对路径绑定当前机器上的事实目录。重新构造样本还需要本机的 KuaiSearch 源事实、模型和 Tokenizer。原始数据、模型权重和虚拟环境使用本地依赖，运行结果和缓存由 `runs/` 管理。迁移到其他机器时需准备相同的依赖，并按新路径重建数据清单。
+Git 包含四个标签 Parquet、四个候选 Parquet，以及各自的清单和校验值。完整训练输入由标签和事实表按需构造。数据清单中的绝对路径绑定当前机器上的事实目录。重新构造样本还需要本机的 KuaiSearch 源事实、模型和 Tokenizer。原始数据、模型权重和虚拟环境使用本地依赖，训练和评估产物放在 `result/`，构造数据和可重建缓存放在 `runs/`。迁移到其他机器时需准备相同的依赖，并按新路径重建数据清单。
 
 本机的 `models`、`.venv-memory` 和 `.runtime` 复用旧沙箱的模型、Python 环境与 DuckDB。`data/kuaisearch/lite/source/` 集中放置本机链接。`catalog` 和 `splits` 指向同级 `work` 中官方划分对应的事实目录，`raw` 和 `seller_tables` 指向旧沙箱的原始数据与经营表。
 
@@ -64,7 +64,8 @@ Lite 的完整监督标签池已整理，模型输入按需展开。当前联调
 | `agent_simulation/data/` | KuaiSearch 事实表、划分、来源校验和只读查询 |
 | `data/kuaisearch/` | Lite 发布数据、抽样候选和相关性参考对 |
 | `docs/` | 阅读文档和展示素材 |
-| `runs/` | 本地仿真、训练及评估输出和可重建缓存 |
+| `runs/` | 本地仿真工作目录、构造数据和可重建缓存 |
+| `result/` | 按实验保存训练检查点、优化器状态、评估结果和日志 |
 | `agent_simulation/platform/`、`models/` | 平台召回、排序基线与本地模型资产 |
 
 测试命令见[测试说明](agent_simulation/README.md#tests)，依赖及源码许可见 [源码来源和许可](docs/third-party-notices.txt)。

@@ -289,6 +289,8 @@ def train(args):
         # Retired evaluation-only settings do not affect the saved optimizer or data stream.
         saved_identity = {k: v for k, v in config["identity"].items()
                           if k not in ("training_code_sha256", "evaluate_train")}
+        # Archived runs may retain their original output path as a symlink.
+        saved_identity["output"] = str(Path(saved_identity["output"]).resolve())
         if saved_identity.get("init_adapter"):
             adapter = checkpoint
         if args.tokenizer is None and saved_identity.get("tokenizer"):
@@ -451,7 +453,8 @@ def parser():
                        help="Run the file checks and sample probes from the check command before training")
         q.add_argument("--positive-train-responses", action="store_true",
                        help="Train Customer Response only on rows with an observed click or purchase; keep all evaluation rows")
-        q.add_argument("--output", type=Path, required=True)
+        q.add_argument("--output", type=Path, required=True,
+                       help="Training directory, e.g. result/<run>/training")
         q.add_argument("--tensorboard", action="store_true", help="Write training and evaluation curves under OUTPUT/tensorboard")
         q.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
         q.add_argument("--dtype", choices=("auto", "float32", "bfloat16"), default="auto",

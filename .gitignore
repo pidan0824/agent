@@ -10,6 +10,7 @@ __pycache__/
 /.runtime
 /models
 /runs/
+/result/
 /data/kuaisearch/*
 !/data/kuaisearch/lite/
 !/data/kuaisearch/full/

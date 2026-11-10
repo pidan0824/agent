@@ -447,7 +447,8 @@ if __name__ == "__main__":
     p.add_argument("--tokenizer", type=Path, required=True)
     p.add_argument("--adapter", type=Path)
     p.add_argument("--role", choices=["both", "seller", "customer"], default="both")
-    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True,
+                   help="Evaluation directory, e.g. result/<run>/evaluation")
     p.add_argument("--resume", action="store_true", help="Reuse saved results from this local evaluation")
     selection = p.add_mutually_exclusive_group()
     selection.add_argument("--count", type=int, default=10)
