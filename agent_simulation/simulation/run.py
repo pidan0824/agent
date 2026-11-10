@@ -228,7 +228,6 @@ def run(args, *, load_model=None):
             model.tokenizer,
             summary_models=memory,
             response_concurrency=args.max_concurrent_requests,
-            response_batch_size=args.customer_response_batch_size,
         )
         if args.mode == "episode":
             episode = Episode(
@@ -309,9 +308,6 @@ def parser():
     p.add_argument("--fixed-horizon", action="store_true",
                    help="Continue to --ticks after all Customers exit")
     p.add_argument("--max-new-tokens", type=int, default=2048)
-    from agent_simulation.environment.batching import CUSTOMER_RESPONSE_BATCH_SIZE
-    p.add_argument("--customer-response-batch-size", type=int, default=CUSTOMER_RESPONSE_BATCH_SIZE,
-                   help="Items per Customer response; defaults to inference/model_policy.json")
     p.add_argument("--seller-price-batch-size", type=int, choices=range(1, 17), default=1,
                    help="Explicit targets per decision; default 1 matches single-product SFT")
     p.add_argument("--max-concurrent-requests", type=int, default=2,

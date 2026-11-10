@@ -93,16 +93,13 @@ class LoRATrainingTests(unittest.TestCase):
             write_outcome(output, completed=False, payload=failure)
             self.assertFalse((output / "result.json").exists())
 
-    def test_epoch_size_never_constructs_inputs(self):
+    def test_epoch_size_counts_live_response_rows(self):
         stream = SampleStream("unused", "unused", "customer", "train")
-        with patch('agent_simulation.datasets.labels.customer_rows', return_value=7) as count, \
-             patch.object(SampleStream, '__iter__', side_effect=AssertionError('Input construction')):
+        with patch.object(SampleStream, '__iter__', return_value=iter(range(7))):
             self.assertEqual(stream.measure_epoch(3), 7)
-            self.assertEqual(stream.measure_epoch(3), 7)
-            stream.limit = 4
-            self.assertEqual(stream.measure_epoch(3), 4)
-            self.assertEqual(SampleStream('unused','unused','seller','train').measure_epoch(12),12)
-        self.assertEqual(count.call_count, 3)
+        query = SampleStream("unused", "unused", "customer", "train", stage="query", limit=2)
+        self.assertEqual(query.measure_epoch(3), 2)
+        self.assertEqual(SampleStream('unused', 'unused', 'seller', 'train').measure_epoch(12), 12)
 
     def test_mps_checkpoint_roundtrips_device_rng_state(self):
         from types import SimpleNamespace
@@ -517,7 +514,7 @@ class LoRATrainingTests(unittest.TestCase):
                 def sample(self, sample_id):
                     return {"sample_id": sample_id, "split": "test"}
 
-                def request_samples(self, session_id):
+                def request_samples(self, session_id, *, max_output_tokens=0):
                     return [self.sample(f"query:{session_id}")] + [
                         {
                             "sample_id": f"response:{session_id}:batch:{i}",

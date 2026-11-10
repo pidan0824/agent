@@ -4,8 +4,6 @@
 import argparse
 import json
 from os import PathLike
-import duckdb
-import agent_simulation.environment.batching as batching
 from contextlib import ExitStack, closing
 from tempfile import TemporaryDirectory
 from agent_simulation.agents.prompts.customer import messages
@@ -63,7 +61,7 @@ class SFTDataset:
                 parts[0] == "response" and len(parts) in (2, 4), "Invalid Customer sample ID"
             )
         record = customer_sample(self.catalog, int(parts[1]), stage=parts[0], render=False)
-        for sample in expand_record("customer", record):
+        for sample in expand_record("customer", record, tokenizer=self.tokenizer):
             if sample["sample_id"] == sample_id:
                 return self.check_sample(sample)
         raise ValueError(
@@ -81,10 +79,10 @@ class SFTDataset:
             )
         return sample
 
-    def request_samples(self, session_id, *, stage=None):
+    def request_samples(self, session_id, *, stage=None, max_output_tokens=0):
         """Read one request for both stages or just the requested stage."""
         record = customer_sample(self.catalog, session_id, stage=stage, render=False)
-        return checked_record(self, "customer", record)
+        return checked_record(self, "customer", record, max_output_tokens=max_output_tokens)
 
     def iter_samples(self, role, *, bucket=None, buckets=32, split=None, stage=None):
         """Traverse every actor bucket by default; an explicit bucket supports workers."""
@@ -104,14 +102,14 @@ class SFTDataset:
             source = (
                 seller_records(self.catalog, current, buckets, split=split)
                 if role == "seller" else customer_samples(
-                    self.catalog, current, buckets, split=split, stage=stage
+                    self.catalog, current, buckets, tokenizer=self.tokenizer, split=split, stage=stage
                 )
             )
             for sample in source:
                 yield self.check_sample(sample)
 
 
-def expand_record(role, record, *, compact_background=False):
+def expand_record(role, record, *, tokenizer=None, compact_background=False, max_output_tokens=0):
     if role == "seller":
         yield record
     elif role == "customer":
@@ -122,34 +120,24 @@ def expand_record(role, record, *, compact_background=False):
                     query["input"], query["target"], compact_background=compact_background)}
             yield query
         if response is not None:
-            yield from split_supervision(response, compact_background=compact_background)
+            yield from split_supervision(response, tokenizer, compact_background=compact_background,
+                                         max_output_tokens=max_output_tokens)
     else:
         raise ValueError("Unknown supervision role")
 
 
-def checked_record(data, role, record):
-    """Prepare a complete request before returning its samples to a reader."""
-    return [data.check_sample(sample) for sample in expand_record(role, record)]
+def checked_record(data, role, record, *, max_output_tokens=0):
+    return [data.check_sample(sample) for sample in expand_record(
+        role, record, tokenizer=data.tokenizer, max_output_tokens=max_output_tokens,
+    )]
 
 
-def customer_rows(directory, split, *, response_only=False):
-    """Count the rows from fixed Customer batches directly from their labels."""
-    labels = Path(directory) / "customer" / split / "labels.parquet"
-    size = batching.CUSTOMER_RESPONSE_BATCH_SIZE
-    query_rows = 0 if response_only else 1
-    with closing(duckdb.connect()) as connection:
-        return connection.execute(
-            "SELECT coalesce(sum(? + greatest(1, (len(impressed_item_ids) + ? - 1) // ?)), 0) "
-            "FROM read_parquet(?)", [query_rows, size, size, str(labels)]
-        ).fetchone()[0]
-
-
-def record_samples(data, role, record_id):
+def record_samples(data, role, record_id, *, max_output_tokens=0):
     if role == "seller":
         return [data.sample(record_id)]
     if role != "customer":
         raise ValueError("Unknown selection role")
-    return data.request_samples(int(record_id))
+    return data.request_samples(int(record_id), max_output_tokens=max_output_tokens)
 
 
 def select_record_ids(connection, directory, role, split, count, seed):
@@ -185,9 +173,9 @@ def bind_split_history(connection, directory, role, split):
         )
 
 
-def customer_samples(catalog, bucket, buckets, *, split=None, stage=None):
-    for query, response in customer_records(catalog, bucket, buckets, split=split, stage=stage):
-        yield from expand_record("customer", (query, response))
+def customer_samples(catalog, bucket, buckets, *, tokenizer=None, split=None, stage=None):
+    for record in customer_records(catalog, bucket, buckets, split=split, stage=stage):
+        yield from expand_record("customer", record, tokenizer=tokenizer)
 
 
 def export(directory, tokenizer_path, sample_ids, output):

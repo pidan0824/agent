@@ -9,7 +9,7 @@ import time
 
 from agent_simulation.data.common import require
 
-from agent_simulation.inference.requests import load_tokenizer, read_tokens, render_request
+from agent_simulation.inference.requests import load_tokenizer, prompt_tokens, read_tokens, render_request
 from agent_simulation.inference import resolve_device
 from agent_simulation.agents.schemas import integer, text
 from agent_simulation.logs import ModelLog
@@ -99,8 +99,7 @@ class QwenLocal:
             return self.tokenizer(prompts, padding=True, padding_side='left',
                                   return_tensors='pt', add_special_tokens=False).to(self.device)
         ids = [read_tokens(request, self.tokenizer) if '_prompt_tokens' in request else
-               self.tokenizer.apply_chat_template(request['messages'], tools=request['tools'],
-                   tokenize=True, add_generation_prompt=True) for request in requests]
+               prompt_tokens(request['messages'], request['tools'], self.tokenizer) for request in requests]
         from transformers import BatchEncoding
         width = max(map(len, ids))
         return BatchEncoding({
@@ -298,8 +297,10 @@ def action_parser(schema, max_output_tokens, alphabet):
     """Constrain JSON and allow arrays larger than LMFE's default of 20."""
     from lmformatenforcer import CharacterLevelParserConfig, JsonSchemaParser, StringParser
 
+    config = CharacterLevelParserConfig(max_json_array_length=max_output_tokens, alphabet=alphabet)
     # LMFE cannot enforce empty arrays through maxItems=0; bind empty responses literally.
     if set(schema) == {"const"}:
-        return StringParser(json.dumps(schema["const"], separators=(",", ":")))
-    config = CharacterLevelParserConfig(max_json_array_length=max_output_tokens, alphabet=alphabet)
+        parser = StringParser(json.dumps(schema["const"], separators=(",", ":")))
+        parser.config = config
+        return parser
     return JsonSchemaParser(schema, config=config)

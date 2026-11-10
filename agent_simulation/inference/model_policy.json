@@ -3,7 +3,6 @@
   "tokenizer_revision": "aa8e72537993ba99e69dfaafa59ed015b17504d1",
   "context_limit": 32768,
   "reserved_output_tokens": 2048,
-  "customer_response_batch_size": 64,
   "history_windows": {
     "seller": {
       "selection": "latest_observations_per_item",

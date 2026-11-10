@@ -231,13 +231,12 @@ def messages(
         },
     ]
     if target is not None:
-        result.append(
-            {
-                "role": "assistant",
-                "content": json.dumps(target, ensure_ascii=False, allow_nan=False),
-            }
-        )
+        result.append(answer_message(target))
     return result
+
+
+def answer_message(target):
+    return {"role": "assistant", "content": json.dumps(target, ensure_ascii=False, allow_nan=False)}
 
 
 def customer_decision_messages(

@@ -96,6 +96,9 @@ def project_customer(state, *, compact_background=False):
         return result
 
     visible = dict(state)
+    if "candidate_batch" in state:
+        # Batch numbers are bookkeeping and must not change the model's input size.
+        visible["candidate_batch"] = {"request_item_count": state["candidate_batch"]["request_item_count"]}
     background = state.get("behavioral_summary")
     if compact_background and background is not None:
         fields = ("item_id", "item_title", "brand_name", "category_level3_name")

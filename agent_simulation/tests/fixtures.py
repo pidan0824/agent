@@ -101,6 +101,25 @@ class TokenizerFixture:
     def encode(self, text, *, add_special_tokens=False):
         return list(range(len(text) // 4))
 
+
+class DisplayBudgetTokenizer(TokenizerFixture):
+    """Make the usual context budget fit an exact number of fixture offers."""
+
+    def __init__(self, fits):
+        self.fits = fits
+
+    def apply_chat_template(self, messages, tools, **kwargs):
+        from agent_simulation.agents.prompts.customer import decode_input
+        from agent_simulation.inference.requests import input_token_budget
+
+        state = decode_input(messages[1]["content"])
+        if "displayed_items" not in state:
+            return super().apply_chat_template(messages, tools, **kwargs)
+        count = len(state["displayed_items"])
+        width = input_token_budget() // self.fits
+        return range(count * width + (len(messages) - 2))
+
+
 class ScriptedModel:
     def __init__(self, replies):
         self.replies, self.requests = iter(replies), []

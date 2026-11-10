@@ -1,62 +1,49 @@
-"""Configurable fixed batches keep exact coverage, weights and cheap epoch counts."""
-from pathlib import Path
-import tempfile
-import unittest
-from unittest.mock import patch
-import duckdb
+"""Customer Response uses the complete prompt and reserved output to plan batches."""
 
-import agent_simulation.environment.batching as batching
+import unittest
+
+from agent_simulation.agents.prompts.customer import decode_input, messages
 from agent_simulation.environment.batching import response_batches
-from agent_simulation.datasets.labels import customer_rows
-from agent_simulation.datasets.samples.customer import split_supervision
-from agent_simulation.training.data_loader import SampleStream
+from agent_simulation.inference.requests import ContextCapacityError, input_token_budget, prepare_request
+from agent_simulation.tests.fixtures import TokenizerFixture
 
 
 class ConfiguredBatchTests(unittest.TestCase):
-    def test_64_and_128_keep_complete_disjoint_exposures(self):
-        state = {'displayed_items': [{'item_id': i} for i in range(257)], 'history': ['frozen']}
-        for size, lengths in ((64, [64, 64, 64, 64, 1]), (128, [128, 128, 1])):
-            with self.subTest(size=size):
-                batches = response_batches(state, max_items=size)
-                self.assertEqual([len(b['displayed_items']) for b in batches], lengths)
-                self.assertEqual([p for b in batches for p in b['displayed_items']], state['displayed_items'])
-                self.assertTrue(all(b['candidate_batch']['count'] == len(lengths) for b in batches))
-                batches[0]['history'].append('changed')
-                self.assertEqual(state['history'], ['frozen'])
-                self.assertEqual(batches[1]['history'], ['frozen'])
-        for size in (0, -1, True, 1.5):
-            with self.subTest(size=size), self.assertRaises(ValueError):
-                response_batches(state, max_items=size)
+    def test_entire_display_over_64_items_fits_and_keeps_its_prompt(self):
+        state = {"displayed_items": [{"item_id": i} for i in range(129)], "history": ["frozen"]}
+        (batch, prompt), = response_batches(state, TokenizerFixture())
+        self.assertEqual(batch, state)
+        self.assertEqual(prompt, messages(state, response=True))
+        batch["history"].append("changed")
+        self.assertEqual(state["history"], ["frozen"])
 
-    def test_label_counts_match_batches_without_reading_inputs(self):
-        with tempfile.TemporaryDirectory() as tmp, duckdb.connect() as db:
-            root = Path(tmp)
-            path = root / 'customer/train/labels.parquet'
-            path.parent.mkdir(parents=True)
-            db.execute('CREATE TABLE labels AS SELECT range(n)::BIGINT[] impressed_item_ids '
-                       'FROM (VALUES (0), (1), (64), (65), (128), (129)) t(n)')
-            db.execute('COPY labels TO ? (FORMAT PARQUET)', [str(path)])
-            for size, total in ((64, 16), (128, 13)):
-                with patch.object(batching, "CUSTOMER_RESPONSE_BATCH_SIZE", size), \
-                     patch.object(SampleStream, '__iter__', side_effect=AssertionError('No construction')):
-                    self.assertEqual(customer_rows(root, 'train'), total)
-                    self.assertEqual(customer_rows(root, 'train', response_only=True), total - 6)
-                    stream = SampleStream(root, 'unused', 'customer', 'train')
-                    self.assertEqual(stream.measure_epoch(6), total)
-                    stream.limit = 4
-                    self.assertEqual(stream.measure_epoch(6), 4)
+    def test_long_text_and_output_reserve_split_a_short_display(self):
+        tokenizer = TokenizerFixture()
+        state = {
+            "displayed_items": [{"item_id": i, "item_title": chr(97 + i) * 14000} for i in range(4)],
+            "short_term_memory": {"search_history": [{"query": "b" * 8000}]},
+        }
+        self.assertEqual(len(response_batches(state, tokenizer)), 1)
+        reserve = 26000
+        batches = response_batches(state, tokenizer, max_output_tokens=reserve)
+        self.assertEqual(len(batches), 4)
+        self.assertEqual([p for batch, _ in batches for p in batch["displayed_items"]],
+                         state["displayed_items"])
+        for index, (batch, prompt) in enumerate(batches, 1):
+            self.assertEqual(batch["candidate_batch"], {"index": index, "count": 4, "request_item_count": 4})
+            self.assertEqual(prompt, messages(batch, response=True))
+            visible = decode_input(prompt[1]["content"])
+            self.assertEqual(visible["short_term_memory"], state["short_term_memory"])
+            self.assertEqual(visible["candidate_batch"], {"request_item_count": 4})
+            _, count = prepare_request(prompt, [], tokenizer, max_output_tokens=reserve)
+            self.assertLessEqual(count, input_token_budget(reserve))
 
-    def test_batch_size_preserves_labels_and_total_response_weight(self):
-        sample = {'sample_id': 'response:1',
-                  'input': {'displayed_items': [{'item_id': i} for i in range(257)]},
-                  'target': {'clicked_item_ids': [0, 63, 64, 127, 128, 256],
-                             'purchased_item_ids': [64, 128]}}
-        for size, count in ((64, 5), (128, 3)):
-            with self.subTest(size=size), patch.object(batching, "CUSTOMER_RESPONSE_BATCH_SIZE", size):
-                # The renderer is independent of label intersection and sample weights.
-                with patch('agent_simulation.datasets.samples.customer.messages', return_value=[]):
-                    rows = split_supervision(sample)
-                self.assertEqual(len(rows), count)
-                self.assertAlmostEqual(sum(row['batching']['request_weight'] for row in rows), 1)
-                for key, ids in sample['target'].items():
-                    self.assertEqual([i for row in rows for i in row['target'][key]], ids)
+    def test_empty_display_and_impossible_context(self):
+        tokenizer = TokenizerFixture()
+        state = {"displayed_items": []}
+        (batch, _), = response_batches(state, tokenizer)
+        self.assertEqual(batch, state)
+        with self.assertRaises(ContextCapacityError):
+            response_batches({"displayed_items": [{"item_id": 1, "item_title": "a" * 140000}]}, tokenizer)
+        with self.assertRaises(ContextCapacityError):
+            response_batches({**state, "history": ["a" * 140000]}, tokenizer)

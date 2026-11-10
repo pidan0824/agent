@@ -24,20 +24,38 @@ def model_policy():
     return _MODEL_POLICY.copy()
 
 
+def render_chat(messages, tools, tokenizer, *, tokenize, add_generation_prompt, **options):
+    options.setdefault("enable_thinking", False)
+    return tokenizer.apply_chat_template(
+        messages, tools=tools, tokenize=tokenize, add_generation_prompt=add_generation_prompt,
+        return_dict=False, **options,
+    )
+
+
+def prompt_tokens(messages, tools, tokenizer):
+    require(bool(getattr(tokenizer, "chat_template", None)), "Official chat template is missing")
+    return render_chat(
+        messages, tools, tokenizer, tokenize=True, add_generation_prompt=True,
+        tokenizer_kwargs={"verbose": False},
+    )
+
+
+def input_token_budget(max_output_tokens=0):
+    reserve = max(_MODEL_POLICY["reserved_output_tokens"], max_output_tokens)
+    return _MODEL_POLICY["context_limit"] - reserve
+
+
 def prepare_request(messages, tools, tokenizer, *, max_output_tokens=0):
     """Reject overflow before inference; preserve all supplied history and tool results."""
     request = {"messages": deepcopy(messages), "tools": deepcopy(tools)}
-    require(bool(tokenizer.chat_template), "Official chat template is missing")
-    tokens = tokenizer.apply_chat_template(request["messages"], tools=request["tools"],
-                                           tokenize=True, add_generation_prompt=True)
+    tokens = prompt_tokens(request["messages"], request["tools"], tokenizer)
     count = len(tokens)
-    _attach_tokens(request, tokenizer, tokens)
-    policy = model_policy()
-    reserve = max(policy["reserved_output_tokens"], max_output_tokens)
+    budget = input_token_budget(max_output_tokens)
     require(
-        count + reserve <= policy["context_limit"],
-        f"Model context overflow: {count} input tokens plus {reserve} output reserve",
+        count <= budget,
+        f"Model context overflow: {count} input tokens plus {_MODEL_POLICY['context_limit'] - budget} output reserve",
     )
+    _attach_tokens(request, tokenizer, tokens)
     return request, count
 
 
@@ -54,9 +72,8 @@ def load_tokenizer(model, *, revision=None, local_files_only=False):
 
 def render_request(tokenizer, request, **template_options):
     """Return an official generation prompt; model-specific options are explicit."""
-    return tokenizer.apply_chat_template(
-        request["messages"],
-        tools=request["tools"],
+    return render_chat(
+        request["messages"], request["tools"], tokenizer,
         tokenize=False,
         add_generation_prompt=True,
         **template_options,
@@ -70,8 +87,11 @@ def _prompt_digest(messages, tools):
 
 @lru_cache(maxsize=8)
 def tokenizer_identity(tokenizer, template):
+    template_identity = [template, tokenizer.special_tokens_map]
+    if "enable_thinking" in template:
+        template_identity.append({"enable_thinking": False})
     encoded = tokenizer.backend_tokenizer.to_str() + json.dumps(
-        [template, tokenizer.special_tokens_map], sort_keys=True, ensure_ascii=False
+        template_identity, sort_keys=True, ensure_ascii=False
     )
     return hashlib.sha256(encoded.encode()).hexdigest()
 

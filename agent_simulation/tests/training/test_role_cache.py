@@ -87,6 +87,8 @@ class RoleCacheTests(unittest.TestCase):
                            side_effect=lambda a: check_cached_data(a, data, [])), \
                      patch('agent_simulation.training.run.training_identity', return_value={}), \
                      patch('agent_simulation.training.run.load_tokenizer', return_value=data.tokenizer), \
+                     patch('agent_simulation.training.run.AutoConfig.from_pretrained',
+                           return_value=SimpleNamespace(model_type="qwen2")), \
                      patch('agent_simulation.training.run.AutoModelForCausalLM.from_pretrained',
                            side_effect=RuntimeError('reached weight loading')) as load:
                     with self.assertRaisesRegex(RuntimeError, 'reached weight loading'):
@@ -118,7 +120,8 @@ class RoleCacheTests(unittest.TestCase):
             run.mkdir()
             cli = parser().parse_args(['train', '--model', str(root), '--dataset', str(args.dataset),
                                        '--role', 'seller', '--token-cache', str(root), '--output', str(run),
-                                       '--device', 'cpu', '--resume', 'latest'])
+                                       '--device', 'cpu', '--dtype', 'float32',
+                                       '--tokenizer', str(root), '--resume', 'latest'])
             checked = check_cached_data(args, data, [])
             bound = training_identity(cli, checked, 'test')
             self.assertNotIn("training_code_sha256", bound)
@@ -132,6 +135,8 @@ class RoleCacheTests(unittest.TestCase):
             marker.write_text(json.dumps(manifest))
             with patch('agent_simulation.training.run.check_data', return_value=checked), \
                  patch('agent_simulation.training.run.resume_checkpoint', return_value=run / 'checkpoint-1'), \
+                 patch('agent_simulation.training.run.AutoConfig.from_pretrained',
+                       return_value=SimpleNamespace(model_type="qwen2")), \
                  patch('agent_simulation.training.run.AutoModelForCausalLM.from_pretrained') as load:
                 config.write_text(json.dumps(dict(identity=bound, packages=packages)))
                 with self.assertRaisesRegex(ValueError, 'Resume data/model/config differs'):
@@ -170,7 +175,10 @@ class RoleCacheTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Adapter training role differs"):
                 train(warm)
 
-            metadata.write_text(json.dumps({"identity": {"role": "seller"}}))
+            metadata.write_text(json.dumps({"identity": {
+                "role": "seller", "base_config_sha256": sha256(root / "config.json"),
+                "base_weight_sha256": {},
+            }}))
             checked = check_cached_data(args, data, [])
             with patch("agent_simulation.training.run.check_data", return_value=checked), \
                  patch("agent_simulation.training.run.load_tokenizer", return_value=data.tokenizer), \

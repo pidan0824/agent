@@ -234,14 +234,14 @@ class AgentContextBuilder:
         }
         return profile, context
 
-    def customer_responses(self, actor_id, *, state=None, batch_size=None,
-                           expected_request_id=None, observe=True, memory_tokenizer=None):
+    def customer_responses(self, actor_id, tokenizer, *, state=None, max_output_tokens=0,
+                           expected_request_id=None, observe=True):
         """Build one response context, then partition its ordered display list."""
         context = self.customer(
             actor_id, response=True, expected_request_id=expected_request_id, observe=observe,
-            state=state, memory_tokenizer=memory_tokenizer,
+            state=state, memory_tokenizer=tokenizer,
         )
-        return response_batches(context, max_items=batch_size)
+        return response_batches(context, tokenizer, max_output_tokens=max_output_tokens)
 
     def customer(self, actor_id, *, response=False, expected_request_id=None, observe=True,
                  state=None, memory_tokenizer=None):

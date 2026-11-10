@@ -82,17 +82,15 @@ class LocalBGE:
         body = tokenizer.encode(text, add_special_tokens=False, truncation=False)
         prefix = tokenizer.encode(QUERY_INSTRUCTION, add_special_tokens=False) if query else []
         limit = self.chunk_limit
-        budget = limit - tokenizer.num_special_tokens_to_add(pair=False) - len(prefix)
+        budget = limit - 2 - len(prefix)
         require(budget > 0 and body, "No body token budget")
         parts = []
         for start in range(0, len(body), budget):
             segment = body[start : start + budget]
-            encoded = tokenizer.prepare_for_model(
-                prefix + segment,
-                add_special_tokens=True,
-                truncation=False,
-                return_attention_mask=True,
-            )
+            # BGE uses a single BERT sequence, including its CLS and SEP tokens.
+            ids = [tokenizer.cls_token_id, *prefix, *segment, tokenizer.sep_token_id]
+            encoded = {"input_ids": ids, "attention_mask": [1] * len(ids),
+                       "token_type_ids": [0] * len(ids)}
             require(len(encoded["input_ids"]) <= limit, "BGE chunk exceeds model limit")
             parts.append(
                 {

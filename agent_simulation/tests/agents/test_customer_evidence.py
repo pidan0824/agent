@@ -90,8 +90,11 @@ class CustomerEvidenceTests(unittest.TestCase):
         response = dict(sample_id="response:1", input=original,
                         target={"clicked_item_ids": [1, 68], "purchased_item_ids": [68]})
         before = deepcopy((query, response))
-        full = list(expand_record("customer", (query, response)))
-        compact = list(expand_record("customer", (query, response), compact_background=True))
+        from agent_simulation.tests.fixtures import DisplayBudgetTokenizer
+        tokenizer = DisplayBudgetTokenizer(64)
+        full = list(expand_record("customer", (query, response), tokenizer=tokenizer))
+        compact = list(expand_record("customer", (query, response), tokenizer=tokenizer,
+                                     compact_background=True))
         self.assertEqual(len(compact), 3)
         for left, right in zip(full, compact, strict=True):
             self.assertEqual(left["sample_id"], right["sample_id"])

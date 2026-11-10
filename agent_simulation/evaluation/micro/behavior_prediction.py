@@ -20,6 +20,7 @@ from agent_simulation.datasets.labels import (
     SFTDataset, customer_records, expand_record, record_samples, select_record_ids,
 )
 from agent_simulation.datasets.tokens import bind_split_candidates
+from agent_simulation.environment.batching import response_batch_policy
 from agent_simulation.evaluation import price_direction
 from agent_simulation.evaluation.micro.price_response import PriceResponseStudy
 from agent_simulation.logs import write_report
@@ -232,15 +233,17 @@ def summarize(records):
     return result
 
 
-def test_requests(data, role, ids, candidates):
+def test_requests(data, role, ids, candidates, *, max_output_tokens=0):
     if role == "customer" and candidates is not None:
         path = candidates / "customer-test-candidates.parquet"
         bind_split_candidates(data.catalog.connection, {"test": path}, role, 0, 1)
         for record in customer_records(data.catalog, 0, 1, split="test"):
-            yield record[0]["key"]["session_id"], expand_record(role, record)
+            yield record[0]["key"]["session_id"], expand_record(
+                role, record, tokenizer=data.tokenizer, max_output_tokens=max_output_tokens,
+            )
     else:
         for identity in ids:
-            yield identity, record_samples(data, role, identity)
+            yield identity, record_samples(data, role, identity, max_output_tokens=max_output_tokens)
 
 
 def load_evaluation_model(args, data, config, resources, *, use_vllm, resume):
@@ -271,7 +274,9 @@ def evaluate_records(output, data, model, selection, candidates, study, *, resum
     records = []
     for role, ids in selection.items():
         evaluated = set()
-        for identity, samples in test_requests(data, role, ids, candidates):
+        for identity, samples in test_requests(
+            data, role, ids, candidates, max_output_tokens=model.max_new_tokens,
+        ):
             evaluated.add(identity)
             batches, outputs = [], []
             for sample in samples:
@@ -360,6 +365,8 @@ def run(args):
             "role": args.role,
             "price_response": study is not None,
         }
+        if "customer" in roles:
+            config["customer_response_batching"] = response_batch_policy()
         if resume:
             require(
                 config == {k: v for k, v in saved_config.items() if k != "adapter_sha256"},

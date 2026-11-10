@@ -3,7 +3,7 @@
 import json
 import math
 
-from agent_simulation.inference.requests import ContextCapacityError, model_policy
+from agent_simulation.inference.requests import ContextCapacityError, model_policy, render_chat
 from agent_simulation.data.common import require
 
 
@@ -43,8 +43,8 @@ def _anchored_tokens(messages, tools, tokenizer):
     # Qwen uses NFC inside the segments separated by unnormalized special tokens.
     if backend.normalizer is not None and type(backend.normalizer).__name__!='NFC':
         return None
-    prefix=tokenizer.apply_chat_template(messages[:-1],tools=tools,tokenize=False,add_generation_prompt=True)
-    complete=tokenizer.apply_chat_template(messages,tools=tools,tokenize=False,add_generation_prompt=False)
+    prefix=render_chat(messages[:-1],tools,tokenizer,tokenize=False,add_generation_prompt=True)
+    complete=render_chat(messages,tools,tokenizer,tokenize=False,add_generation_prompt=False)
     if not isinstance(prefix,str) or not isinstance(complete,str) or not complete.startswith(prefix):return None
     candidates=[(prefix.rfind(token),token) for token in tokenizer.all_special_tokens]
     if not candidates:return None
@@ -80,12 +80,8 @@ def _tokens(sample, tokenizer):
     require(messages[-1]["role"] == "assistant", "Missing supervised answer")
     anchored=_anchored_tokens(messages,tools,tokenizer)
     if anchored is not None:return anchored
-    prefix = tokenizer.apply_chat_template(
-        messages[:-1], tools=tools, tokenize=True, add_generation_prompt=True
-    )
-    complete = tokenizer.apply_chat_template(
-        messages, tools=tools, tokenize=True, add_generation_prompt=False
-    )
+    prefix = render_chat(messages[:-1], tools, tokenizer, tokenize=True, add_generation_prompt=True)
+    complete = render_chat(messages, tools, tokenizer, tokenize=True, add_generation_prompt=False)
     require(complete[: len(prefix)] == prefix, "Answer boundary changed")
     return len(prefix), tuple(complete)
 

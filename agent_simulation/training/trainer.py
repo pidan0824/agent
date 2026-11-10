@@ -63,6 +63,8 @@ class BehaviorTrainer(Trainer):
         super().__init__(*args, **kwargs)
         # This subclass consumes the accumulation denominator, not model.forward.
         self.model_accepts_loss_kwargs = True
+        # compute_loss already divides by the number of examples across all microbatches.
+        self.accelerator.gradient_accumulation_steps = 1
         self._loss_totals = None
         self.schedule_epochs = None
 

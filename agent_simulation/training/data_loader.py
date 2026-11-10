@@ -77,13 +77,10 @@ class SampleStream(torch.utils.data.IterableDataset):
         return self.epoch_size
 
     def measure_epoch(self, label_count):
-        # Count labels and fixed partitions only; never invoke the input iterator.
         if self.role == "seller" or self.stage == "query":
-            count = label_count
-        else:
-            from agent_simulation.datasets.labels import customer_rows
-            count = customer_rows(self.directory, self.split, response_only=self.stage == 'response')
-        return min(self.limit, count) if self.limit else count
+            return min(self.limit, label_count) if self.limit else label_count
+        # Response row counts depend on the rendered contexts. Token caches already store them.
+        return sum(1 for _ in self)
 
     def set_epoch(self, epoch):
         self.epoch = epoch
@@ -254,7 +251,7 @@ def prepare_datasets(args, tokenizer, data_check, eval_split, *, resume_epoch_si
     train_tokenizer = args.tokenizer if workers else tokenizer
     train_data = SampleStream(args.dataset, train_tokenizer, args.role, "train", limit=args.train_samples,
                               shuffle_buffer=args.shuffle_buffer, seed=args.seed,
-                              workers=workers)
+                              stage=getattr(args, "stage", None), workers=workers)
     samples_per_epoch = (resume_epoch_size if resume_epoch_size is not None else train_data.measure_epoch(
         data_check["counts"]["train"]))
     train_data.epoch_size = samples_per_epoch

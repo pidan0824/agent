@@ -4,8 +4,8 @@ import json
 from itertools import groupby
 from agent_simulation.data.catalog import DISPLAY_PRICE_SQL, customer_summary
 from agent_simulation.data.market.products import PROFILE_FIELDS
-from agent_simulation.agents.context.shopping import context, project_customer
-from agent_simulation.agents.prompts.customer import messages, prepare_history
+from agent_simulation.agents.context.shopping import context
+from agent_simulation.agents.prompts.customer import answer_message, messages
 from agent_simulation.data.common import iter_rows, require
 from agent_simulation.data.history_records import shopping_event, customer_history_limit
 from agent_simulation.environment.batching import response_batches
@@ -81,20 +81,19 @@ def sample_from_request(dataset, session, r, *, history_embedder=DEFAULT_HISTORY
     return query, response
 
 
-def split_supervision(sample, *, compact_background=False):
+def split_supervision(sample, tokenizer, *, compact_background=False, max_output_tokens=0):
     """Intersect original labels only after computing label-blind partitions."""
-    batches = response_batches(sample["input"])
-    history = prepare_history(project_customer(sample["input"])) if len(batches) > 1 else None
+    batches = response_batches(sample["input"], tokenizer, compact_background=compact_background,
+                               max_output_tokens=max_output_tokens)
     result = []
-    for index, state in enumerate(batches):
+    for index, (state, prompt) in enumerate(batches):
         selected = {p["item_id"] for p in state["displayed_items"]}
         target = {
             key: [i for i in value if i in selected] for key, value in sample["target"].items()
         }
         row = dict(sample)
         row.update(input=state, target=target,
-                   messages=messages(state, target, response=True, prepared_history=history,
-                                     compact_background=compact_background))
+                   messages=[*prompt, answer_message(target)])
         row["batching"] = {
             "parent_sample_id": sample["sample_id"],
             "index": index + 1,

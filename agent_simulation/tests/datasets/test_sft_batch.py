@@ -58,7 +58,7 @@ class BatchTests(unittest.TestCase):
                 sample = self.samples[name]
                 encoded = encode_sample(sample, self.tokenizer)
                 prefix = self.tokenizer.apply_chat_template(sample['messages'][:-1], tools=sample['tools'],
-                    tokenize=True, add_generation_prompt=True)
+                    tokenize=True, return_dict=False, add_generation_prompt=True)
                 self.assertEqual(encoded['answer_start'], len(prefix))
                 self.assertEqual(encoded['labels'][:len(prefix)], [IGNORE_INDEX]*len(prefix))
                 self.assertEqual(encoded['labels'][len(prefix):], encoded['input_ids'][len(prefix):])
@@ -88,7 +88,7 @@ class BatchTests(unittest.TestCase):
 
     def test_invalid_weight_and_invented_query_trajectory_are_rejected(self):
         sample = deepcopy(self.samples['response_12758_batch_1'])
-        sample['batching']['request_weight'] = 1
+        sample['batching']['request_weight'] = 0
         with self.assertRaisesRegex(ValueError, 'Response weight'):
             encode_sample(sample, self.tokenizer)
         sample = deepcopy(self.samples['query_14'])
@@ -117,10 +117,10 @@ class AnchoredEncodingTests(unittest.TestCase):
             actual=_anchored_tokens(messages,[],self.tokenizer)
             self.assertIsNotNone(actual)
             prefix = self.tokenizer.apply_chat_template(
-                messages[:-1], tools=[], tokenize=True, add_generation_prompt=True
+                messages[:-1], tools=[], tokenize=True, return_dict=False, add_generation_prompt=True
             )
             complete = self.tokenizer.apply_chat_template(
-                messages, tools=[], tokenize=True, add_generation_prompt=False
+                messages, tools=[], tokenize=True, return_dict=False, add_generation_prompt=False
             )
             self.assertEqual(complete[:len(prefix)], prefix)
             expected = len(prefix), tuple(complete)

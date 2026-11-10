@@ -36,12 +36,13 @@ class SharedCustomerHistoryTests(unittest.TestCase):
     def test_response_batches_share_formatting_but_not_mutable_input_or_labels(self):
         from agent_simulation.datasets.samples.customer import split_supervision
         from agent_simulation.agents.prompts.customer import factor_history, messages
+        from agent_simulation.tests.fixtures import DisplayBudgetTokenizer
         source = request()
         source['response_input']['displayed_items'] = [
             {'item_id': i, 'item_title': '保温杯'} for i in range(101, 230)]
         _, response = sample_from_request('fixture', 50, source, history_embedder=Encoder(), render=False)
         with patch('agent_simulation.agents.prompts.customer.factor_history', wraps=factor_history) as factor:
-            batches = split_supervision(response)
+            batches = split_supervision(response, DisplayBudgetTokenizer(64))
         self.assertEqual(factor.call_count, 1)
         for batch in batches:
             self.assertEqual(batch['messages'], messages(batch['input'], batch['target'], response=True))
@@ -128,17 +129,19 @@ class SharedCustomerHistoryTests(unittest.TestCase):
         from agent_simulation.datasets.samples.customer import split_supervision
         from agent_simulation.datasets.labels import expand_record
         from agent_simulation.agents.prompts.customer import encode_input
+        from agent_simulation.tests.fixtures import TokenizerFixture
         source = request()
         source['response_input']['displayed_items'] = [
             {'item_id':i,'item_title':f'商品{i}'} for i in range(101,230)]
         eager_query, eager_response = sample_from_request('fixture',50,source,history_embedder=Encoder())
-        expected = split_supervision(eager_response)
+        tokenizer = TokenizerFixture()
+        expected = split_supervision(eager_response, tokenizer)
         with patch('agent_simulation.agents.prompts.customer.encode_input', wraps=encode_input) as render:
             query,response = sample_from_request('fixture',50,source,history_embedder=Encoder(),render=False)
             self.assertNotIn('messages',query)
             self.assertNotIn('messages',response)
             render.assert_not_called()
-            actual = list(expand_record('customer', (query, response)))
+            actual = list(expand_record('customer', (query, response), tokenizer=tokenizer))
         self.assertEqual(render.call_count, len(actual))
         self.assertEqual(actual, [eager_query, *expected])
 

@@ -9,8 +9,8 @@ description = "Customer and Seller agents for an e-commerce policy sandbox"
 requires-python = ">=3.12"
 dependencies = [
     "numpy",
-    "lm-format-enforcer==0.11.3",
-    "transformers==4.57.6",
+    "lm-format-enforcer @ https://codeload.github.com/noamgat/lm-format-enforcer/tar.gz/2597936f55da0e3cab8a6047eba91b2ecdfe888a",
+    "transformers==5.3.0",
     "torch",
     "pydantic-ai-slim==1.107.9",
     "httpx>=0.27,<1",
@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-training = ["peft==0.17.1", "accelerate==1.10.1"]
+training = ["peft==0.18.1", "accelerate==1.10.1"]
 dev = ["black==24.10.0", "ruff==0.14.3"]
 
 [tool.setuptools.packages.find]

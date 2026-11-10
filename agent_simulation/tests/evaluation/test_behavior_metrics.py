@@ -71,7 +71,9 @@ class BehaviorTests(unittest.TestCase):
         backend = model
         data = Mock(tokenizer=tokenizer)
         data.catalog.connection.execute.return_value.fetchall.return_value = [(1,), (2,)]
-        data.request_samples.side_effect = lambda identity: [sample(stage, identity) for stage in ("query", "response")]
+        data.request_samples.side_effect = (
+            lambda identity, *, max_output_tokens: [sample(stage, identity) for stage in ("query", "response")]
+        )
         with TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "manifest.json").write_text("{}")

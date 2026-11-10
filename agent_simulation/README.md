@@ -136,13 +136,14 @@ Seller 默认使用 `--seller-price-batch-size 1`，每次明确要求一个目�
 
 每次运行只启动一个本机推理子进程，持有一份 Qwen 权重。它在短收集窗口内合并已经就绪的请求，每行保留自己的输出约束。Customer 和记忆总结也使用该服务。Seller 全部完成后才提交价格；报价超时或失败会使 Tick 失败，迟到的结果不能写回市场。
 
-将环境变量 `EPISODE_DIR` 设为已完成 Episode 的实际输出目录，再运行回放命令。日志中的同一批模型耗时是各请求经历的时间，同时段会重叠。
+将 `EPISODE_DIR` 设为实际运行目录，即可打开像素市场、Tick 指标和决策时间线。本地服务可按需展开 Context、Prompt 和模型输出。离线导出包含同一套回放界面和已结算事件，`--animation` 是 `--html` 的别名。购买金额沿用原始价格单位，CTR 和购买率都以曝光为分母。
 
 ```bash
 ./agent_simulation/python.sh -m agent_simulation.simulation.replay "$EPISODE_DIR/runtime.sqlite" --html /tmp/episode.html
-./agent_simulation/python.sh -m agent_simulation.simulation.replay "$EPISODE_DIR/runtime.sqlite" --animation /tmp/animation.html
 ./agent_simulation/python.sh -m agent_simulation.simulation.replay "$EPISODE_DIR/runtime.sqlite" --serve 8765
 ```
+
+加 `--play` 可从同一份市场配置开一场新的本地仿真，任选一位已注册顾客或商家进行人工控制，其余角色由 Agent 运行。角色切换在下一 Tick 生效。新的 SQLite 记录存放在源运行同级的 `play-*` 目录，原回放仍可从主菜单打开。若源报告里的 Catalog 路径已迁移，可传入 `--play-catalog <目录>`。 加 `--play-markets agent_simulation/simulation/markets.json` 可先选择卫衣或保温杯市场。顾客名单来自所选主题的历史搜索，商家和可搜索商品按对应的 Catalog 类目限定。
 
 <a id="tools"></a>
 
@@ -300,7 +301,7 @@ agents/
 
 短期 Memory 不另建一套数据库：`context/shopping.py` 从本用户历史选择近期搜索、点击和购买；`context/pricing.py` 从本店经营历史选择逐商品近期轨迹。完整历史继续由数据仓库和环境状态保存。
 
-Customer 训练取样和仿真都调用 [context/shopping.py](agents/context/shopping.py)。两边默认保留本用户最近 10 次请求，从更早的经历中最多取 5 条。生成搜索词时只依据已有历史，选择商品时再用本次搜索词检索，并读取本次展示的商品。两边都用 [environment/batching.py](environment/batching.py) 的 `response_batches()` 按原顺序以配置数量分批，默认每批最多 64 个商品，规划阶段不做容量试探。最终模型输入仍做一次准确容量判断。训练从历史日志读取展示列表和行为标签。仿真由当轮平台返回列表，结算后的行为进入后续历史。
+Customer 训练取样和仿真都调用 [context/shopping.py](agents/context/shopping.py)。两边默认保留本用户最近 10 次请求，从更早的经历中最多取 5 条。生成搜索词时只依据已有历史，选择商品时再用本次搜索词检索，并读取本次展示的商品。两边都用 [environment/batching.py](environment/batching.py) 的 `response_batches()` 先用模型的聊天模板和 tokenizer 计算完整 Response 输入。历史、曝光列表与输出预留都能放进预算时，一次处理整单。超过预算才按原顺序分批。训练从历史日志读取展示列表和行为标签。仿真由当轮平台返回列表，结算后的行为进入后续历史。
 
 | 文件 | 职责 |
 |---|---|
@@ -341,7 +342,7 @@ sft/
 ./agent_simulation/python.sh -m unittest agent_simulation.tests.datasets.test_sft_regression
 ```
 
-Customer 每行是一条原始请求，保存真实 Query、曝光集合、点击集合、购买集合及划分。同一请求提供 Query 和 Response 两步监督；超大曝光集合按已有规则生成多个 Response 批次，批次共用原请求划分。当前标签池共 555,553 条 Customer 请求（train 539,012，test 16,541）。固定分批后的行数可以直接根据每条曝光集合长度计算，不必展开上下文；因此请求数不等于 Response 行数。
+Customer 每行是一条原始请求，保存真实 Query、曝光集合、点击集合、购买集合及划分。同一请求提供 Query 和 Response 两步监督；超大曝光集合按已有规则生成多个 Response 批次，批次共用原请求划分。当前标签池共 555,553 条 Customer 请求（train 539,012，test 16,541）。Response 行数取决于实际输入长度。直接读取样本训练时，先展开一遍以确定每轮行数；使用 Token 缓存时直接读取已保存的行数。
 
 两步都输入 Profile、近期搜索／点击／购买历史及较早事实检索片段，长期 Memory 当前为空。Query 的检索只依据此前记录；Response 在同一历史上增加本次真实 Query 与曝光商品，并可用该 Query 重新检索。当前 Query 不进入 Query 阶段的输入；当前点击／购买不进入 Response 的输入。当前示例可用 `datasets.labels preview` 按需生成，不在标签目录中维护旧版副本。价格在 Agent 接口统一按分解释，这是沙箱约定，原始数值不转换，来源单位仍未确认。
 
@@ -418,7 +419,7 @@ finally:
 
 候选清单通过标签清单的 SHA256 确认数据来源。同一个买家或卖家的记录归到同一组，交给一个 Worker 按时间处理。构造中断后在同一个输出目录续跑。显式使用 `--verify` 可检查文件哈希。
 
-Customer 默认每批最多 64 件商品，配置项是 `inference/model_policy.json` 的 `customer_response_batch_size`。`environment/batching.py` 的 `response_batches()` 按列表原顺序连续切分，各批各自持有本次 Query、决策前的历史和商品数据副本。这些批次是计算切片，各自独立判断本批商品。仿真由 `response_concurrency` 控制单用户并发，由 `--max-concurrent-requests` 控制阶段总并发。全部批次成功后按原请求顺序合并，只结算一次。SFT 构建器为每个 Response 批次赋予 `1 / 批数` 的权重。
+Customer Response 的输入预算为模型上下文上限减去输出预留，两项默认值由 `inference/model_policy.json` 配置。运行时请求的输出上限更高时，按更高值预留。`environment/batching.py` 的 `response_batches()` 按列表原顺序连续切分，各批各自持有本次 Query、决策前的历史和商品数据副本。这些批次是计算切片，各自独立判断本批商品。仿真由 `response_concurrency` 控制单用户并发，由 `--max-concurrent-requests` 控制阶段总并发。全部批次成功后按原请求顺序合并，只结算一次。SFT 构建器为每个 Response 批次赋予 `1 / 批数` 的权重。
 
 ### Seller 增量构造
 
@@ -483,7 +484,7 @@ Prompt、Tokenizer 或检索设置改变后，用新目录重新生成 Token 分
 
 每条最终样本编码后检查实际输入／答案长度，并复用 token 写入缓存。任何一批超限，该请求的 Query 和所有 Response 一起排除；失败立即写入对应 bucket 的 `failures.jsonl`（record_id、role、split、reason、detail），并继续下一条。完成后 `selection.json` 汇总接受与排除的记录，后续可单独处理失败清单。
 
-固定批大小改变分批边界及 Response 权重；当前版本还共享 Customer 历史准备，并纳入 Seller 同店其他商品的近期候选，使用 `data/kuaisearch/lite/sft` 和 `data/kuaisearch/lite/candidates`。历史对照数值保存在审计报告中。固定分批可能产生更多训练行／仿真调用；极长历史或商品文本可能被排除，排除量必须如实报告。
+新版 Customer Token 缓存记录按 token 分批的规则，构建时使用新输出目录。既有缓存可以继续用于复现实验。若历史和单件商品已超预算，缓存构建会记录该请求无法容纳。
 
 ### 构造和推理复用
 
@@ -493,7 +494,7 @@ v2 候选清单按角色和主体 bucket 合并回放清单实际包含的 split
 
 BGE 将多个缺失文档的 token 块按长度组批，每批最多 8 块，按原文块顺序及长度加权还原文档向量，不截断原文。模型进程缓存最多 8,192 个确切文本／查询模式的向量，主体缓存保留最多 2,048 项；缓存只保存向量，权限、时间过滤和检索排名仍每次计算。批量浮点计算可能有微小数值差异，因此编码器版本及输入 release 更新，旧记忆 embedding 不默认为兼容。
 
-Seller 在市场与检索证据齐备后渲染一次；Customer Query 渲染一次，Response 只渲染按配置数量确定的最终分批（默认 64 件）。容量检查产生的官方模板 token 经 tokenizer 和内容身份核对后直接传入本地 Qwen，避免再次分词。Qwen worker 还缓存确切 token 前缀的 KV：默认最多 4 项、每项最多 2,048 token；用 `--prefix-cache-tokens 0` 关闭。不同 adapter 不共用 KV，批内混用 adapter 时不共享前缀；生成前复制缓存，生成结果不会写回公共前缀。长短不同的请求保留正确 attention mask 和位置，不改变各自的动作 grammar。这里是有界前缀复用，不是完整的持续组批调度器。
+Seller 在市场与检索证据齐备后渲染一次；Customer Query 渲染一次，Response 先渲染整单，超预算时再用相同历史测量各切片。容量检查产生的官方模板 token 经 tokenizer 和内容身份核对后直接传入本地 Qwen，避免再次分词。Qwen worker 还缓存确切 token 前缀的 KV：默认最多 4 项、每项最多 2,048 token；用 `--prefix-cache-tokens 0` 关闭。不同 adapter 不共用 KV，批内混用 adapter 时不共享前缀；生成前复制缓存，生成结果不会写回公共前缀。长短不同的请求保留正确 attention mask 和位置，不改变各自的动作 grammar。这里是有界前缀复用，不是完整的持续组批调度器。
 
 Token 缓存绑定对应的标签清单和候选清单。小规模合并／分开回放检查 token、监督边界和权重一致，KV 用真实小型 Qwen 和角色 LoRA 验证 logits／贪心输出；这些检查不代表已测得生产模型或 CPU 服务器的总体吞吐。
 
@@ -539,7 +540,9 @@ Token 缓存绑定对应的标签清单和候选清单。小规模合并／分�
 
 ### 运行入口
 
-统一入口是 `agent_simulation.training.run`，直接读取以上冻结数据与现有模板。模型与训练依赖复用现有项目环境，check 命令检查依赖与版本；不会自动安装包或下载权重。
+统一入口是 `agent_simulation.training.run`。用 `--model` 选择本地 Qwen2.5、Qwen3 或 Qwen3.5 权重，默认读取该模型自带的 tokenizer。训练 Qwen3.5 使用其文本模型，LoRA 同时覆盖全注意力和线性注意力的输入、输出投影。Qwen3 和 Qwen3.5 的动作模板关闭 thinking，监督从 JSON 答案开始。
+
+更换模型时，用相应的 `--tokenizer models/<模型目录>` 构建新 Token 缓存，冻结标签和请求划分可以复用。CUDA 支持时默认采用 BF16，显式 `--dtype` 可以覆盖。项目默认上下文预算仍为 32,768 token。恢复旧检查点使用其训练时的模型、Tokenizer 和依赖版本。
 
 使用 `--token-cache` 时，当前角色的全部 split／bucket 完成即可开始训练。训练默认读取完成清单和分片路径。恢复训练继续使用模型权重指纹。根目录 `complete.json` 表示两个角色全部完成。
 
@@ -706,7 +709,7 @@ Seller 每个批次根据本批商品和市场上下文报价。默认市场摘�
 
 历史事实检索在原 RRF 分数后乘以弱新鲜度系数：最多扣减 10%，历史时钟半衰期为 10,000 个索引，仿真时钟为 10 个结算步，均不解释为自然日。参数尚未校准；年龄不作为硬过滤条件，强相关旧证据仍可入选。长期生成经验不统一按年龄衰减，继续由反思、修订、撤回和可见性规则维护。共享排序函数位于 `agents/retrieval/ranking.py`；竞品筛选独立位于 `competitors.py`，复用已有编码器和缓存。
 
-Customer 搜索与列表响应保留选中的历史事实、原请求价格、日期和顺序，默认不展示内部检索得分。列表响应保留本次全部候选的标题、标价与身份，按配置的商品数量分批，默认每批最多 64 件。
+Customer 搜索与列表响应保留选中的历史事实、原请求价格、日期和顺序，默认不展示内部检索得分。列表响应保留本次全部候选的标题、标价与身份，超出模型输入预算时才按原顺序分批。
 
 本品最近观测价无效时，默认报价行保留原来的 `last_observed_price_raw=null`、状态和索引，并用 `last_valid_reference` 给出严格更早的有效标价及其索引。最近观测本身有效时，一份标价即可表达两者。滚动读取在短期窗口外仍保留最后有效参考点。
 

@@ -7,22 +7,13 @@ from agent_simulation.agents.context.shopping import project_customer
 from copy import deepcopy
 from unittest.mock import patch
 from agent_simulation.tests.fixtures import MarketFixture
-from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, ProfileCatalogFixture, answer, tool
+from agent_simulation.tests.fixtures import (
+    DisplayBudgetTokenizer, ScriptedModel, TokenizerFixture, ProfileCatalogFixture, answer, tool,
+)
 from agent_simulation.agents.customer import CustomerAgent
 from agent_simulation.agents.prompts.customer import decode_input
-import agent_simulation.environment.batching as batching
-from agent_simulation.environment.batching import response_batches
 from agent_simulation.datasets.samples.customer import split_supervision
 from agent_simulation.agents.context.shopping import displayed_details
-
-
-class BatchTokenizer(TokenizerFixture):
-    def apply_chat_template(self, messages, tools, **kwargs):
-        state = decode_input(messages[1]['content'])
-        return list(range(100 + 1500 * len(state.get('displayed_items', []))))
-
-
-POLICY = {'context_limit': 4500, 'reserved_output_tokens': 2048}
 
 
 class BatchTests(MarketFixture, unittest.TestCase):
@@ -34,17 +25,6 @@ class BatchTests(MarketFixture, unittest.TestCase):
         self.runtime.execute('customer', 7, 'search_products', {'query': '保温杯'})
         return self.runtime.inputs.customer(7, response=True)
 
-    def test_partition_has_no_capacity_probes_and_uses_configured_item_limit(self):
-        state = self.pending()
-        state['displayed_items'] = [{'item_id':i} for i in range(1459)]
-        with patch('agent_simulation.agents.prompts.customer.messages',
-                   side_effect=AssertionError('Batch planning must not render a prompt')):
-            batches = response_batches(state)
-        self.assertEqual(len(batches),23)
-        self.assertTrue(all(len(b['displayed_items']) <= 64 for b in batches))
-        self.assertEqual([p for b in batches for p in b['displayed_items']],state['displayed_items'])
-        self.assertEqual(response_batches({**state,'displayed_items':[]}),[{**state,'displayed_items':[]}])
-
     def test_partition_does_not_use_labels_and_reconstructs_all_facts(self):
         state = self.pending()
         ids = [p['item_id'] for p in state['displayed_items']]
@@ -52,9 +32,11 @@ class BatchTests(MarketFixture, unittest.TestCase):
         sample = {'sample_id': 'response:fixture', 'split': 'test', 'input': state,
                   'target': {'clicked_item_ids': ids[:1], 'purchased_item_ids': ids[-1:]},
                   'tools': []}
-        with patch.object(batching, "CUSTOMER_RESPONSE_BATCH_SIZE", 1):
-            rows = split_supervision(sample)
-            changed = split_supervision({**sample, 'target': {'clicked_item_ids': [], 'purchased_item_ids': []}})
+        tokenizer = DisplayBudgetTokenizer(1)
+        rows = split_supervision(sample, tokenizer)
+        changed = split_supervision(
+            {**sample, 'target': {'clicked_item_ids': [], 'purchased_item_ids': []}}, tokenizer,
+        )
         self.assertGreater(len(rows), 1)
         self.assertEqual([r['input'] for r in rows], [r['input'] for r in changed])
         self.assertEqual([p for r in rows for p in r['input']['displayed_items']], state['displayed_items'])
@@ -183,9 +165,8 @@ class BatchTests(MarketFixture, unittest.TestCase):
             replies.extend([
                             answer({'clicked_item_ids': [item], 'purchased_item_ids': [item] if item == ids[-1] else []})])
         model = ScriptedModel(replies)
-        agent = CustomerAgent(self.runtime, model, BatchTokenizer(), response_batch_size=1)
-        with patch.object(batching, "CUSTOMER_RESPONSE_BATCH_SIZE", 1):
-            result = agent.run(7)
+        agent = CustomerAgent(self.runtime, model, DisplayBudgetTokenizer(1))
+        result = agent.run(7)
         after = self.runtime.snapshot()
         self.assertEqual(result['result']['clicked_item_ids'], ids)
         self.assertEqual(result['result']['purchased_item_ids'], ids[-1:])
@@ -209,12 +190,11 @@ class BatchTests(MarketFixture, unittest.TestCase):
         ids = [p['item_id'] for p in state['displayed_items']]
         before = self.runtime.snapshot()
         model = ScriptedModel([answer({'clicked_item_ids': ids[:1], 'purchased_item_ids': []}), RuntimeError('probe')])
-        with patch.object(batching, "CUSTOMER_RESPONSE_BATCH_SIZE", 1):
-            with self.assertRaisesRegex(RuntimeError, 'probe'):
-                CustomerAgent(self.runtime, model, BatchTokenizer()).run(7)
-            self.assertEqual(self.runtime.snapshot(), before)
-            model = ScriptedModel([answer({'clicked_item_ids': [], 'purchased_item_ids': []}) for _ in ids])
-            result = CustomerAgent(self.runtime, model, BatchTokenizer()).run(7)
+        with self.assertRaisesRegex(RuntimeError, 'probe'):
+            CustomerAgent(self.runtime, model, DisplayBudgetTokenizer(1)).run(7)
+        self.assertEqual(self.runtime.snapshot(), before)
+        model = ScriptedModel([answer({'clicked_item_ids': [], 'purchased_item_ids': []}) for _ in ids])
+        result = CustomerAgent(self.runtime, model, DisplayBudgetTokenizer(1)).run(7)
         self.assertNotIn('search_products', [t['name'] for t in result['tools']])
         self.assertEqual(self.runtime.snapshot()['simulation_step'], before['simulation_step'] + 1)
 
@@ -223,9 +203,8 @@ class BatchTests(MarketFixture, unittest.TestCase):
         other = state['displayed_items'][-1]['item_id']
         before = self.runtime.snapshot()
         reply = answer({'clicked_item_ids': [other], 'purchased_item_ids': []})
-        with patch.object(batching, "CUSTOMER_RESPONSE_BATCH_SIZE", 1):
-            with self.assertRaises(ValueError):
-                CustomerAgent(self.runtime, ScriptedModel([reply]), BatchTokenizer()).run(7)
+        with self.assertRaises(ValueError):
+            CustomerAgent(self.runtime, ScriptedModel([reply]), DisplayBudgetTokenizer(1)).run(7)
         self.assertEqual(self.runtime.snapshot(), before)
 
     def test_details_use_displayed_snapshot_and_never_return_labels(self):

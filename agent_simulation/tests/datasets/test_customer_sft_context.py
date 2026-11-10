@@ -7,6 +7,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 import duckdb
 from agent_simulation.data.catalog import Catalog
+from agent_simulation.data.market.products import PROFILE_FIELDS
 
 from agent_simulation.datasets.samples.customer import customer_sample, sample_from_request, CustomerHistory
 from agent_simulation.datasets.labels import customer_samples
@@ -14,6 +15,16 @@ from agent_simulation.datasets.labels import SFTDataset
 from agent_simulation.tests.fixtures import TokenizerFixture
 from agent_simulation.agents.prompts.customer import decode_input
 from agent_simulation.agents.retrieval.history import PreparedCustomerHistory
+
+
+def add_empty_background(connection):
+    connection.execute("""CREATE TABLE customer_background (
+        user_id BIGINT, session_id BIGINT, time_index BIGINT, source_split VARCHAR,
+        recently_clicked_item_ids BIGINT[], recently_purchased_item_ids BIGINT[]
+    )""")
+    for field in PROFILE_FIELDS[1:]:
+        kind = "BIGINT" if field.endswith("_id") else "VARCHAR"
+        connection.execute(f"ALTER TABLE products ADD COLUMN IF NOT EXISTS {field} {kind}")
 
 
 class CustomerStageContextTests(unittest.TestCase):
@@ -27,6 +38,7 @@ class CustomerStageContextTests(unittest.TestCase):
             con.execute("CREATE TABLE users AS SELECT 7 user_id")
             con.execute("CREATE TABLE products AS SELECT 1 item_id")
             con.execute("CREATE TABLE ranking_observations AS SELECT session_id,1 item_id,100 price_raw FROM requests")
+            add_empty_background(con)
             catalog = Catalog.__new__(Catalog)
             catalog.connection, catalog.config = con, SimpleNamespace(dataset="fixture")
             with patch('agent_simulation.agents.retrieval.bge_encoder.default_encoder',
@@ -52,6 +64,7 @@ class CustomerStageContextTests(unittest.TestCase):
             con.execute("CREATE TABLE products AS SELECT 8 item_id")
             con.execute("""CREATE TABLE ranking_observations AS SELECT * FROM
                 (VALUES (1,8,150),(2,8,0),(3,8,90),(4,8,999)) x(session_id,item_id,price_raw)""")
+            add_empty_background(con)
             catalog = Catalog.__new__(Catalog)
             catalog.connection, catalog.config = con, SimpleNamespace(dataset="fixture")
             direct = customer_sample(catalog, 4, stage="query")[0]
@@ -128,6 +141,7 @@ class CustomerStageContextTests(unittest.TestCase):
             # Item 2 is deliberately absent: Query needs only the recorded historical choices.
             connection.execute("CREATE TABLE products AS SELECT 1 item_id,'杯子' item_title")
             connection.execute("CREATE TABLE ranking_observations AS SELECT 1 session_id,1 item_id,100 price_raw UNION ALL SELECT 2,1,100")
+            add_empty_background(connection)
             catalog = SimpleNamespace(connection=connection, config=SimpleNamespace(dataset='fixture'))
             with patch('agent_simulation.datasets.labels.split_supervision',
                        side_effect=AssertionError('Query-only stream partitioned Response')):
@@ -147,11 +161,12 @@ class CustomerStageContextTests(unittest.TestCase):
             connection.execute("CREATE TABLE products AS SELECT unnest([1,2,3,4,5]) item_id")
             connection.execute("""CREATE TABLE ranking_observations AS SELECT 1 session_id,item_id,price_raw
                 FROM (VALUES (1,125.5),(2,0),(3,-1),(4,NULL),(5,'Infinity'::DOUBLE)) p(item_id,price_raw)""")
+            add_empty_background(connection)
             catalog = Catalog.__new__(Catalog)
             catalog.connection = connection
             catalog.config = SimpleNamespace(dataset="fixture")
             direct = customer_sample(catalog, 1, stage="response")[1]
-            rolling, = customer_samples(catalog, 1, 2, split="train", stage="response")
+            rolling, = customer_samples(catalog, 1, 2, tokenizer=TokenizerFixture(), split="train", stage="response")
             self.assertEqual(rolling["messages"], direct["messages"])
             items = decode_input(rolling["messages"][1]["content"])["displayed_items"]
             self.assertEqual([(p["item_id"], p["price_raw"]) for p in items],

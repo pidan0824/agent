@@ -206,7 +206,7 @@ class CandidateCacheTests(unittest.TestCase):
 
     def test_late_response_overflow_discards_query_and_earlier_batches(self):
         from agent_simulation.datasets.labels import checked_record
-        import agent_simulation.environment.batching as batching
+        from agent_simulation.tests.fixtures import DisplayBudgetTokenizer
         query={'sample_id':'query:1','input':{},'target':{'query':'杯子'}}
         response={'sample_id':'response:1','input':{'displayed_items':[{'item_id':1},{'item_id':2}]},
                   'target':{'clicked_item_ids':[1],'purchased_item_ids':[]}}
@@ -215,10 +215,9 @@ class CandidateCacheTests(unittest.TestCase):
             calls.append(sample['sample_id'])
             if len(calls)==3:raise ContextCapacityError('long second batch')
             return sample
-        data=SimpleNamespace(check_sample=check)
-        with patch.object(batching, "CUSTOMER_RESPONSE_BATCH_SIZE", 1),patch('agent_simulation.datasets.samples.customer.messages',return_value=[]):
-            with self.assertRaisesRegex(ContextCapacityError,'second batch'):
-                checked_record(data,'customer',(query,response))
+        data = SimpleNamespace(check_sample=check, tokenizer=DisplayBudgetTokenizer(1))
+        with self.assertRaisesRegex(ContextCapacityError, 'second batch'):
+            checked_record(data, 'customer', (query, response))
         self.assertEqual(calls,['query:1','response:1:batch:1','response:1:batch:2'])
 
 

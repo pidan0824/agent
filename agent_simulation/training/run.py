@@ -11,13 +11,14 @@ from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from peft import LoraConfig, PeftModel, get_peft_model
-from transformers import AutoModelForCausalLM, set_seed
+from transformers import AutoConfig, AutoModelForCausalLM, set_seed
 from agent_simulation.inference.local.checkpoints import adapter_training_identity
 from agent_simulation.inference.requests import load_tokenizer
 from agent_simulation.inference import resolve_device
 from agent_simulation.logs import write_report
 from agent_simulation.datasets.labels import SFTDataset, record_samples, select_record_ids, selection_split
-from agent_simulation.datasets.tokens import validate_release
+from agent_simulation.datasets.tokens import cache_tokenizer_digest, validate_release
+from agent_simulation.environment.batching import response_batch_policy
 from agent_simulation.training.data_loader import (
     prepare_datasets,
     TensorCollator,
@@ -82,21 +83,20 @@ def check_data(args):
         raise ValueError("Stage selection requires Customer token cache")
     if getattr(args, "loss_breakdown", False) and not args.token_cache:
         raise ValueError("Loss diagnostics require a token cache")
-    config = json.loads((args.model / "config.json").read_text())
-    if (config.get("model_type"), config.get("hidden_size"), config.get("num_hidden_layers")) != (
-        "qwen2",
-        2048,
-        36,
-    ):
-        raise ValueError("Expected the existing local Qwen2.5-3B-Instruct")
-    index = json.loads((args.model / "model.safetensors.index.json").read_text())
-    shards = sorted(set(index["weight_map"].values()))
+    config = AutoConfig.from_pretrained(args.model, local_files_only=True, trust_remote_code=False)
+    index = args.model / "model.safetensors.index.json"
+    shards = (sorted(set(json.loads(index.read_text())["weight_map"].values()))
+              if index.is_file() else ["model.safetensors"])
     if not shards or any(Path(p).name != p or not (args.model / p).is_file() for p in shards):
         raise ValueError("Complete local model shards are required")
-    for name in ("tokenizer.json", "tokenizer_config.json", "merges.txt", "vocab.json"):
-        model_file, tokenizer_file = args.model / name, args.tokenizer / name
-        if not model_file.samefile(tokenizer_file) and sha256(model_file) != sha256(tokenizer_file):
-            raise ValueError("Training tokenizer differs from local Qwen: " + name)
+    args.tokenizer = args.tokenizer or args.model
+    if (args.tokenizer.resolve() != args.model.resolve()
+            and cache_tokenizer_digest(args.tokenizer) != cache_tokenizer_digest(args.model)):
+        raise ValueError("Training tokenizer or chat template differs from the selected model")
+    if args.token_cache and config.model_type != "qwen2":
+        identity = json.loads((args.token_cache / "identity.json").read_text())
+        if "tokenizer_sha256" not in identity:
+            raise ValueError("Build a new token cache with the selected model's tokenizer")
     if getattr(args, "token_cache", None) and not verify:
         return check_cached_data(args, None, shards)
     data = SFTDataset(args.dataset, args.tokenizer, verify_hashes=verify)
@@ -162,6 +162,8 @@ def training_identity(args, data_check, eval_split):
                     for bucket in range(buckets)]
             for split in ("train", eval_split)
         }
+    elif args.role == "customer" and getattr(args, "stage", None) != "query":
+        value["customer_response_batching"] = response_batch_policy()
     value["base_weight_sha256"] = {
         p: sha256(args.model / p) for p in data_check["local_model_shards_present"]
     }
@@ -201,8 +203,15 @@ def resume_checkpoint(output, requested, *, device="cpu"):
 
 
 def load_base_model(args):
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, local_files_only=True, trust_remote_code=False,
+    config = AutoConfig.from_pretrained(args.model, local_files_only=True, trust_remote_code=False)
+    model_class = AutoModelForCausalLM
+    if config.model_type == "qwen3_5":
+        from transformers import Qwen3_5ForCausalLM
+
+        model_class = Qwen3_5ForCausalLM
+        config = config.get_text_config()
+    model = model_class.from_pretrained(
+        args.model, config=config, local_files_only=True, trust_remote_code=False,
         dtype=getattr(torch, args.dtype), attn_implementation="sdpa",
     )
     model.config.use_cache = False
@@ -211,7 +220,7 @@ def load_base_model(args):
 
 def select_customer_checkpoint(args, checkpoints):
     """Compare retained Customer checkpoints on the same labeled test requests."""
-    tokenizer = load_tokenizer(str(args.tokenizer), local_files_only=True)
+    tokenizer = load_tokenizer(str(args.tokenizer or args.model), local_files_only=True)
     base = load_base_model(args)
     first, *others = checkpoints
     model = PeftModel.from_pretrained(base, first, adapter_name=first.name)
@@ -303,8 +312,15 @@ def train(args):
                           if k not in ("training_code_sha256", "evaluate_train")}
         if saved_identity.get("init_adapter"):
             adapter = checkpoint
+        if args.tokenizer is None and saved_identity.get("tokenizer"):
+            args.tokenizer = Path(saved_identity["tokenizer"])
+        if args.dtype == "auto":
+            args.dtype = saved_identity["dtype"]
+    args.tokenizer = args.tokenizer or args.model
+    if args.dtype == "auto":
+        args.dtype = "bfloat16" if args.device == "cuda" and torch.cuda.is_bf16_supported() else "float32"
     if adapter is not None:
-        adapter_training_identity(adapter, args.role)
+        adapter_identity = adapter_training_identity(adapter, args.role)
         adapter_config = json.loads((adapter / "adapter_config.json").read_text())
         if adapter_config["peft_type"] != "LORA":
             raise ValueError("Expected a LoRA adapter")
@@ -313,6 +329,9 @@ def train(args):
     data_check = check_data(args)
     eval_split = selection_split(args.dataset)
     identity = training_identity(args, data_check, eval_split)
+    if adapter is not None and any(adapter_identity.get(key) != identity[key]
+                                   for key in ("base_config_sha256", "base_weight_sha256")):
+        raise ValueError("Adapter training base differs from --model")
     packages = {
         name: importlib.metadata.version(name)
         for name in ("torch", "transformers", "peft", "accelerate", "duckdb", "numpy", "tokenizers")
@@ -352,13 +371,16 @@ def train(args):
         if adapter is not None:
             model = PeftModel.from_pretrained(model, adapter, is_trainable=True, local_files_only=True)
         else:
+            targets = ["q_proj", "k_proj", "v_proj", "o_proj"]
+            if model.config.model_type == "qwen3_5_text":
+                targets.extend(["in_proj_qkv", "out_proj"])
             model = get_peft_model(model, LoraConfig(
                 task_type="CAUSAL_LM",
                 r=args.rank,
                 lora_alpha=2 * args.rank,
                 lora_dropout=0.05,
                 bias="none",
-                target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                target_modules=targets,
             ))
         model.print_trainable_parameters()
         trainer = make_trainer(
@@ -412,11 +434,7 @@ def parser():
         q = sub.add_parser(command)
         q.add_argument("--dataset", type=Path, required=True)
         q.add_argument("--model", type=Path, required=True)
-        q.add_argument(
-            "--tokenizer",
-            type=Path,
-            default=Path(__file__).resolve().parents[2] / "models/Qwen2.5-3B-Instruct-tokenizer",
-        )
+        q.add_argument("--tokenizer", type=Path, help="Defaults to the tokenizer bundled with --model")
         q.add_argument("--role", choices=("seller", "customer"), required=True)
         q.add_argument("--stage", choices=("query", "response"),
                        help="Train/evaluate one Customer stage from an existing token cache")
@@ -435,7 +453,8 @@ def parser():
         q.add_argument("--output", type=Path, required=True)
         q.add_argument("--tensorboard", action="store_true", help="Write training and evaluation curves under OUTPUT/tensorboard")
         q.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
-        q.add_argument("--dtype", choices=("float32", "bfloat16"), default="float32")
+        q.add_argument("--dtype", choices=("auto", "float32", "bfloat16"), default="auto",
+                       help="Auto uses bfloat16 on supported CUDA devices, float32 otherwise")
         budget = q.add_mutually_exclusive_group()
         budget.add_argument("--epochs", type=int, default=5, help="Complete passes over the training stream (default: 5)")
         budget.add_argument("--max-steps", type=int, help="Explicit optimizer-step budget for bounded runs")

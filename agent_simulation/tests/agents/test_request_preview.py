@@ -6,7 +6,7 @@ from unittest.mock import patch
 from agent_simulation.agents.customer import CustomerAgent
 from agent_simulation.agents.seller import SellerAgent
 from agent_simulation.agents.prompts.customer import decode_input, prepare_history
-from agent_simulation.tests.fixtures import MarketFixture, ProfileCatalogFixture, ScriptedModel, TokenizerFixture, answer
+from agent_simulation.tests.fixtures import DisplayBudgetTokenizer, MarketFixture, ProfileCatalogFixture, ScriptedModel, TokenizerFixture, answer
 
 
 class RequestPreviewTests(MarketFixture, unittest.TestCase):
@@ -30,7 +30,7 @@ class RequestPreviewTests(MarketFixture, unittest.TestCase):
     def test_customer_preview_matches_query_and_all_response_batches(self):
         self.runtime.catalog = ProfileCatalogFixture(self.runtime)
         query_model = ScriptedModel([answer({'query': '保温杯'})])
-        agent = CustomerAgent(self.runtime, query_model, TokenizerFixture(), response_batch_size=2)
+        agent = CustomerAgent(self.runtime, query_model, DisplayBudgetTokenizer(2))
         preview = list(agent.preview_requests(7))
         run = agent.prepare_decision(7)
         asyncio.run(agent.choose_query(run))
@@ -39,7 +39,7 @@ class RequestPreviewTests(MarketFixture, unittest.TestCase):
         model = ScriptedModel([answer({'clicked_item_ids': [], 'purchased_item_ids': []})] * 2)
         agent.model = model
         changes = self.runtime.db.total_changes
-        with patch("agent_simulation.agents.customer.prepare_history",
+        with patch("agent_simulation.environment.batching.prepare_history",
                    wraps=prepare_history) as history:
             preview = list(agent.preview_requests(7, response=True))
             self.assertEqual(self.runtime.db.total_changes, changes)

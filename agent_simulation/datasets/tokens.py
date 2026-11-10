@@ -19,6 +19,7 @@ from agent_simulation.datasets.labels import (
     ordered_splits, release_splits,
 )
 from agent_simulation.datasets.tokenization import encode_tokens
+from agent_simulation.environment.batching import response_batch_policy
 from agent_simulation.inference import resolve_device
 from agent_simulation.inference.requests import ContextCapacityError, load_tokenizer, tokenizer_identity
 from agent_simulation.logs import write_report
@@ -57,7 +58,7 @@ def validate_release(root, directory, seed, *, role=None, tokenizer_path=None):
     expected = selected_identity(directory, selection, selection_hash, seed, spec['buckets'],
                                  tokenizer_digest=digest)
     require(selection['dataset_manifest_sha256'] == expected['dataset'], 'Selected cache source differs')
-    for key in ('background_sha256', 'compact_customer_background'):
+    for key in ('background_sha256', 'compact_customer_background', 'customer_response_batching'):
         if key in spec:
             expected[key] = spec[key]
     require(spec == expected,
@@ -277,7 +278,8 @@ def build_splits(args, role, bucket, splits):
             try:
                 rows = []
                 for sample in expand_record(
-                    role, raw, compact_background=getattr(args, 'compact_customer_background', False),
+                    role, raw, tokenizer=data.tokenizer,
+                    compact_background=getattr(args, 'compact_customer_background', False),
                 ):
                     require(sample['split'] == split, 'Wrong selected split')
                     rows.append(PreparedRow.from_sample(sample, data.tokenizer))
@@ -348,6 +350,7 @@ def preflight(args):
     catalog = Path(json.loads((args.dataset / 'manifest.json').read_text())['catalog'])
     spec['background_sha256'] = sha256(catalog / 'facts/customer_background.parquet')
     spec['tokenizer_sha256'] = cache_tokenizer_digest(args.tokenizer)
+    spec['customer_response_batching'] = response_batch_policy()
     if getattr(args, 'compact_customer_background', False):
         spec['compact_customer_background'] = True
     return spec, splits
@@ -359,7 +362,9 @@ def bind_release(args, spec):
         saved = json.loads(header.read_text())
         require(saved.get('tokenizer_sha256') == spec['tokenizer_sha256'],
                 'Token cache tokenizer or chat template differs or was not recorded; choose a new output directory')
-        require(saved == spec, 'Different selected cache release')
+        if getattr(args, 'role', None) == 'seller' and 'customer_response_batching' not in saved:
+            spec.pop('customer_response_batching', None)
+        require(saved == spec, 'Different selected cache release; choose a new output directory')
     else:
         write_report(header, spec)
     copied = args.output / 'candidate_manifest.json'

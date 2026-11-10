@@ -10,43 +10,34 @@ from agent_simulation.agents.decisions import action_output, run_workflow
 from agent_simulation.environment.operations.actions import require_open_market
 from agent_simulation.agents.schemas import validate_arguments
 from agent_simulation.agents.actions import validate_response
-import agent_simulation.environment.batching as batching
-from agent_simulation.agents.prompts.customer import prepare_history
-from agent_simulation.agents.context.shopping import project_customer
 from agent_simulation.agents.prompts.customer import customer_decision_messages
 
 
 class CustomerAgent(BaseAgent):
-    def __init__(self, *args, response_concurrency=2, response_batch_size=None, **kwargs):
+    def __init__(self, *args, response_concurrency=2, **kwargs):
         super().__init__(*args, **kwargs)
         require(type(response_concurrency) is int and response_concurrency > 0,
                 "Expected positive response concurrency")
         self.response_concurrency = response_concurrency
-        self.response_batch_size = (batching.CUSTOMER_RESPONSE_BATCH_SIZE
-                                    if response_batch_size is None else response_batch_size)
-        require(type(self.response_batch_size) is int and self.response_batch_size > 0,
-                "Customer response batch size must be positive")
 
     def _response_inputs(self, actor, *, state=None, expected_request_id=None, observe=True):
-        batches = self.runtime.inputs.customer_responses(
-            actor, state=state, batch_size=self.response_batch_size,
-            expected_request_id=expected_request_id, observe=observe, memory_tokenizer=self.tokenizer,
+        return self.runtime.inputs.customer_responses(
+            actor, self.tokenizer, state=state, max_output_tokens=getattr(self.model, "max_new_tokens", 0),
+            expected_request_id=expected_request_id, observe=observe,
         )
-        history = prepare_history(project_customer(batches[0])) if len(batches) > 1 else None
-        return batches, history
 
     def preview_requests(self, actor, *, response=False):
         """Render requests from the current state without running memory reflection."""
         stage = "response" if response else "query"
         if response:
-            batches, history = self._response_inputs(actor, observe=False)
+            batches = self._response_inputs(actor, observe=False)
         else:
             context = self.runtime.inputs.customer(
                 actor, observe=False, memory_tokenizer=self.tokenizer)
-            batches, history = [context], None
-        for state in batches:
+            batches = [(context, customer_decision_messages(context))]
+        for state, prompt in batches:
             request, _ = self.prepare_request(
-                customer_decision_messages(state, response=stage == "response", prepared_history=history), [], stage, role="customer",
+                prompt, [], stage, role="customer",
                 allow_wait=stage == "query" and "decision_time" in state,
                 displayed_ids=[p["item_id"] for p in state["displayed_items"]] if response else None,
             )
@@ -84,18 +75,19 @@ class CustomerAgent(BaseAgent):
     async def choose_response(self, run, *, request_slots=None, state=None):
         actor = run["actor"]
         pending = run["displayed_list"]
-        batches, prepared_history = self._response_inputs(
+        batches = self._response_inputs(
             actor, state=state, expected_request_id=pending["request_id"])
         selected = {"clicked_item_ids": set(), "purchased_item_ids": set()}
         run["response_batches"] = []
 
         async def respond(batch):
+            state, prompt = batch
             # Episode supplies a shared limit; map_decisions already bounds this Customer.
             async with (request_slots if request_slots is not None else nullcontext()):
-                return await self._stage(run, "response", state=batch, prepared_history=prepared_history)
+                return await self._stage(run, "response", state=state, prompt=prompt)
 
         responses = await map_decisions(batches, respond, concurrency=min(self.response_concurrency, len(batches)))
-        for batch, args in zip(batches, responses, strict=True):
+        for (batch, _), args in zip(batches, responses, strict=True):
             run["response_batches"].append({
                 "item_ids": [p["item_id"] for p in batch["displayed_items"]],
                 "response": deepcopy(args),
@@ -194,7 +186,7 @@ class CustomerAgent(BaseAgent):
         sellers = [("seller", item["seller_id"]) for item in run["displayed_list"]["displayed_items"]]
         self._update_long_term_memory(run, [("customer", run["actor"]), *sellers])
 
-    async def _stage(self, run, stage, *, state, prepared_history=None):
+    async def _stage(self, run, stage, *, state, prompt=None):
         displayed_ids = [product["item_id"] for product in state["displayed_items"]] if stage == "response" else None
         allow_wait = stage == "query" and "decision_time" in state
 
@@ -206,8 +198,8 @@ class CustomerAgent(BaseAgent):
             validate_arguments(args, action_output(stage)["final_schemas"][0])
             return args
 
-        prompt = customer_decision_messages(state, response=stage == "response",
-                                            prepared_history=prepared_history)
+        if prompt is None:
+            prompt = customer_decision_messages(state, response=stage == "response")
         recent = state.get("short_term_memory", {}).get("search_history", [])
         history = state.get("retrieved_context", {}).get("history", {})
         provenance = {
