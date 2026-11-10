@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import duckdb
+import numpy as np
 
 from agent_simulation.evaluation.macro.trajectories import (
     compare, customer_distribution, dtw, price_dynamics,
@@ -103,16 +104,27 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(model.complete.call_count, 5)
         self.assertEqual(data.close.call_count, 2)
 
-    def test_query_exact_match_includes_invalid_requests(self):
-        target = {"query": "杯子"}
+    def test_query_similarity_rewards_paraphrases_and_includes_invalid_requests(self):
+        target = {"query": "保温杯"}
         rows = [
             {"stage": "query", "sample_id": "query:1", "status": "ok",
              "target": target, "prediction": target},
-            {"stage": "query", "sample_id": "query:2", "status": "invalid"},
+            {"stage": "query", "sample_id": "query:2", "status": "ok",
+             "target": target, "prediction": {"query": "保温水杯"}},
+            {"stage": "query", "sample_id": "query:3", "status": "invalid"},
         ]
-        metrics = summarize(rows)["query"]
-        self.assertEqual(metrics["exact_text_rate_valid_only"], 1)
-        self.assertEqual(metrics["end_to_end_exact_text_rate"], 0.5)
+        encoder = Mock()
+        encoder.encode_many.return_value = [np.array([0.8, 0.6]), np.array([1.0, 0.0])]
+        with patch("agent_simulation.evaluation.micro.behavior_prediction.bge_encoder",
+                   return_value=(encoder, "fixture-bge")):
+            metrics = summarize(rows)["query"]
+        encoder.encode_many.assert_called_once_with(["保温水杯", "保温杯"])
+        self.assertEqual(metrics["semantic_similarity_by_sample"],
+                         {"query:1": 1.0, "query:2": 0.8, "query:3": 0.0})
+        self.assertAlmostEqual(metrics["semantic_similarity_mean_valid_only"], 0.9)
+        self.assertAlmostEqual(metrics["end_to_end_semantic_similarity_mean"], 0.6)
+        self.assertEqual(metrics["exact_text_rate_valid_only"], 0.5)
+        self.assertAlmostEqual(metrics["end_to_end_exact_text_rate"], 1 / 3)
 
     def test_evaluation_rejects_adapter_trained_on_different_base_weights(self):
         tokenizer = SimpleNamespace(chat_template="fixture", get_vocab=lambda: {"test": 1})

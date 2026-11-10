@@ -6,12 +6,15 @@ from collections import Counter, defaultdict
 from contextlib import ExitStack, closing
 import json
 import math
+import os
 import statistics
 from pathlib import Path
 import time
 from copy import deepcopy
 from uuid import uuid4
 
+from agent_simulation import PROJECT_ROOT
+from agent_simulation.agents.retrieval.bge_encoder import bge_encoder
 from agent_simulation.data.common import require, sha256
 from agent_simulation.inference.local.qwen import QwenLocal, DEFAULT_REVISION
 from agent_simulation.inference.requests import prepare_request
@@ -182,6 +185,44 @@ def merge_response_batches(identity, outputs):
     return merged
 
 
+def query_metrics(rows, valid):
+    scores, different = {}, {}
+    hits = 0
+    for row in valid:
+        sample_id = row["sample_id"]
+        prediction, target = row["prediction"]["query"], row["target"]["query"]
+        hits += prediction == target
+        prediction, target = prediction.strip(), target.strip()
+        if not prediction or not target:
+            scores[sample_id] = 0.0
+        elif prediction == target:
+            scores[sample_id] = 1.0
+        else:
+            different[sample_id] = (prediction, target)
+
+    encoder_id = None
+    if different:
+        path = os.environ.get("MEMORY_BGE_PATH", str(PROJECT_ROOT / "models/bge-small-zh-v1.5"))
+        # Keep this small postprocessing pass off the generation model's GPU.
+        encoder, encoder_id = bge_encoder(path, device="cpu")
+        texts = list(dict.fromkeys(text for pair in different.values() for text in pair))
+        vectors = dict(zip(texts, encoder.encode_many(texts)))
+        # The encoder already returns unit vectors. Zero is the floor for failed requests.
+        for sample_id, (prediction, target) in different.items():
+            cosine = float(vectors[prediction] @ vectors[target])
+            scores[sample_id] = max(0.0, min(1.0, cosine))
+
+    total = math.fsum(scores.values())
+    return {
+        "semantic_similarity_mean_valid_only": total / len(valid) if valid else None,
+        "end_to_end_semantic_similarity_mean": total / len(rows) if rows else None,
+        "semantic_similarity_encoder": encoder_id,
+        "semantic_similarity_by_sample": {row["sample_id"]: scores.get(row["sample_id"], 0.0) for row in rows},
+        "exact_text_rate_valid_only": hits / len(valid) if valid else None,
+        "end_to_end_exact_text_rate": hits / len(rows) if rows else None,
+    }
+
+
 def summarize(records):
     result = {}
     for stage in ("query", "response", "seller"):
@@ -199,12 +240,7 @@ def summarize(records):
             if r["status"] != "ok"
         ]
         if stage == "query":
-            hits = sum(r["prediction"]["query"] == r["target"]["query"] for r in valid)
-            out["exact_text_rate_valid_only"] = hits / len(valid) if valid else None
-            out["end_to_end_exact_text_rate"] = hits / len(rows) if rows else None
-            out["intent_review"] = (
-                "Review product type and requirements in paired queries; exact text is not intent accuracy."
-            )
+            out.update(query_metrics(rows, valid))
         elif stage == "response":
             for key in ("clicked_item_ids", "purchased_item_ids"):
                 out[key] = choices([(r["prediction"][key], r["target"][key]) for r in valid])
@@ -228,7 +264,8 @@ def summarize(records):
             out["per_product"] = {key: prices(values) for key, values in grouped.items()}
         result[stage] = out
     result["score_scope"] = (
-        "Errors and F1 use valid complete outputs; invalid outputs remain in coverage and end-to-end exact-match denominators."
+        "Errors and F1 use valid complete outputs. Invalid outputs remain in coverage and end-to-end "
+        "exact-match denominators and score zero in end-to-end Query similarity."
     )
     return result
 
