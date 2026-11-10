@@ -12,9 +12,11 @@ from contextlib import closing
 from itertools import chain, islice
 from pathlib import Path
 from agent_simulation.data.common import require, sha256
-from agent_simulation.datasets.tokenization import IGNORE_INDEX, collate
+from agent_simulation.datasets.tokenization import IGNORE_INDEX
 from agent_simulation.datasets.labels import bind_split_history, SFTDataset, record_samples
 from agent_simulation.datasets.tokens import PreparedRow, read_shard
+
+RESPONSE_FORMAT_WEIGHT = 0.25
 
 ACTION_WEIGHTS = {"click_weight": 2.0, "purchase_weight": 4.0, "price_change_weight": 2.0}
 
@@ -223,62 +225,71 @@ class EvaluationStream(torch.utils.data.IterableDataset):
 
 
 def response_token_parts(tokenizer, tokens):
-    """0: structure (including terminator), 1: click ID, 2: purchase ID."""
+    """0: fixed format, 1: click ID, 2: purchase ID, 3: list decisions and end tokens."""
     text = tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False)
     encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
     if encoded["input_ids"] != list(tokens):
         raise ValueError("Cannot align answer tokens for loss breakdown")
-    spans = []
+    spans, lists = [], []
     for field in re.finditer(r'"(clicked_item_ids|purchased_item_ids)"\s*:\s*\[([^]]*)\]', text):
+        lists.append((field.start(2) - 1, field.end(2) + 1))
         part = 1 if field[1] == "clicked_item_ids" else 2
         spans.extend((field.start(2) + m.start(), field.start(2) + m.end(), part)
                      for m in re.finditer(r"\d+", field[2]))
-    return [next((part for left, right, part in spans if start < right and end > left), 0)
-            for start, end in encoded["offset_mapping"]]
+    if len(lists) != 2:
+        raise ValueError("Response answer must contain both action lists")
+    special = set(tokenizer.all_special_ids)
+    return [
+        next((part for left, right, part in spans if start < right and end > left),
+             3 if token in special or any(start < right and end > left for left, right in lists) else 0)
+        for token, (start, end) in zip(tokens, encoded["offset_mapping"], strict=True)
+    ]
 
 
 class TensorCollator:
     """Keep IDs and provenance outside model kwargs; preserve request weights."""
 
-    def __init__(self, tokenizer, *, loss_breakdown=False, action_weights=None):
+    def __init__(self, tokenizer, *, loss_breakdown=False, action_weights=None, response_format_weight=1.0):
+        if not 0 < response_format_weight <= 1:
+            raise ValueError("Response format weight must be in (0, 1]")
+        self.response_format_weight = response_format_weight
         self.tokenizer = tokenizer
         self.loss_breakdown = loss_breakdown
         self.action_weights = action_weights or {}
 
     def __call__(self, samples):
-        if isinstance(samples[0], PreparedRow):
-            length = max(len(s.tokens) for s in samples)
-            ids = torch.full((len(samples), length), self.tokenizer.pad_token_id, dtype=torch.long)
-            mask = torch.zeros_like(ids)
-            labels = torch.full_like(ids, IGNORE_INDEX)
+        if not isinstance(samples[0], PreparedRow):
+            samples = [PreparedRow.from_sample(sample, self.tokenizer) for sample in samples]
+        length = max(len(s.tokens) for s in samples)
+        ids = torch.full((len(samples), length), self.tokenizer.pad_token_id, dtype=torch.long)
+        mask = torch.zeros_like(ids)
+        labels = torch.full_like(ids, IGNORE_INDEX)
+        for i, sample in enumerate(samples):
+            n, start = len(sample.tokens), sample.answer_start
+            ids[i, :n] = torch.from_numpy(sample.tokens)
+            mask[i, :n] = 1
+            labels[i, start:n] = ids[i, start:n]
+        result = {"input_ids": ids, "attention_mask": mask, "labels": labels,
+                  "sample_weights": torch.tensor([s.weight for s in samples], dtype=torch.float32)}
+        if self.action_weights:
+            result["action_multipliers"] = torch.tensor([
+                self.action_weights.get(sample.sample_id, 1.0) for sample in samples
+            ], dtype=torch.float32)
+        if self.loss_breakdown or self.response_format_weight != 1:
+            stages = [s.sample_id.split(":", 1)[0] for s in samples]
+            parts = torch.full_like(ids, -1)
             for i, sample in enumerate(samples):
-                n, start = len(sample.tokens), sample.answer_start
-                ids[i, :n] = torch.from_numpy(sample.tokens)
-                mask[i, :n] = 1
-                labels[i, start:n] = ids[i, start:n]
-            result = {"input_ids": ids, "attention_mask": mask, "labels": labels,
-                      "sample_weights": torch.tensor([s.weight for s in samples], dtype=torch.float32)}
-            if self.action_weights:
-                result["action_multipliers"] = torch.tensor([
-                    self.action_weights.get(sample.sample_id, 1.0) for sample in samples
-                ], dtype=torch.float32)
+                start, n = sample.answer_start, len(sample.tokens)
+                values = (response_token_parts(self.tokenizer, sample.tokens[start:])
+                          if stages[i] == "response" else [0] * (n - start))
+                parts[i, start:n] = torch.tensor(values)
+            stage_ids = torch.tensor([("query", "response", "seller").index(s) for s in stages])
+            if self.response_format_weight != 1:
+                fixed = parts.eq(0) & stage_ids.eq(1).unsqueeze(1)
+                result["token_weights"] = torch.where(fixed, self.response_format_weight, 1.0)
             if self.loss_breakdown:
-                stages = [s.sample_id.split(":", 1)[0] for s in samples]
-                parts = torch.full_like(ids, -1)
-                for i, sample in enumerate(samples):
-                    start, n = sample.answer_start, len(sample.tokens)
-                    values = (response_token_parts(self.tokenizer, sample.tokens[start:])
-                              if stages[i] == "response" else [0] * (n - start))
-                    parts[i, start:n] = torch.tensor(values)
                 result["answer_parts"] = parts
-                result["stages"] = torch.tensor([("query", "response", "seller").index(s) for s in stages])
-            return result
-        batch = collate(samples, self.tokenizer)
-        result = {
-            key: torch.tensor(value, dtype=torch.long)
-            for key, value in batch["model_inputs"].items()
-        }
-        result["sample_weights"] = torch.tensor(batch["sample_weights"], dtype=torch.float32)
+                result["stages"] = stage_ids
         return result
 
 

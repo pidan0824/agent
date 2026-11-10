@@ -6,11 +6,11 @@ import torch
 from torch.nn import functional as F
 from transformers import Trainer, TrainerCallback, TrainingArguments
 
-from agent_simulation.training.data_loader import TensorCollator
+from agent_simulation.training.data_loader import TensorCollator, RESPONSE_FORMAT_WEIGHT
 
 
-def answer_losses(logits, targets, *, return_tokens=False):
-    """Average token cross-entropy inside each answer, ignoring padding and prompts."""
+def answer_losses(logits, targets, *, token_weights=None, return_tokens=False):
+    """Normalize weighted token CE inside each answer, ignoring prompts and padding."""
     valid = targets.ne(-100)
     counts = valid.sum(-1)
     if torch.any(counts == 0):
@@ -22,7 +22,8 @@ def answer_losses(logits, targets, *, return_tokens=False):
         ignore_index=-100,
     )
     tokens = losses.reshape_as(targets)
-    means = (tokens * valid).sum(-1) / counts
+    weights = valid if token_weights is None else token_weights * valid
+    means = (tokens * weights).sum(-1) / weights.sum(-1)
     return (means, tokens) if return_tokens else means
 
 
@@ -117,17 +118,18 @@ class BehaviorTrainer(Trainer):
         finally:
             self._loss_totals = None
 
-    def _record_loss_parts(self, inputs, targets, token_losses, positions, effective_weights):
+    def _record_loss_parts(self, inputs, targets, token_losses, positions, effective_weights, token_weights):
         parts = inputs["answer_parts"][:, positions + 1].detach().cpu()
         valid = targets.ne(-100).detach().cpu()
-        losses = token_losses.detach().double().cpu()
+        factors = valid.double() if token_weights is None else token_weights.detach().double().cpu() * valid
+        losses = token_losses.detach().double().cpu() * factors
         for i, (stage, request_weight, weight) in enumerate(zip(
             inputs["stages"].tolist(), inputs["sample_weights"].tolist(), effective_weights.tolist()
         )):
             stage = ("query", "response", "seller")[stage]
             totals = self._loss_totals.setdefault(stage, {"rows": 0, "weight": 0., "answer": 0.,
-                "parts": {p: [0, 0., 0., 0.] for p in ("structure", "click_id", "purchase_id")}})
-            count = int(valid[i].sum())
+                "parts": {p: [0, 0., 0., 0.] for p in ("structure", "click_id", "purchase_id", "decision")}})
+            count = float(factors[i].sum())
             totals["rows"] += 1
             totals["weight"] += request_weight
             totals["answer"] += weight * float(losses[i][valid[i]].sum()) / count
@@ -137,7 +139,7 @@ class BehaviorTrainer(Trainer):
                     n, loss = int(selected.sum()), float(losses[i][selected].sum())
                     item = totals["parts"][name]
                     item[0] += n
-                    item[1] += weight * n
+                    item[1] += weight * float(factors[i][selected].sum())
                     item[2] += weight * loss
                     item[3] += weight * loss / count
 
@@ -174,11 +176,14 @@ class BehaviorTrainer(Trainer):
             logits_to_keep=positions,
         )
         targets = labels[:, positions + 1]
+        token_weights = inputs.get("token_weights")
+        if token_weights is not None:
+            token_weights = token_weights[:, positions + 1]
         if self._loss_totals is not None:
-            losses, tokens = answer_losses(outputs.logits, targets, return_tokens=True)
-            self._record_loss_parts(inputs, targets, tokens, positions, weights)
+            losses, tokens = answer_losses(outputs.logits, targets, token_weights=token_weights, return_tokens=True)
+            self._record_loss_parts(inputs, targets, tokens, positions, weights, token_weights)
         else:
-            losses = answer_losses(outputs.logits, targets)
+            losses = answer_losses(outputs.logits, targets, token_weights=token_weights)
         denominator = num_items_in_batch if num_items_in_batch is not None else labels.shape[0]
         loss = (losses * weights).sum() / denominator
         return (loss, outputs) if return_outputs else loss
@@ -239,7 +244,11 @@ def make_trainer(model, tokenizer, args, train_data, eval_data, *, evaluate_each
         eval_dataset=eval_data,
         processing_class=tokenizer,
         data_collator=TensorCollator(tokenizer, loss_breakdown=getattr(args, "loss_breakdown", False),
-                                     action_weights=action_weights),
+                                     action_weights=action_weights,
+                                     response_format_weight=(
+                                         getattr(args, "response_format_weight", RESPONSE_FORMAT_WEIGHT)
+                                         if getattr(args, "role", None) == "customer"
+                                         and getattr(args, "stage", None) != "query" else 1.0)),
         callbacks=callbacks,
     )
     trainer.schedule_epochs = getattr(args, "lr_schedule_epochs", None)

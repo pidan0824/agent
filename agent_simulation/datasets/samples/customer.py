@@ -81,9 +81,9 @@ def sample_from_request(dataset, session, r, *, history_embedder=DEFAULT_HISTORY
     return query, response
 
 
-def split_supervision(sample, tokenizer, *, max_output_tokens=0):
+def split_supervision(sample, tokenizer, *, max_output_tokens=0, prepared_history=None):
     """Intersect original labels only after computing label-blind partitions."""
-    prepared = None
+    prepared = prepared_history
     if "messages" in sample:
         visible = json.loads(sample["messages"][1]["content"])
         prepared = {key: json.dumps(visible[key], ensure_ascii=False, separators=(",", ":"))

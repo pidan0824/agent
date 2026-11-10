@@ -266,6 +266,20 @@ class CompetitorStabilityTests(unittest.TestCase):
 
 
 class ModelCompetitorTests(unittest.TestCase):
+
+    def test_single_oversized_competitor_is_a_capacity_failure(self):
+        from agent_simulation.agents.context import ContextModel
+        from agent_simulation.inference.requests import ContextCapacityError
+        from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture
+        client = ScriptedModel([])
+        client.tokenizer = TokenizerFixture()
+        model = ContextModel("fixture", client=client)
+        with patch("agent_simulation.agents.context.input_token_budget", return_value=1), \
+             patch("agent_simulation.agents.context.prompt_tokens", return_value=[1, 2]):
+            with self.assertRaises(ContextCapacityError):
+                model.competitors(product(1, 10), [product(2, 20)])
+        self.assertEqual(client.requests, [])
+
     def test_model_can_select_zero_or_more_than_three_without_changing_quotes(self):
         from agent_simulation.agents.context import ContextModel
         from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer

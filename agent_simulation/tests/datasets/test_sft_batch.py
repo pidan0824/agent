@@ -1,7 +1,6 @@
 """Official-template answer masking, padding and request-weight preservation."""
 
 from agent_simulation import PROJECT_ROOT
-from contextlib import closing
 from copy import deepcopy
 import json
 import unittest
@@ -14,7 +13,7 @@ from agent_simulation.datasets.labels import SFTDataset
 
 class BatchTests(unittest.TestCase):
     def test_capacity_and_training_share_one_tokenization_without_exporting_the_cache(self):
-        original = deepcopy(self.samples['query_14'])
+        original = deepcopy(self.samples['query'])
         data = SFTDataset.__new__(SFTDataset)
         data.tokenizer = self.tokenizer
         with patch.object(self.tokenizer, 'apply_chat_template', wraps=self.tokenizer.apply_chat_template) as render:
@@ -30,7 +29,7 @@ class BatchTests(unittest.TestCase):
     def test_cached_tokens_are_recomputed_for_a_different_tokenizer_or_edited_messages(self):
         data = SFTDataset.__new__(SFTDataset)
         data.tokenizer = self.tokenizer
-        sample = data.check_sample(deepcopy(self.samples['response_12758_batch_1']))
+        sample = data.check_sample(deepcopy(self.samples['response_batch']))
         other = load_tokenizer(str(PROJECT_ROOT / 'models/Qwen2.5-3B-Instruct-tokenizer'), local_files_only=True)
         with patch.object(other, 'apply_chat_template', wraps=other.apply_chat_template) as render:
             encoded = encode_sample(sample, other)
@@ -47,13 +46,26 @@ class BatchTests(unittest.TestCase):
     def setUpClass(cls):
         root = PROJECT_ROOT
         cls.tokenizer = load_tokenizer(str(root / 'models/Qwen2.5-3B-Instruct-tokenizer'), local_files_only=True)
-        with closing(SFTDataset(root / 'data/kuaisearch/lite/sft', cls.tokenizer)) as data:
-            ids = ['query:14', 'response:14', 'response:12758:batch:1',
-                   'seller:108629:579227:850769']
-            cls.samples = {key.replace(':', '_'): dict(data.sample(key)) for key in ids}
+        # These checks concern encoding and masks, not a particular published dataset.
+        cls.samples = {}
+        targets = {
+            "query": {"query": "保温杯"},
+            "response": {"clicked_item_ids": [101], "purchased_item_ids": []},
+            "response_batch": {"clicked_item_ids": [102], "purchased_item_ids": [102]},
+            "seller": {"prices": [{"item_id": 101, "price_raw": 100}]},
+        }
+        for name, target in targets.items():
+            stage = name.split("_")[0]
+            cls.samples[name] = {
+                "sample_id": f"{stage}:1", "split": "train", "tools": [],
+                "messages": [{"role": "system", "content": "Return the requested JSON."},
+                             {"role": "user", "content": "商品资料" * (64 if name == "response_batch" else 1)},
+                             {"role": "assistant", "content": json.dumps(target, ensure_ascii=False)}],
+            }
+        cls.samples["response_batch"]["batching"] = {"count": 2, "request_weight": .5}
 
     def test_only_final_answer_tokens_are_supervised_for_every_stage(self):
-        for name in ['query_14', 'response_14', 'seller_108629_579227_850769']:
+        for name in ['query', 'response', 'seller']:
             with self.subTest(stage=name):
                 sample = self.samples[name]
                 encoded = encode_sample(sample, self.tokenizer)
@@ -66,7 +78,7 @@ class BatchTests(unittest.TestCase):
                 self.assertIn('prices' if name.startswith('seller') else ('clicked_item_ids' if name.startswith('response') else 'query'), answer)
 
     def test_external_source_and_provenance_never_change_model_tokens(self):
-        sample = self.samples['seller_108629_579227_850769']
+        sample = self.samples['seller']
         other = deepcopy(sample)
         other['source'] = {'secret_audit_value': 'must not enter the model'}
         other['provenance'] = [{'generator': 'not a prompt'}]
@@ -74,7 +86,7 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(encode_sample(sample, self.tokenizer), encode_sample(other, self.tokenizer))
 
     def test_padding_is_masked_and_weights_are_not_model_kwargs(self):
-        samples = [self.samples[n] for n in ['query_14', 'response_14', 'response_12758_batch_1']]
+        samples = [self.samples[n] for n in ['query', 'response', 'response_batch']]
         batch = collate(samples, self.tokenizer)
         self.assertEqual(set(batch['model_inputs']), {'input_ids', 'attention_mask', 'labels'})
         self.assertEqual(len({len(r) for r in batch['model_inputs']['input_ids']}), 1)
@@ -87,17 +99,17 @@ class BatchTests(unittest.TestCase):
         self.assertAlmostEqual(sum([batch['sample_weights'][-1]]*k), 1)
 
     def test_invalid_weight_and_invented_query_trajectory_are_rejected(self):
-        sample = deepcopy(self.samples['response_12758_batch_1'])
+        sample = deepcopy(self.samples['response_batch'])
         sample['batching']['request_weight'] = 0
         with self.assertRaisesRegex(ValueError, 'Response weight'):
             encode_sample(sample, self.tokenizer)
-        sample = deepcopy(self.samples['query_14'])
+        sample = deepcopy(self.samples['query'])
         sample['messages'].insert(2, {'role': 'tool', 'content': 'invented trajectory'})
         with self.assertRaisesRegex(ValueError, 'invented tool trajectories'):
             encode_sample(sample, self.tokenizer)
 
     def test_overflow_raises_without_truncating_answer_or_context(self):
-        sample = deepcopy(self.samples['query_14'])
+        sample = deepcopy(self.samples['query'])
         sample['messages'][1]['content'] += ' very long context' * 20000
         original = deepcopy(sample)
         with self.assertRaisesRegex(ValueError, 'overflow'):

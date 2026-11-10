@@ -5,11 +5,9 @@ import argparse
 import importlib.metadata
 import json
 import math
-import shutil
 import torch
 from itertools import islice
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoConfig, AutoModelForCausalLM, set_seed
 from agent_simulation.inference.local.checkpoints import adapter_training_identity
@@ -23,6 +21,7 @@ from agent_simulation.training.data_loader import (
     prepare_datasets,
     action_multipliers,
     ACTION_WEIGHTS,
+    RESPONSE_FORMAT_WEIGHT,
     TensorCollator,
     TokenStream,
 )
@@ -152,9 +151,12 @@ def training_identity(args, data_check, eval_split):
     for key, default in (("stage", None), ("loss_breakdown", False),
                          ("keep_checkpoints", 2), ("lr_schedule_epochs", None),
                          ("activation_offload_tokens", None), ("click_weight", 1.0),
-                         ("purchase_weight", 1.0), ("price_change_weight", 1.0)):
+                         ("purchase_weight", 1.0), ("price_change_weight", 1.0),
+                         ("response_format_weight", 1.0)):
         if value.get(key) == default:
             value.pop(key, None)
+    if args.role != "customer" or getattr(args, "stage", None) == "query":
+        value.pop("response_format_weight", None)
     if value.get("init_adapter") is None:
         value.pop("init_adapter", None)
     value["dataset_manifest_sha256"] = sha256(args.dataset / "manifest.json")
@@ -223,67 +225,9 @@ def load_base_model(args):
     return model
 
 
-def select_customer_checkpoint(args, checkpoints):
-    """Compare retained Customer checkpoints on the same labeled test requests."""
-    tokenizer = load_tokenizer(str(args.tokenizer or args.model), local_files_only=True)
-    base = load_base_model(args)
-    first, *others = checkpoints
-    model = PeftModel.from_pretrained(base, first, adapter_name=first.name)
-    for checkpoint in others:
-        model.load_adapter(checkpoint, adapter_name=checkpoint.name)
-    test = {"query": [], "response": []}
-    for row in TokenStream(args.token_cache, "customer", "test"):
-        test[row.sample_id.split(":", 1)[0]].append(row)
-    trainer = make_trainer(model, tokenizer, args, None, None,
-                           action_weights=action_multipliers(args, tokenizer, test["response"]))
-    weights = {stage: math.fsum(row.weight for row in rows) for stage, rows in test.items()}
-    total_rows = sum(map(len, test.values()))
-    evaluations = []
-    for checkpoint in checkpoints:
-        model.set_adapter(checkpoint.name)
-        state = json.loads((checkpoint / "trainer_state.json").read_text())
-        # Trainer averages weight × answer loss over rows. Undo that mean before merging.
-        weighted_losses = {
-            stage: trainer.evaluate(eval_dataset=rows)["eval_loss"] * len(rows)
-            for stage, rows in test.items()
-        }
-        if not all(math.isfinite(loss) for loss in weighted_losses.values()):
-            raise ValueError(f"Non-finite test loss for {checkpoint}")
-        evaluation = {
-            "epoch": state["epoch"],
-            "step": state["global_step"],
-            "checkpoint": str(checkpoint),
-            "eval_loss": sum(weighted_losses.values()) / total_rows,
-            **{stage: {"loss": loss / weights[stage], "rows": len(test[stage])}
-               for stage, loss in weighted_losses.items()},
-        }
-        evaluations.append(evaluation)
-        print(json.dumps(evaluation), flush=True)
-
-    best = min(evaluations, key=lambda evaluation: evaluation["eval_loss"])
-    latest = max(evaluations, key=lambda evaluation: evaluation["step"])
-    with TemporaryDirectory(dir=args.output) as tmp:
-        adapter = Path(tmp) / "adapter"
-        adapter.mkdir()
-        for name in ("adapter_config.json", "adapter_model.safetensors"):
-            shutil.copy2(Path(best["checkpoint"]) / name, adapter / name)
-        adapter.rename(args.output / "adapter")
-    write_outcome(args.output, completed=True, payload={
-        "status": "configured_steps_completed",
-        "steps": latest["step"],
-        "epochs_completed": latest["epoch"],
-        "checkpoint_selection": "lowest test answer loss among evaluated checkpoints",
-        "evaluation_split": "test",
-        "test_used": True,
-        "test_used_for_gradient_updates": False,
-        "behavior_generation_evaluated": False,
-        "best_checkpoint": best["checkpoint"],
-        "evaluation": best,
-        "checkpoint_evaluations": evaluations,
-    })
-
-
 def train(args):
+    if not 0 < getattr(args, "response_format_weight", RESPONSE_FORMAT_WEIGHT) <= 1:
+        raise ValueError("Response format weight must be in (0, 1]")
     multipliers = {key: getattr(args, key, default) for key, default in ACTION_WEIGHTS.items()}
     if any(not math.isfinite(value) or value < 1 for value in multipliers.values()):
         raise ValueError("Action weights must be finite and at least 1")
@@ -379,7 +323,7 @@ def train(args):
                 "samples_per_epoch": samples_per_epoch,
                 "input_check": data_check,
                 "packages": packages,
-                "loss": "mean_over_examples(request_weight * action_multiplier * mean_answer_token_CE)",
+                "loss": "mean_over_examples(request_weight * action_multiplier * sum(token_weight * CE) / sum(token_weight))",
                 "action_weighted_rows_across_splits": len(action_weights),
                 "checkpoint_selection": f"lowest {eval_split} answer loss",
                 "evaluation_split": eval_split,
@@ -488,6 +432,8 @@ def parser():
         q.add_argument("--click-weight", type=float, default=ACTION_WEIGHTS["click_weight"], help="Train and evaluation loss multiplier for Customer click rows (default: 2)")
         q.add_argument("--purchase-weight", type=float, default=ACTION_WEIGHTS["purchase_weight"], help="Train and evaluation loss multiplier for Customer purchase rows (default: 4)")
         q.add_argument("--price-change-weight", type=float, default=ACTION_WEIGHTS["price_change_weight"], help="Train and evaluation loss multiplier for Seller quote changes (default: 2)")
+        q.add_argument("--response-format-weight", type=float, default=RESPONSE_FORMAT_WEIGHT,
+                       help="Customer Response fixed-format token weight in train/eval; decisions stay 1 (default: 0.25)")
         q.add_argument("--rank", type=int, default=64)
         q.add_argument("--loss-breakdown", action="store_true", help="Report stage and Response token-group evaluation losses")
         q.add_argument("--keep-checkpoints", type=int, default=2, help="Retained complete checkpoints; 0 keeps all")

@@ -20,7 +20,7 @@ from agent_simulation.inference.local.qwen import QwenLocal, DEFAULT_REVISION
 from agent_simulation.inference.requests import prepare_request
 from agent_simulation.agents.schemas import has_visible_text, validate_arguments
 from agent_simulation.datasets.labels import (
-    SFTDataset, customer_records, expand_record, record_samples, select_record_ids,
+    SFTDataset, customer_records, seller_records, expand_record, record_samples, select_record_ids,
 )
 from agent_simulation.datasets.tokens import bind_split_candidates
 from agent_simulation.environment.batching import response_batch_policy
@@ -278,11 +278,13 @@ def summarize(records):
 
 
 def test_requests(data, role, ids, candidates, *, max_output_tokens=0):
-    if role == "customer" and candidates is not None:
-        path = candidates / "customer-test-candidates.parquet"
+    if candidates is not None:
+        path = candidates / f"{role}-test-candidates.parquet"
         bind_split_candidates(data.catalog.connection, {"test": path}, role, 0, 1)
-        for record in customer_records(data.catalog, 0, 1, split="test"):
-            yield record[0]["key"]["session_id"], expand_record(
+        source = customer_records if role == "customer" else seller_records
+        for record in source(data.catalog, 0, 1, split="test"):
+            identity = record[0]["key"]["session_id"] if role == "customer" else record["sample_id"]
+            yield identity, expand_record(
                 role, record, tokenizer=data.tokenizer, max_output_tokens=max_output_tokens,
             )
     else:

@@ -173,6 +173,34 @@ if __name__=='__main__':unittest.main()
 
 
 class ContextSummaryTests(unittest.TestCase):
+
+    def test_joint_expansion_summarizes_identical_recent_history_once(self):
+        from agent_simulation.datasets.labels import expand_record
+        from agent_simulation.agents.prompts.customer import decode_input
+        from agent_simulation.tests.fixtures import DisplayBudgetTokenizer
+        source = request()
+        source["response_input"]["displayed_items"] = [{"item_id": i} for i in range(101, 230)]
+        record = sample_from_request("fixture", 50, source, history_embedder=None, render=False)
+        before = deepcopy(record)
+
+        class Summaries:
+            def __init__(self):
+                self.scopes = []
+            def summarize(self, records, *, scope):
+                self.scopes.append(scope)
+                return {"source": "model_summary", "text": scope} if records else None
+
+        model = Summaries()
+        with patch("agent_simulation.agents.context.context_model", return_value=model):
+            samples = list(expand_record("customer", record, tokenizer=DisplayBudgetTokenizer(64)))
+        self.assertEqual(model.scopes.count("Customer recent history"), 1)
+        self.assertEqual(model.scopes.count("Customer retrieved older history"), 2)
+        self.assertEqual(record, before)
+        self.assertGreater(len(samples), 2)
+        recent = [decode_input(sample["messages"][1]["content"])["short_term_memory"] for sample in samples]
+        self.assertTrue(all(value == recent[0] for value in recent))
+        self.assertEqual(sum(sample.get("batching", {}).get("request_weight", 0) for sample in samples), 1.)
+
     def model(self, reply, threshold=1):
         from agent_simulation.agents.context import ContextModel
         from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer

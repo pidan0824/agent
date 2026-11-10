@@ -20,6 +20,23 @@ from agent_simulation.inference.client import ModelOutputError
 
 
 class BehaviorTests(unittest.TestCase):
+
+    def test_selected_seller_evaluation_reuses_streaming_history(self):
+        from agent_simulation.evaluation.micro.behavior_prediction import test_requests
+        data = SimpleNamespace(catalog=SimpleNamespace(connection=object()), tokenizer=None)
+        records = [{"sample_id": "seller:7:10:20", "split": "test"},
+                   {"sample_id": "seller:7:10:30", "split": "test"}]
+        with patch("agent_simulation.evaluation.micro.behavior_prediction.bind_split_candidates") as bind, \
+             patch("agent_simulation.evaluation.micro.behavior_prediction.seller_records", return_value=iter(records)) as stream, \
+             patch("agent_simulation.evaluation.micro.behavior_prediction.record_samples",
+                   side_effect=AssertionError("Per-target history reread")):
+            results = [(identity, list(samples)) for identity, samples in
+                       test_requests(data, "seller", [r["sample_id"] for r in records], Path("fixture"))]
+        self.assertEqual(results, [(r["sample_id"], [r]) for r in records])
+        stream.assert_called_once_with(data.catalog, 0, 1, split="test")
+        bind.assert_called_once_with(data.catalog.connection,
+                                    {"test": Path("fixture/seller-test-candidates.parquet")}, "seller", 0, 1)
+
     def test_price_intervention_requires_customer_only(self):
         args = SimpleNamespace(count=1, seed=42, role="both", price_response=True)
         with self.assertRaisesRegex(ValueError, "Price response requires Customer role"):

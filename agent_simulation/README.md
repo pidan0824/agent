@@ -790,4 +790,9 @@ Customer Response 默认权重为未记录点击/购买1、有点击无购买2�
 
 Seller观测价变化权重为2，持平为1。筛选与加权复用同一套严格更早有效价格比较。训练和 Test 损失使用相同行为权重，checkpoint 按加权后的评估损失选择。损失分项也应用这些权重，保留原有样本或请求权重的归一化。生成式行为评估仍按真实请求计算指标。默认参数为 `--click-weight 2 --purchase-weight 4 --price-change-weight 2`，可显式设为1做无加权对照。行为加权读取完成的Token缓存；Query-only不要求行为权重索引。
 
+Customer Response 默认使用 `--response-format-weight 0.25`，仅降低固定 JSON 格式 Token 的权重。商品 ID、整个动作列表（包括空列表、逗号和结束符）及特殊终止 Token 的权重保持 1。跨越格式与动作边界的合并 Token 也保留权重 1。每条回答先计算 `sum(token_weight × CE) / sum(token_weight)`，再应用请求权重和动作权重；训练、Test 和 checkpoint 选择使用同一口径。Query 和 Seller 不应用此项降权。设为 1 可恢复等 Token 权重，已有 Token 缓存可复用；不同权重设置的 Loss 数值不能直接比较，续训须沿用原设置，改变目标应另开运行。`--loss-breakdown` 将 Response 分为固定格式、点击 ID、购买 ID、列表决策及终止 Token 四组。
+
+样本构造时，同一 Customer 请求的 Query/Response 共用近期历史摘要，较早历史仍按各阶段检索结果分别处理。Seller 候选集行为评估复用按时间推进的历史读取，避免逐目标重读完整历史。竞品分析保留全类目原始统计和候选卡片，模型解释可比性与报价位置，数值仍由程序提供；逐目标模型分析仍是构造成本的一部分。
+
+
 新的样本选择和权重是新的实验设置。已有按无加权评估损失选优的加权训练不能直接沿用旧的最佳 checkpoint 记录续训。旧Token缓存、训练产物和原候选目录均保留。上述筛选不会调用BGE、上下文模型或Tokenizer；下一步构造时才为保留的监督目标准备上下文。

@@ -165,7 +165,7 @@ def _prepare_display(state):
     return {"displayed_items": original}
 
 
-def prepare_history(state):
+def prepare_history(state, *, recent_summary=...):
     """Freeze serialized history once for all batches of one Response decision."""
     history = {key: value for key, value in state.items()
                if key in ("short_term_memory", "retrieved_context")}
@@ -173,7 +173,8 @@ def prepare_history(state):
     model = context_model()
     if model is not None:
         recent = history.get("short_term_memory", {})
-        summary = model.summarize(recent.get("search_history", []), scope="Customer recent history")
+        summary = (model.summarize(recent.get("search_history", []), scope="Customer recent history")
+                   if recent_summary is ... else recent_summary)
         if summary is not None:
             history["short_term_memory"] = {**recent, "search_history": [], "summary": summary}
         retrieved = history.get("retrieved_context", {})

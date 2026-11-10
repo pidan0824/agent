@@ -6,7 +6,7 @@ import json
 from os import PathLike
 from contextlib import ExitStack, closing
 from tempfile import TemporaryDirectory
-from agent_simulation.agents.prompts.customer import messages
+from agent_simulation.agents.prompts.customer import messages, prepare_history
 from pathlib import Path
 from agent_simulation.data.common import require, sha256
 from agent_simulation.data.catalog import Catalog
@@ -119,8 +119,16 @@ def expand_record(role, record, *, tokenizer=None, max_output_tokens=0):
                 query = {**query, "messages": messages(query["input"], query["target"])}
             yield query
         if response is not None:
+            prepared = None
+            if (query is not None and "messages" not in response
+                    and query["input"]["short_term_memory"] == response["input"]["short_term_memory"]):
+                from agent_simulation.agents.context.shopping import project_customer
+                # Reuse only query-independent recent history; older retrieval stays stage-specific.
+                recent = json.loads(query["messages"][1]["content"])["short_term_memory"]
+                prepared = prepare_history(project_customer(response["input"]),
+                                           recent_summary=recent.get("summary"))
             yield from split_supervision(response, tokenizer,
-                                         max_output_tokens=max_output_tokens)
+                                         max_output_tokens=max_output_tokens, prepared_history=prepared)
     else:
         raise ValueError("Unknown supervision role")
 

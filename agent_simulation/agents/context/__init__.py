@@ -9,7 +9,7 @@ from threading import Lock
 
 from agent_simulation.agents.schemas import strict_json
 from agent_simulation.agents.prompts.context_format import pack
-from agent_simulation.inference.requests import load_tokenizer, prepare_request, input_token_budget, prompt_tokens
+from agent_simulation.inference.requests import ContextCapacityError, load_tokenizer, prepare_request, input_token_budget, prompt_tokens
 
 
 def context_settings():
@@ -113,34 +113,24 @@ class ContextModel:
         if not cards:
             return [], {"source": "model_summary", "candidates_considered": 0,
                         "selected_count": 0, "selected_observed_price_raw_range": None}
-        task = ("Analyze the market and select useful competitors for the focal product using purpose, specifications and "
-                "substitutability. There is no target count: choose zero, one or several as justified. "
-                "Use selected_items as an object whose keys are chosen item IDs and whose values are true. "
-                "Each key occurs once; an empty object means no comparable offer. "
-                "Avoid redundant near-identical offers unless a meaningful difference justifies them. "
-                "Do not select only similar prices or force one item per shop. Distinguish direct "
-                "comparables, substitutes and differences. In each $table, columns defines row positions "
-                "and shared applies to every row. Return selected_items and three short Chinese strings, "
-                "one or two sentences each: market_overview interprets market.recent (the full eligible "
-                "category, not the candidate shortlist), its central price band, quote coverage and observation "
-                "times; comparability explains meaningful attribute differences without listing IDs or prices; "
-                "price_position relates the focal quote to the supplied quantiles, percentile and same-brand "
-                "reference, noting missing specifications. If evidence is absent, say so. "
-                "products counts usable latest quotes; known_products includes unknown quotes. "
-                "own_quote.percentile is a 0..1 midrank and price_band locates it against the quartiles; "
-                "same_brand is a subset of the category. A missing same_brand means no usable comparison, "
-                "not that no other same-brand products exist. "
-                "Treat every product equally in price statistics. largest_shop_product_share measures offer "
-                "concentration, not sales share. Time indices are ordering indices, not elapsed days. "
-                "Keep observed and simulation prices separate; an old observed quote is not a current active price. "
-                "Do not extrapolate category demand, trends, quality premiums or causal price effects. "
-                "Interpret the provided numbers qualitatively instead of repeating counts, price amounts or "
-                "calculating new statistics. Only comparability may mention specification numbers. "
-                "市场概况与报价位置只写定性解读，不写数字、金额、币种、数量或具体时间索引；"
-                "数值已完整保留在原始字段。不把高分位说成唯一或最高，不把历史报价说成当前报价。"
-                "价格较高不等于高端、优质或品牌溢价，不从报价推断档次。"
-                "可比性只解释用途和规格差异，不逐件罗列商品，不比较价格。每部分最多两句。"
-                "Do not decide the seller's final price.")
+        task = (
+            "为目标商品选择有参考价值的公开竞品，依据用途、规格和可替代性，区分直接可比商品与替代品。"
+            "数量不限，可以不选；避免无差别的重复商品，不只挑相近价格，也不强制每店选一件。"
+            "selected_items 的键只能是候选商品 ID，值为 true；不选时返回空对象。"
+            "$table 中 columns 定义每行位置，shared 适用于所有行。"
+            "另返回三段简短中文，每段最多两句，不逐件罗列商品。"
+            "market_overview 解读 market.recent 的全类目报价分布、有效报价覆盖和观测范围，"
+            "不能将候选列表当作整个市场。price_position 根据提供的分位数、own_quote 和 same_brand "
+            "解释目标报价的位置与可比性限制。comparability 只说明所选竞品的用途和规格差异。"
+            "前两段仅作定性解读，不重复数字、数量、金额或时间索引；规格数字只能出现在 comparability。"
+            "数值会由程序原样保留。products 是有效报价商品数，known_products 包含未知报价商品；"
+            "own_quote.percentile 是等商品权重的中位秩，price_band 是相对四分位的位置。"
+            "same_brand 是类目的子集；缺失表示没有可用比较，不能断言没有同品牌商品。"
+            "largest_shop_product_share 表示商品供给集中度，不是销量份额。"
+            "时间索引不是天数，历史报价不是当前有效价，观测稀疏时不要推断趋势。"
+            "高报价不证明高质量、品牌溢价或高端定位；不能从报价推断需求或因果影响。"
+            "资料不足时明确说明，不决定最终报价。"
+        )
         # The existing retrieval order determines which offers the model sees.
         offered = list(cards[:self.competitor_candidates])
         payload = {"focal": focal, "market": market, "candidates": offered,
@@ -149,7 +139,7 @@ class ContextModel:
         packed = pack(payload, table_paths={("candidates",)})
         while len(prompt_tokens(self._messages(task, packed), [], self.tokenizer)) > budget:
             if len(offered) == 1:
-                raise ValueError("One competitor record exceeds the context model input budget")
+                raise ContextCapacityError("One competitor record exceeds the context model input budget")
             offered = offered[:max(1, len(offered) // 2)]
             payload["candidates"] = offered
             payload["available_candidates"] = len(offered)

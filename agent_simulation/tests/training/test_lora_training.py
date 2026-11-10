@@ -44,6 +44,62 @@ def tensor_batch():
 
 
 class LoRATrainingTests(unittest.TestCase):
+
+    def test_response_format_weights_keep_action_boundaries_and_reuse_old_tokens(self):
+        import numpy as np
+        from agent_simulation import PROJECT_ROOT
+        from agent_simulation.inference.requests import load_tokenizer
+        from agent_simulation.datasets.tokens import PreparedRow
+        from agent_simulation.training.data_loader import TensorCollator
+        checked = 0
+        for name in ("Qwen2.5-3B-Instruct-tokenizer", "Qwen3-32B", "Qwen3.5-9B", "Qwen3.5-27B"):
+            path = PROJECT_ROOT / "models" / name
+            if not path.exists():
+                continue
+            tokenizer = load_tokenizer(str(path), local_files_only=True)
+            with self.subTest(tokenizer=name):
+                checked += 1
+                for target in ({"clicked_item_ids": [], "purchased_item_ids": []},
+                               {"clicked_item_ids": [12345, 67890], "purchased_item_ids": [67890]}):
+                    sample = {"sample_id": "response:1", "split": "train", "tools": [],
+                              "messages": [{"role": "system", "content": "Return JSON."},
+                                           {"role": "user", "content": "Products 12345 and 67890."},
+                                           {"role": "assistant", "content": json.dumps(target)}],
+                              "batching": {"count": 2, "request_weight": .5}}
+                    row = PreparedRow.from_sample(sample, tokenizer)
+                    collator = TensorCollator(tokenizer, response_format_weight=.25,
+                                              loss_breakdown=True, action_weights={"response:1": 4})
+                    cached, live = collator([row]), collator([sample])
+                    for key in cached:
+                        torch.testing.assert_close(cached[key], live[key])
+                    start = row.answer_start
+                    parts = cached["answer_parts"][0, start:]
+                    factors = cached["token_weights"][0, start:]
+                    self.assertTrue(parts.eq(0).any())
+                    self.assertTrue(parts.eq(3).any())
+                    self.assertTrue(torch.all(factors[parts.eq(0)] == .25))
+                    self.assertTrue(torch.all(factors[parts.ne(0)] == 1))
+                    self.assertTrue(torch.all(cached["labels"][0, :start] == -100))
+                    self.assertEqual(cached["sample_weights"].item(), .5)
+                    self.assertEqual(cached["action_multipliers"].item(), 4)
+                    for token, factor in zip(row.tokens[start:], factors):
+                        if int(token) in tokenizer.all_special_ids or "]" in tokenizer.decode([int(token)]):
+                            self.assertEqual(factor.item(), 1)
+                    for stage in ("query", "seller"):
+                        other = PreparedRow(stage + ":1", np.array([1, 2, 3], dtype=np.int32), 2, 1.)
+                        self.assertTrue(torch.all(collator([other])["token_weights"] == 1))
+        self.assertGreater(checked, 0)
+
+    def test_format_weighted_answer_loss_matches_manual_normalization(self):
+        logits = torch.tensor([[[2., 0.], [0., 2.], [1., 0.]]], requires_grad=True)
+        targets = torch.tensor([[1, 1, -100]])
+        factors = torch.tensor([[.25, 1., .25]])
+        ce = torch.nn.functional.cross_entropy(logits[0, :2], targets[0, :2], reduction="none")
+        expected = (.25 * ce[0] + ce[1]) / 1.25
+        torch.testing.assert_close(answer_losses(logits, targets, token_weights=factors)[0], expected)
+        torch.testing.assert_close(answer_losses(logits, targets, token_weights=torch.ones_like(factors)),
+                                   answer_losses(logits, targets))
+
     def test_default_action_weights_boost_response_rows_without_changing_request_weights(self):
         from types import SimpleNamespace
         import numpy as np
@@ -260,6 +316,7 @@ class LoRATrainingTests(unittest.TestCase):
         batch["answer_parts"] = torch.tensor([[-1, -1, 0, 1], [-1, -1, 2, -1]])
         batch["stages"] = torch.tensor([1, 1])
         batch["action_multipliers"] = torch.tensor([2.0, 4.0])
+        batch["token_weights"] = torch.tensor([[1., 1., .25, 1.], [1., 1., 1., 1.]])
         rows = [{k: v[i] for k, v in batch.items()} for i in range(2)]
         def collator(items):
             return {k: torch.stack([row[k] for row in items]) for k in batch}
@@ -323,6 +380,8 @@ class LoRATrainingTests(unittest.TestCase):
     def test_accumulated_gradient_matches_uneven_combined_batch(self):
         combined, accumulated = tiny_model(), tiny_model()
         batch = tensor_batch()
+        batch["token_weights"] = torch.tensor([[1., 1., .25, 1.], [1., 1., 1., 1.]])
+        batch["action_multipliers"] = torch.tensor([2., 4.])
         with tempfile.TemporaryDirectory() as folder:
             a, b = self.trainer(combined, folder), self.trainer(accumulated, folder)
             a.compute_loss(combined, batch).backward()
