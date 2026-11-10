@@ -300,30 +300,27 @@ class ModelCompetitorTests(unittest.TestCase):
         from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
         focal = dict(product(1, 10), item_title="适配iPhone 15的保护壳")
         candidates = [dict(product(i, 20), reference_price_raw=i * 10,
-                           item_title="适配iPhone 14的保护壳") for i in range(2, 8)]
-        pair = {"item_id": 2, "focal_detail": "iPhone 15", "competitor_detail": "iPhone 14"}
+                           item_title=f"适配ｉＰｈｏｎｅ１５的保护壳，款式{i}") for i in range(2, 8)]
+        candidates[4]["item_title"] = "适配iPhone 14的保护壳"
         before = deepcopy(candidates)
-        for ids, invalid in (
-            ([], pair),
-            ([2, 3, 4, 5], dict(pair, item_id=6)),
-            ([2, 3, 4, 5, 6], dict(pair, competitor_detail="iPhone 16")),
-            ([2, 3, 4, 5, 6], dict(pair, focal_detail=focal["item_title"])),
-            ([2, 3, 4, 5, 6], dict(pair, item_id=3)),
+        for terms, proposed, ids in (
+            (["iPhone 15", "保护壳"], [], []),
+            (["iPhone 15", "保护壳"], [2, 3, 4, 5, 6], [2, 3, 4, 5]),
+            (["iPhone 14", "保护壳"], [6], []),
         ):
-            selection = list(ids)
-            result = {"selected_items": selection, "comparability": [pair, invalid],
-                      "market_overview": "middle_and_upper_end"}
+            result = {"match_terms": terms, "selected_items": proposed, "market_overview": "middle_and_upper_end"}
             client = ScriptedModel([answer(result)])
             client.tokenizer = TokenizerFixture()
             model = ContextModel('fixture', competitor_candidates=5, client=client)
             market = {"window": {"start_inclusive": 0, "end_exclusive": 10},
-                      "recent": {"products": 5, "p25_price": 20, "p75_price": 50, "max_price": 70}}
+                      "recent": {"products": 5, "p25_price": 20, "p75_price": 50, "max_price": 70,
+                                 "own_quote": {"price_raw": 30, "price_band": "p25_to_p75"}}}
             selected, analysis = model.competitors(focal, candidates, market)
             self.assertEqual([p['item_id'] for p in selected], ids)
             self.assertEqual(analysis['candidates_considered'], 5)
             self.assertEqual(analysis['selected_count'], len(ids))
+            self.assertNotIn('match_terms', analysis)
             self.assertEqual(analysis['selected_observed_price_raw_range'], [min(ids)*10, max(ids)*10] if ids else None)
-            self.assertEqual(analysis.get('comparability', []), [pair] if ids else [])
             import json
             from agent_simulation.agents.prompts.context_format import unpack
             payload = json.loads(client.requests[0]['messages'][1]['content'])
@@ -332,7 +329,7 @@ class ModelCompetitorTests(unittest.TestCase):
             self.assertEqual(analysis['market_overview'],
                          'The middle half of category quotes ranges from 20 to 50. '
                          'The highest quote (70) is 1.40 times the 75th percentile.')
-            self.assertNotIn('price_position', analysis)
+            self.assertIn('within the middle half of category quotes [20, 50]', analysis['price_position'])
             self.assertEqual(unpack(payload)['candidates'], candidates[:5])
             self.assertEqual(len(client.requests), 1)
             from agent_simulation.inference.local.qwen import action_parser
@@ -344,3 +341,16 @@ class ModelCompetitorTests(unittest.TestCase):
             self.assertTrue(parser.can_end())
             self.assertEqual(selected, [p for p in candidates if p['item_id'] in ids])
         self.assertEqual(candidates, before)
+
+    def test_short_carrier_name_still_requires_matching_face_value(self):
+        from agent_simulation.agents.context import ContextModel
+        from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
+
+        focal = dict(product(1, 10), item_title="中国移动100元话费充值")
+        matching = dict(product(2, 20), item_title="移动话费100元")
+        wrong_value = dict(product(3, 30), item_title="移动话费200元")
+        client = ScriptedModel([answer({"match_terms": ["中国移动", "100元", "话费"],
+                                        "selected_items": [2, 3], "market_overview": ""})])
+        client.tokenizer = TokenizerFixture()
+        selected, _ = ContextModel("fixture", client=client).competitors(focal, [matching, wrong_value])
+        self.assertEqual(selected, [matching])

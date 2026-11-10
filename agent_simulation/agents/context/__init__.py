@@ -5,6 +5,7 @@ import json
 import math
 import os
 from threading import Lock
+from unicodedata import normalize
 
 from agent_simulation.agents.schemas import strict_json
 from agent_simulation.agents.prompts.context_format import pack
@@ -196,21 +197,22 @@ class ContextModel:
                         "selected_count": 0, "selected_observed_price_raw_range": None}
         views = market_comparisons(market)
         task = (
-            "Select public competitor listings useful to the seller. Prefer direct substitutes for the same use "
-            "and specifications. Include different specifications only when the difference is useful for comparison. "
-            "Category or title similarity alone is insufficient. Exclude different uses or intended fits. "
-            "Keep one listing per identical product. The selection may be empty and has no fixed size. "
-            "Return the selected item IDs in selected_items. Do not copy the whole candidate list. "
-            "For market_overview, return the key of the most useful angle in market_comparisons, "
-            "or an empty string if none applies. When same-brand statistics exist, consider whether they offer "
-            "a different reference from the category as a whole. "
-            "The seller already receives price_position_facts. Do not recalculate prices, percentiles, or times. "
-            "In comparability, report up to two pairs of differing values for the same attribute. "
-            "For each pair, use a selected item_id and copy 2 to 16 characters verbatim from the target and "
-            "competitor titles into focal_detail and competitor_detail respectively. "
-            "Compare model with model, quantity with quantity, or size with size. Return an empty array if "
-            "no shared attribute can be compared. Do not infer specifications from category, or infer brand "
-            "quality, demand, or reasons for a price gap. "
+            "Find direct substitutes for the same specific purchase. First return match_terms, one to three "
+            "short fragments copied from the focal title. Use separate fragments for the product type and "
+            "essential variants. Pick the shortest useful wording so different word order still matches. "
+            "Ignore brand, promotional wording, and delivery speed unless they define compatibility. "
+            "Include the exact pack count, device model, or intended wearer when it determines the purchase. "
+            "For example, a four-piece set requires the four-piece wording; a single item or unspecified set "
+            "does not qualify. A wall decoration cannot substitute for a door-handle decoration. "
+            "For a recharge, separate operator, face value, and service type. Use the core operator name "
+            "移动, 联通, or 电信 when present, omitting prefixes like 中国 or 全国. "
+            "For example, 中国电信 50 元话费充值 uses 电信, 50 元, and 话费. "
+            "For clothing, use a short wearer marker and product type, such as 男 and 衬衫, "
+            "instead of a long phrase or full title. "
+            "Next return selected_items. Include only IDs for the same product type with all match_terms in "
+            "their titles. Exclude incompatible items and repeated listings. Return [] if none qualifies. "
+            "For market_overview, choose the most useful key in market_comparisons, or an empty string if none applies. "
+            "Use the supplied price_position_facts and market comparisons as given. "
             "In each $table, columns defines row positions and shared applies to every row. Return only JSON."
         )
         offered = list(cards[:self.competitor_candidates])
@@ -225,24 +227,31 @@ class ContextModel:
             if len(offered) == 1:
                 raise ContextCapacityError("One competitor record exceeds the context model input budget")
             offered = offered[:len(offered) // 2]
-        detail = {"type": "string", "minLength": 2, "maxLength": 16}
         schema = {"type": "object", "properties": {
+            "match_terms": {"type": "array", "minItems": 1, "maxItems": 3,
+                            "items": {"type": "string", "minLength": 1, "maxLength": 32}},
             "selected_items": {"type": "array", "uniqueItems": True,
                 "items": {"type": "integer", "enum": [p["item_id"] for p in offered]}},
-            "market_overview": {"type": "string", "enum": [*views, ""]},
-            "comparability": {"type": "array", "maxItems": 2, "items": {
-                "type": "object", "properties": {
-                    "item_id": {"type": "integer", "enum": [p["item_id"] for p in offered]},
-                    "focal_detail": detail, "competitor_detail": detail,
-                },
-                "required": ["item_id", "focal_detail", "competitor_detail"],
-                "additionalProperties": False,
-            }}},
-            "required": ["selected_items", "market_overview", "comparability"],
+            "market_overview": {"type": "string", "enum": [*views, ""]}},
+            "required": ["match_terms", "selected_items", "market_overview"],
             "additionalProperties": False}
         result = self._ask(task, packed, schema)
         by_id = {p["item_id"]: p for p in offered}
-        selected = [by_id[item] for item in result["selected_items"]]
+        def title_key(text):
+            return "".join(normalize("NFKC", text).casefold().split())
+
+        focal_title = title_key(focal.get("item_title") or "")
+        terms = [title_key(term) for term in result["match_terms"]]
+        selected = []
+        if terms and all(term and term in focal_title for term in terms):
+            # The full carrier name and its common short form identify the same operator.
+            carrier_names = {"中国移动": "移动", "中国联通": "联通", "中国电信": "电信"}
+            terms = [carrier_names.get(term, term) for term in terms]
+            for item in result["selected_items"]:
+                card = by_id[item]
+                title = title_key(card.get("item_title") or "")
+                if all(term in title for term in terms):
+                    selected.append(card)
         prices = [p["reference_price_raw"] for p in selected
                   if p.get("price_status") == "observed"
                   and p.get("reference_price_raw") is not None
@@ -257,23 +266,4 @@ class ContextModel:
             analysis["market_overview"] = views[result["market_overview"]]
         if payload["price_position_facts"]:
             analysis["price_position"] = payload["price_position_facts"]
-        selected_by_id = {p["item_id"]: p for p in selected}
-        focal_title = focal.get("item_title") or ""
-        comparisons, seen_details = [], set()
-        for pair in result["comparability"]:
-            peer = selected_by_id.get(pair["item_id"])
-            if peer is None:
-                continue
-            peer_title = peer.get("item_title") or ""
-            left, right = pair["focal_detail"].strip(), pair["competitor_detail"].strip()
-            details = ("".join(left.casefold().split()), "".join(right.casefold().split()))
-            if (details not in seen_details
-                    and left not in (focal_title, focal.get("brand_name"))
-                    and right not in (peer_title, peer.get("brand_name"))
-                    and left in focal_title and right in peer_title
-                    and details[0] not in details[1] and details[1] not in details[0]):
-                comparisons.append({"item_id": pair["item_id"], "focal_detail": left, "competitor_detail": right})
-                seen_details.add(details)
-        if comparisons:
-            analysis["comparability"] = comparisons
         return selected, analysis

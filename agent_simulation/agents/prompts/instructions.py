@@ -37,7 +37,7 @@ SELLER_EVIDENCE_NOTE = (
     "observed_market covers all eligible same-category public quotes. Quantiles weight products equally; "
     "own_quote.percentile is a 0..1 midrank. known_products includes unknown quotes; products counts valid ones. "
     "same_brand is a subset, and largest_shop_product_share is offer concentration, not sales share. "
-    "Competitor title excerpts show specific attributes; older quotes remain historical references. "
+    "Compare competitor specifications using their original titles. Older quotes remain historical references. "
     "Logged exposures do not establish attention, and missing clicks or purchases do not establish rejection. "
     "decision.requested_item_ids gives the quote scope."
 )
