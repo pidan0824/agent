@@ -67,6 +67,14 @@ class BehaviorTrainer(Trainer):
         self.accelerator.gradient_accumulation_steps = 1
         self._loss_totals = None
         self.schedule_epochs = None
+        self.activation_offload_tokens = None
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        limit = self.activation_offload_tokens
+        if limit is not None and inputs["input_ids"].shape[-1] >= limit:
+            with torch.autograd.graph.save_on_cpu(pin_memory=True):
+                return super().training_step(model, inputs, num_items_in_batch)
+        return super().training_step(model, inputs, num_items_in_batch)
 
     def create_scheduler(self, num_training_steps, optimizer=None):
         if self.schedule_epochs is not None:
@@ -229,4 +237,5 @@ def make_trainer(model, tokenizer, args, train_data, eval_data, *, evaluate_each
         callbacks=callbacks,
     )
     trainer.schedule_epochs = getattr(args, "lr_schedule_epochs", None)
+    trainer.activation_offload_tokens = getattr(args, "activation_offload_tokens", None)
     return trainer

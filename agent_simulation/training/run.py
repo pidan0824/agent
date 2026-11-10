@@ -147,7 +147,8 @@ def training_identity(args, data_check, eval_split):
         if k not in ("command", "resume", "verify")
     }
     for key, default in (("stage", None), ("loss_breakdown", False),
-                         ("keep_checkpoints", 2), ("lr_schedule_epochs", None)):
+                         ("keep_checkpoints", 2), ("lr_schedule_epochs", None),
+                         ("activation_offload_tokens", None)):
         if value.get(key) == default:
             value.pop(key, None)
     if value.get("init_adapter") is None:
@@ -302,6 +303,9 @@ def train(args):
     if args.output.exists() and not args.resume:
         raise FileExistsError("Use a new output directory or explicitly resume its checkpoint")
     args.device = resolve_device(args.device).type
+    offload = getattr(args, "activation_offload_tokens", None)
+    if offload is not None and (offload < 1 or args.device != "cuda" or not args.gradient_checkpointing):
+        raise ValueError("Activation offload requires a positive token threshold, CUDA and gradient checkpointing")
     checkpoint = None
     adapter = args.init_adapter
     if args.resume:
@@ -481,6 +485,8 @@ def parser():
         )
         q.add_argument("--data-workers", type=int, default=0, help="CPU workers for complete actor buckets and cached sampled evaluation")
         q.add_argument("--shuffle-buffer", type=int, default=64)
+        q.add_argument("--activation-offload-tokens", type=int,
+                       help="Save backward activations on CPU at or above this input length (CUDA)")
         q.add_argument(
             "--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True
         )
