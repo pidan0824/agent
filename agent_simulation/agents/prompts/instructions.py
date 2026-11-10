@@ -14,12 +14,12 @@ FACT_RULES += ('Text marked model_summary is generated compression or analysis, 
                'these counts together or add simulated feedback to claim a current 30-day total. '
                'Recent item lists preserve source repetition, not quantities or independently confirmed events. '
                'Item details are catalog attributes, not historical prices; absent details remain unknown. '
-               'Summaries stay frozen during simulation. Retrieved history selects existing facts; '
+               'These original statistical snapshots stay frozen during simulation. Retrieved history selects existing facts; '
                'long-term memory contains revisable experience, not additional observations.\n')
 
 SELLER_STEPS = "\nDecision\nUse the shop overview and each requested product's price, exposure, click and purchase history. Compare available market distributions and public reference prices within their stated coverage. Consider differences between your products and relevant experience. Any inferred platform exposure rule is a hypothesis. Observed prices do not establish actual backend price-change actions. Purchase counts count records; estimated units assume one unit per purchase record. The environment activates prices and settles outcomes.\n"
 
-CUSTOMER_STEPS = '\nDecision\nUse the profile, recent history and retrieved experiences to assess shopping preferences. Other search topics may also inform consumption habits. Past clicks and purchases belong to history, separate from the currently displayed products.\n'
+CUSTOMER_STEPS = '\nDecision\nUse the profile, recent history and retrieved experiences to assess shopping preferences. Other search topics may also inform consumption habits. Use the recent behavior lists and 30-day statistical snapshot as background, not as action quotas. Logged exposure does not prove attention; absence of a click is not explicit dislike. Past clicks and purchases belong to history, separate from the currently displayed products.\n'
 
 HISTORY_NOTE = 'In recent and retrieved history, clicked_item_refs and purchased_item_refs index short_term_memory.item_attributes. Its sellers_ref, brands_ref and categories_ref index short_term_memory.attribute_sets (zero-based). Historical snapshots keep their original prices.'
 

@@ -731,3 +731,11 @@ export SIMULATION_HISTORY_TOKENS=4096
 ```
 
 本地上下文模型构建 Token 缓存使用 `--workers 1`，避免各进程重复加载权重；多个构建进程可共用 vLLM 服务。旧缓存保持不变；使用新上下文时另建输出目录。设置 `SIMULATION_CONTEXT_MODEL=''` 可关闭模型整理，用于无摘要对照。该开关不恢复旧的固定三个竞品规则。配置和实现变化均未触发训练或重建现有缓存。
+
+### SFT 默认模型与上下文预算
+
+`python -m agent_simulation.training.run check/train` 未填写 `--model` 时使用项目内 `models/Qwen3.5-9B`；`--model models/Qwen3.5-27B` 或 `--model models/Qwen3-32B` 可选择其他模型。Tokenizer 默认取所选模型目录，不单独指定时不会继承旧 3B tokenizer。Token 缓存应与所选 tokenizer 一致。上下文整理模型仍由 `SIMULATION_CONTEXT_MODEL` 独立配置。
+
+Customer 与 Seller 共用 32,768 tokens 的项目总预算，至少预留 2,048 给输出，因此常规输入预算为 30,720。选择更大模型不会自动扩大这个预算。Customer 按真实 Prompt tokens 在超限时切分曝光列表；Seller SFT 是单商品监督，仿真仍按 `price_batch_size` 分组（默认 1，最多 16），不是按 tokens 自动分组。
+
+4,096 tokens 是长历史调用摘要模型的触发阈值，不是所有历史或背景字段的硬上限。顾客 `behavioral_summary` 包含原始 30 天统计、近期点击/购买 ID 与商品属性；商家 `business_summary` 是原始商品 30 天曝光/点击/订单快照。它们保持原始数值和快照时间，不与自己重建的近期记录累加。日志曝光不证明注意到商品，未点击也不是明确负偏好。

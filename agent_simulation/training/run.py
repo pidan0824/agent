@@ -433,7 +433,9 @@ def parser():
     for command in ("check", "train"):
         q = sub.add_parser(command)
         q.add_argument("--dataset", type=Path, required=True)
-        q.add_argument("--model", type=Path, required=True)
+        q.add_argument("--model", type=Path,
+                       default=Path(__file__).resolve().parents[2] / "models/Qwen3.5-9B",
+                       help="Local base model (default: models/Qwen3.5-9B); tokenizer defaults to this directory")
         q.add_argument("--tokenizer", type=Path, help="Defaults to the tokenizer bundled with --model")
         q.add_argument("--role", choices=("seller", "customer"), required=True)
         q.add_argument("--stage", choices=("query", "response"),
