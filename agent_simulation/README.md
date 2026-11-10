@@ -716,7 +716,7 @@ Customer 搜索与列表响应保留选中的历史事实、原请求价格、�
 
 ### 用模型整理上下文
 
-Customer 和 Seller 共用 `agents/context` 中的摘要入口。历史不超过 `SIMULATION_HISTORY_TOKENS`（默认 4096 tokens）时保持原文；超过时按历史记录分组总结。Customer 同一 Response 的各批次复用已准备的历史。Seller 的历史变化与检索证据、各商品近期历史分别按长度判断。原始事实留在数据和环境中，摘要只替换模型输入中的长历史。
+Customer 和 Seller 共用 `agents/context` 中的摘要入口。每部分历史不超过 `SIMULATION_HISTORY_TOKENS`（默认 4096 tokens）时保持原文；超过时按历史记录分组总结。Customer 的近期历史与较早检索结果分别判断，不因其中一段较长而替换另一段短记录；同一 Response 的各批次复用已准备的历史。Seller 的历史变化与检索证据、各商品近期历史分别按长度判断。原始事实留在数据和环境中，摘要只替换模型输入中的长历史。
 
 新增的顾客近期行为背景、30 天统计、Seller 经营汇总、当前报价及市场统计不交给模型重算。生成文字标记为 `model_summary`，用于压缩或分析，不是新增观测事实。精确价格留在原始报价字段，摘要不换算单位。
 
@@ -739,3 +739,26 @@ export SIMULATION_HISTORY_TOKENS=4096
 Customer 与 Seller 共用 32,768 tokens 的项目总预算，至少预留 2,048 给输出，因此常规输入预算为 30,720。选择更大模型不会自动扩大这个预算。Customer 按真实 Prompt tokens 在超限时切分曝光列表；Seller SFT 是单商品监督，仿真仍按 `price_batch_size` 分组（默认 1，最多 16），不是按 tokens 自动分组。
 
 4,096 tokens 是长历史调用摘要模型的触发阈值，不是所有历史或背景字段的硬上限。顾客 `behavioral_summary` 包含原始 30 天统计、近期点击/购买 ID 与商品属性；商家 `business_summary` 是原始商品 30 天曝光/点击/订单快照。它们保持原始数值和快照时间，不与自己重建的近期记录累加。日志曝光不证明注意到商品，未点击也不是明确负偏好。
+
+### 新上下文 SFT 准备
+
+Customer 的近期行为背景现在统一使用商品 ID、标题、品牌和三级类目名称，SFT Query、Response 与仿真共用这一表示。原始曝光列表、统计、近期点击/购买 ID 的顺序和重复、真实行为标签不变；完整背景属性仍留在原数据中。已删除仅在缓存构建时开启的紧凑背景开关。
+
+沿用原相对时间 2% 的 train/test 候选清单，不重新抽样。新缓存使用独立目录；旧缓存的 Prompt 不会因代码更新自动改变。先运行缓存构建，完成后再运行训练，两步互不自动触发：
+
+```bash
+source /root/autodl-tmp/zhz/llm_simulation/env.sh
+python -m agent_simulation.datasets.tokens \
+  --dataset runs/lite-relative-time-2pct/sft \
+  --candidates runs/lite-relative-time-2pct/token-records/manifest.json \
+  --tokenizer models/Qwen3.5-9B \
+  --market-cache runs/lite-relative-time-2pct/token-market \
+  --output runs/lite-relative-time-2pct/tokens-Qwen3.5-9B-context \
+  --workers 1
+```
+
+此命令准备两个角色。可加 `--role customer` 或 `--role seller` 分开构建。上下文模型的选择与长历史总结会增加构造时间；大量 Seller 样本建议使用现有共享 vLLM 接口，避免多个进程分别加载 32B 权重。不要将小样本预览当作完成的训练缓存。
+
+历史检索保留现有 BGE/RRF：Customer 最近 10 条独立呈现，较早候选不含这些记录；Query 阶段按近期搜索主题检索，Response 按当前 Query 检索。Seller 按本品属性及经营变化检索本店历史，排除已展示的本品近期片段。最多五个片段是控制输入规模的设置，并不代表每条都高度相关；本次没有凭空增加相似度阈值或新的检索 Agent。
+
+服务器 `env.sh` 将现有 BGE 向量缓存的数据库上限设为 8 GiB，复用已有约 7.2 GiB 的向量文件；原默认 2 GiB 无法打开该文件。磁盘预留和淘汰机制继续沿用现有实现。此配置不创建新缓存层，也不删除已有向量。

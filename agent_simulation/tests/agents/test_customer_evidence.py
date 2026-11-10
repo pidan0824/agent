@@ -92,25 +92,19 @@ class CustomerEvidenceTests(unittest.TestCase):
         before = deepcopy((query, response))
         from agent_simulation.tests.fixtures import DisplayBudgetTokenizer
         tokenizer = DisplayBudgetTokenizer(64)
-        full = list(expand_record("customer", (query, response), tokenizer=tokenizer))
-        compact = list(expand_record("customer", (query, response), tokenizer=tokenizer,
-                                     compact_background=True))
+        compact = list(expand_record("customer", (query, response), tokenizer=tokenizer))
         self.assertEqual(len(compact), 3)
-        for left, right in zip(full, compact, strict=True):
-            self.assertEqual(left["sample_id"], right["sample_id"])
-            self.assertEqual(left["target"], right["target"])
-            self.assertEqual(left.get("batching"), right.get("batching"))
-            a, b = (decode_input(row["messages"][1]["content"]) for row in (left, right))
-            details = a["behavioral_summary"]["item_details"]
-            a["behavioral_summary"]["item_details"] = [
-                {k: v for k, v in item.items()
-                 if k in ("item_id", "item_title", "brand_name", "category_level3_name")}
-                for item in details
-            ]
-            self.assertEqual(a, b)
-            self.assertEqual(right["messages"][1], customer_decision_messages(
-                right["input"], response=right["sample_id"].startswith("response"),
-                compact_background=True)[1])
+        for row in compact:
+            visible = decode_input(row["messages"][1]["content"])
+            background = visible["behavioral_summary"]
+            for field in ("statistics_30d", "recent_clicked_item_ids", "recent_purchased_item_ids"):
+                self.assertEqual(background[field], original["behavioral_summary"][field])
+            for item in background["item_details"]:
+                self.assertEqual(set(item), {"item_id", "item_title", "brand_name", "category_level3_name"})
+            self.assertEqual(row["messages"][1], customer_decision_messages(
+                row["input"], response=row["sample_id"].startswith("response"))[1])
+        for field in response["target"]:
+            self.assertEqual([i for row in compact[1:] for i in row["target"][field]], response["target"][field])
         self.assertEqual((query, response), before)
 
     def test_customer_encoder_rejects_a_projection_with_an_audit_sidecar(self):

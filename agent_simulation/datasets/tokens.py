@@ -277,10 +277,7 @@ def build_splits(args, role, bucket, splits):
             require(actual == record, 'Selected label sequence differs')
             try:
                 rows = []
-                for sample in expand_record(
-                    role, raw, tokenizer=data.tokenizer,
-                    compact_background=getattr(args, 'compact_customer_background', False),
-                ):
+                for sample in expand_record(role, raw, tokenizer=data.tokenizer):
                     require(sample['split'] == split, 'Wrong selected split')
                     rows.append(PreparedRow.from_sample(sample, data.tokenizer))
             except ContextCapacityError as error:
@@ -304,8 +301,6 @@ def parse_args():
     parser.add_argument('--verify', action='store_true',
                         help='Verify source and candidate checksums, including resumed shards')
     parser.add_argument('--role', choices=('customer', 'seller'))
-    parser.add_argument('--compact-customer-background', action='store_true',
-                        help='Keep ID, title, brand and leaf category in Customer background item descriptions')
     parser.add_argument('--workers', type=int,
                         help='Default: 1 on GPU or 24 on CPU; workers each load their own encoder')
     parser.add_argument('--buckets', type=int, default=32)
@@ -356,8 +351,7 @@ def preflight(args):
     spec['context_processing'] = settings or {'competitors': 'public_candidate_shortlist_v5'}
     if settings and not settings['url'] and args.workers > 1:
         raise ValueError('Local context model requires --workers 1; use a shared model URL for parallel builders')
-    if getattr(args, 'compact_customer_background', False):
-        spec['compact_customer_background'] = True
+    spec['compact_customer_background'] = True
     return spec, splits
 
 

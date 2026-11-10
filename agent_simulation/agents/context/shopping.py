@@ -75,7 +75,7 @@ def displayed_details(displayed, item_ids):
     }
 
 
-def project_customer(state, *, compact_background=False):
+def project_customer(state):
     """Keep event boundaries and clocks while omitting internal search metadata."""
     require(isinstance(state, dict), "Customer context must be an object")
     profile = state.get("profile", {})
@@ -100,7 +100,7 @@ def project_customer(state, *, compact_background=False):
         # Batch numbers are bookkeeping and must not change the model's input size.
         visible["candidate_batch"] = {"request_item_count": state["candidate_batch"]["request_item_count"]}
     background = state.get("behavioral_summary")
-    if compact_background and background is not None:
+    if background is not None:
         fields = ("item_id", "item_title", "brand_name", "category_level3_name")
         visible["behavioral_summary"] = {
             **background,

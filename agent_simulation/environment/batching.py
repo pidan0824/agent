@@ -14,7 +14,7 @@ def response_batch_policy():
             "reserved_output_tokens": policy["reserved_output_tokens"]}
 
 
-def response_batches(state, tokenizer, *, max_output_tokens=0, compact_background=False, prepared_history=None):
+def response_batches(state, tokenizer, *, max_output_tokens=0, prepared_history=None):
     """Return each display slice with its exact, label-free model messages."""
     require("candidate_batch" not in state, "Response already partitioned")
     items = state["displayed_items"]
@@ -23,8 +23,7 @@ def response_batches(state, tokenizer, *, max_output_tokens=0, compact_backgroun
     history = prepare_history(project_customer(state)) if prepared_history is None else prepared_history
 
     def render(view):
-        prompt = messages(view, response=True, prepared_history=history,
-                          compact_background=compact_background)
+        prompt = messages(view, response=True, prepared_history=history)
         return prompt, len(prompt_tokens(prompt, [], tokenizer))
 
     prompt, size = render(state)

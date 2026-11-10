@@ -176,7 +176,7 @@ class ContextSummaryTests(unittest.TestCase):
     def model(self, reply, threshold=1):
         from agent_simulation.agents.context import ContextModel
         from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
-        client = ScriptedModel([answer(reply)])
+        client = ScriptedModel([answer(reply), answer(reply)])
         client.tokenizer = TokenizerFixture()
         return ContextModel("fixture", history_tokens=threshold, client=client), client
 
@@ -206,7 +206,7 @@ class ContextSummaryTests(unittest.TestCase):
         with patch('agent_simulation.agents.context.context_model', return_value=model):
             batches = split_supervision(sample, DisplayBudgetTokenizer(64))
         self.assertGreater(len(batches), 1)
-        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(len(client.requests), 2)
         self.assertEqual(sample, before)
         self.assertNotIn('response_target', client.requests[0]['messages'][1]['content'])
         self.assertEqual([i for batch in batches for i in batch['target']['purchased_item_ids']], [229])
@@ -224,7 +224,7 @@ class ContextSummaryTests(unittest.TestCase):
         with patch('agent_simulation.agents.context.context_model', return_value=model):
             _, sample = sample_from_request('fixture', 50, source, stage='response', history_embedder=None)
             split_supervision(sample, DisplayBudgetTokenizer(64))
-        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(len(client.requests), 2)
 
     def test_seller_summary_keeps_original_business_statistics_and_source(self):
         from agent_simulation.tests.seller_context_fixture import seller_state
@@ -242,3 +242,18 @@ class ContextSummaryTests(unittest.TestCase):
         self.assertEqual(view['current_state']['products'][0]['business_summary'],
                          before['owned_products'][0]['business_summary'])
         self.assertEqual(view['history']['summary']['source'], 'model_summary')
+
+    def test_long_retrieved_history_does_not_replace_short_recent_history(self):
+        import json
+        from agent_simulation.agents.prompts.customer import prepare_history
+        recent = {"search_history": [{"query": "杯子", "clicked_items": [], "purchased_items": []}]}
+        state = {"short_term_memory": recent, "retrieved_context": {"history": {
+            "segments": [{"records": [{"query": "旧经历" * 2000}]}]}}}
+        before = deepcopy(state)
+        model, client = self.model({"summary": "较早经历摘要"}, threshold=500)
+        with patch('agent_simulation.agents.context.context_model', return_value=model):
+            encoded = prepare_history(state)
+        self.assertEqual(json.loads(encoded["short_term_memory"]), recent)
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(json.loads(encoded["retrieved_context"])["history"]["summary"]["text"], "较早经历摘要")
+        self.assertEqual(state, before)

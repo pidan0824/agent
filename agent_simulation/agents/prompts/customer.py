@@ -172,15 +172,15 @@ def prepare_history(state):
     from agent_simulation.agents.context import context_model
     model = context_model()
     if model is not None:
-        recent = history.get("short_term_memory", {}).get("search_history", [])
-        retrieved = history.get("retrieved_context", {}).get("history", {}).get("segments", [])
-        records = [{"scope": "recent", "event": event} for event in recent]
-        records.extend({"scope": "retrieved", "segment": segment} for segment in retrieved)
-        summary = model.summarize(records, scope="Customer recent and retrieved history")
+        recent = history.get("short_term_memory", {})
+        summary = model.summarize(recent.get("search_history", []), scope="Customer recent history")
         if summary is not None:
-            return {"short_term_memory": _wire({"search_history": [], "summary": summary}),
-                    "retrieved_context": _wire({"history": {"segments": [],
-                        "included_in": "short_term_memory.summary"}})}
+            history["short_term_memory"] = {**recent, "search_history": [], "summary": summary}
+        retrieved = history.get("retrieved_context", {})
+        older = retrieved.get("history", {})
+        summary = model.summarize(older.get("segments", []), scope="Customer retrieved older history")
+        if summary is not None:
+            history["retrieved_context"] = {**retrieved, "history": {**older, "segments": [], "summary": summary}}
     compact = factor_history(history)
     encoded = {key: _wire(value, (key,)) for key, value in compact.items()}
     original = {key: _wire(value, (key,)) for key, value in history.items()}
@@ -216,10 +216,10 @@ def decode_input(text):
 
 def messages(
     state, target=None, *, response=False, query_output=QUERY_OUTPUT, query_task=QUERY_TASK,
-    prepared_history=None, compact_background=False,
+    prepared_history=None,
 ):
     from agent_simulation.agents.context.shopping import project_customer
-    visible = project_customer(state, compact_background=compact_background)
+    visible = project_customer(state)
     content = encode_input(visible, prepared_history=prepared_history)
     notes = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE
     if '"history_encoding":' in content:
@@ -252,11 +252,11 @@ def answer_message(target):
 
 
 def customer_decision_messages(
-    context, *, response=False, prepared_history=None, compact_background=False,
+    context, *, response=False, prepared_history=None,
 ):
     return messages(
         context,
-        response=response, prepared_history=prepared_history, compact_background=compact_background,
+        response=response, prepared_history=prepared_history,
         query_output=(QUERY_RUNTIME_OUTPUT if "decision_time" in context else QUERY_OUTPUT),
         query_task=(QUERY_RUNTIME_TASK if "decision_time" in context else QUERY_TASK),
     )
