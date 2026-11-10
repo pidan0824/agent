@@ -37,7 +37,7 @@ class QwenLocal:
         prefix_cache_entries=4,
     ):
         import torch
-        from transformers import AutoModelForCausalLM
+        from transformers import AutoConfig, AutoModelForCausalLM
 
         text(revision)
         integer(max_new_tokens, 1)
@@ -46,16 +46,30 @@ class QwenLocal:
             raise ValueError("Unsupported inference dtype")
         self.log = ModelLog(log_path) if log_path is not None else None
         self.tokenizer = load_tokenizer(model_path, revision=revision, local_files_only=True)
-        self.model = AutoModelForCausalLM.from_pretrained(
+        config = AutoConfig.from_pretrained(model_path, revision=revision, local_files_only=True,
+                                            trust_remote_code=False)
+        model_class = AutoModelForCausalLM
+        if config.model_type == "qwen3_5":
+            from transformers import Qwen3_5ForCausalLM
+            model_class = Qwen3_5ForCausalLM
+            config = config.get_text_config()
+        if config.model_type not in {"qwen2", "qwen3", "qwen3_5_text"}:
+            raise ValueError("Local generation supports Qwen2.5, Qwen3 and Qwen3.5 text checkpoints")
+        self.model = model_class.from_pretrained(
             model_path,
+            config=config,
             revision=revision,
             local_files_only=True,
             trust_remote_code=False,
             dtype=dtype if dtype == "auto" else getattr(torch, dtype),
             attn_implementation="sdpa",
         ).to(device)
-        if self.model.config.model_type not in {"qwen2", "qwen3"}:
-            raise ValueError("Local generation supports Qwen2.5 and Qwen3 text checkpoints")
+        if config.model_type == "qwen3_5_text":
+            generation = self.model.generation_config
+            eos = generation.eos_token_id
+            stop = [eos] if isinstance(eos, int) else (eos or [])
+            generation.eos_token_id = list(dict.fromkeys([self.tokenizer.eos_token_id, *stop]))
+            generation.pad_token_id = self.tokenizer.pad_token_id
         self.model.eval()
         self.model.requires_grad_(False)
         self.generator_id = (
@@ -67,7 +81,9 @@ class QwenLocal:
         require(type(prefix_cache_tokens) is int and prefix_cache_tokens >= 0
                 and type(prefix_cache_entries) is int and prefix_cache_entries >= 0,
                 'Expected nonnegative prefix cache limits')
-        self.prefix_cache = PrefixCache(prefix_cache_tokens, prefix_cache_entries)
+        # The shared-prefix implementation has not been verified for recurrent Qwen3.5 cache states.
+        entries = 0 if config.model_type == "qwen3_5_text" else prefix_cache_entries
+        self.prefix_cache = PrefixCache(prefix_cache_tokens, entries)
         self.role_adapters = tuple(role_adapters or ())
         if role_adapters:
             from agent_simulation.inference.local.checkpoints import attach_adapter

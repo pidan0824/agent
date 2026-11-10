@@ -584,6 +584,8 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc-per-node=2 -m agent_simul
 
 小规模试训可用 `--train-samples` 和 `--eval-samples` 控制记录数。设备缓存压力较大时，可用 `--empty-cache-steps 1` 启用 Transformers 的未使用缓存释放机制；样本、答案和 loss 保持原样，该参数记入运行配置。
 
+Customer 只训练 Response 正例时，使用 `--stage response --positive-train-responses`。此选项只保留训练侧至少含一项点击或购买的 Response 行，沿用每行原始请求权重。评估仍读取完整 Test Response，包括两个动作都为空的记录。
+
 loss 为每条答案 Token 的平均交叉熵乘以样本权重，再对当前梯度累积组中的样本数取平均；不会在单条样本里把 `1/批数` 约掉。上下文和 Padding 不参与监督。Qwen 只对预测答案所需的位置计算词表 logits，完整上下文仍参与注意力计算。
 
 数据按需读取，有限缓冲区打乱训练顺序。当前官方两段协议用 test loss 选 checkpoint；test 保持独立的数据流，只评估，不参与反向传播。固定评估记录随 seed 写入配置，恢复时保持相同记录。该 test 结果参与模型选择，不称为独立盲测。配置、数据和权重身份写入 `run_config.json`，不再对源码文件生成续训指纹。

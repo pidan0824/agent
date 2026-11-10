@@ -131,6 +131,7 @@ class TokenStream(torch.utils.data.IterableDataset):
         super().__init__()
         self.root, self.seed, self.epoch = root / role / split, seed, 0
         self.stage = stage
+        self.sample_ids = None
         self.shuffle_buffer = shuffle_buffer
         spec = json.loads((root / "identity.json").read_text())
         self.files = []
@@ -165,8 +166,21 @@ class TokenStream(torch.utils.data.IterableDataset):
         if self.shuffle_buffer:
             rng.shuffle(files)
         rows = (sample for path in files for sample in read_shard(path)
-                if self.stage is None or sample.sample_id.startswith(self.stage + ":"))
+                if (self.stage is None or sample.sample_id.startswith(self.stage + ":"))
+                and (self.sample_ids is None or sample.sample_id in self.sample_ids))
         yield from _buffered_shuffle(rows, self.shuffle_buffer, rng)
+
+    def keep_positive_responses(self, tokenizer):
+        """Filter training rows only, keeping their original request weights."""
+        self.sample_ids = {
+            row.sample_id for row in self if any(customer_response_actions(row, tokenizer))
+        }
+        self.size = len(self.sample_ids)
+
+
+def customer_response_actions(row, tokenizer):
+    answer = json.loads(tokenizer.decode(row.tokens[row.answer_start:], skip_special_tokens=True))
+    return bool(answer["clicked_item_ids"]), bool(answer["purchased_item_ids"])
 
 
 def action_multipliers(args, tokenizer, *streams):
@@ -180,9 +194,8 @@ def action_multipliers(args, tokenizer, *streams):
         for row in chain.from_iterable(streams):
             if not row.sample_id.startswith("response:"):
                 continue
-            answer = json.loads(tokenizer.decode(row.tokens[row.answer_start:], skip_special_tokens=True))
-            factor = max(click if answer["clicked_item_ids"] else 1.0,
-                         purchase if answer["purchased_item_ids"] else 1.0)
+            clicked, purchased = customer_response_actions(row, tokenizer)
+            factor = max(click if clicked else 1.0, purchase if purchased else 1.0)
             if factor > 1:
                 result[row.sample_id] = factor
         return result
@@ -309,6 +322,8 @@ def prepare_datasets(args, tokenizer, data_check, eval_split, *, resume_epoch_si
         train_data = TokenStream(args.token_cache, args.role, "train", seed=args.seed,
                                  shuffle_buffer=args.shuffle_buffer, stage=getattr(args, "stage", None))
         evaluation_data = TokenStream(args.token_cache, args.role, eval_split, stage=getattr(args, "stage", None))
+        if getattr(args, "positive_train_responses", False):
+            train_data.keep_positive_responses(tokenizer)
         return train_data, evaluation_data, len(train_data)
 
     workers = getattr(args, "data_workers", 0)

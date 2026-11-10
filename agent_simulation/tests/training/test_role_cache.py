@@ -66,6 +66,32 @@ class RoleCacheTests(unittest.TestCase):
             self.assertEqual(first, [r.sample_id for r in response])
             self.assertTrue(all(s.startswith("response:") for s in first))
 
+    def test_positive_responses_filter_train_only_and_keep_batch_weights(self):
+        from agent_simulation.training.data_loader import prepare_datasets
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "identity.json").write_text(json.dumps({"buckets": 1}))
+            for split in ("train", "test"):
+                writer = RecordWriter(SimpleNamespace(output=root, reserve_gib=0),
+                                      "customer", split, 0, expected=1)
+                writer.add("1", [
+                    PreparedRow(f"response:1:{i}", np.array([0, i], dtype=np.int32), 1, 1 / 3)
+                    for i in range(3)
+                ])
+                writer.finish()
+            tokenizer = SimpleNamespace(decode=lambda tokens, **_: json.dumps({
+                "clicked_item_ids": [1] if tokens[0] == 1 else [],
+                "purchased_item_ids": [1] if tokens[0] == 2 else [],
+            }))
+            args = SimpleNamespace(token_cache=root, role="customer", stage="response", train_samples=0,
+                                   data_workers=0, seed=42, shuffle_buffer=0, positive_train_responses=True)
+            train_rows, test_rows, size = prepare_datasets(args, tokenizer, {}, "test")
+            self.assertEqual(size, 2)
+            self.assertEqual([(row.sample_id, row.weight) for row in train_rows],
+                             [("response:1:1", 1 / 3), ("response:1:2", 1 / 3)])
+            self.assertEqual([row.sample_id for row in test_rows], [f"response:1:{i}" for i in range(3)])
+
     def test_each_complete_role_passes_both_training_entry_checks(self):
         for role in ('customer', 'seller'):
             with self.subTest(role=role), tempfile.TemporaryDirectory() as tmp:

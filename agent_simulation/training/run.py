@@ -151,7 +151,7 @@ def training_identity(args, data_check, eval_split):
         if k not in ("command", "resume", "verify")
     }
     # Only neutral weights are omitted: new defaults must not silently resume an unweighted run.
-    for key, default in (("stage", None), ("loss_breakdown", False),
+    for key, default in (("stage", None), ("loss_breakdown", False), ("positive_train_responses", False),
                          ("keep_checkpoints", 2), ("lr_schedule_epochs", None),
                          ("activation_offload_tokens", None), ("click_weight", 1.0),
                          ("purchase_weight", 1.0), ("price_change_weight", 1.0),
@@ -231,6 +231,10 @@ def load_base_model(args):
 
 
 def train(args):
+    if getattr(args, "positive_train_responses", False) and (
+        args.role != "customer" or args.stage != "response" or not args.token_cache
+    ):
+        raise ValueError("Positive Response training requires --role customer --stage response and a finished token cache")
     if not 0 < getattr(args, "response_format_weight", RESPONSE_FORMAT_WEIGHT) <= 1:
         raise ValueError("Response format weight must be in (0, 1]")
     multipliers = {key: getattr(args, key, default) for key, default in ACTION_WEIGHTS.items()}
@@ -445,6 +449,8 @@ def parser():
             continue
         q.add_argument("--verify", action="store_true",
                        help="Run the file checks and sample probes from the check command before training")
+        q.add_argument("--positive-train-responses", action="store_true",
+                       help="Train Customer Response only on rows with an observed click or purchase; keep all evaluation rows")
         q.add_argument("--output", type=Path, required=True)
         q.add_argument("--tensorboard", action="store_true", help="Write training and evaluation curves under OUTPUT/tensorboard")
         q.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
