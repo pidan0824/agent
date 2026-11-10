@@ -271,15 +271,39 @@ class ModelCompetitorTests(unittest.TestCase):
         from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
         candidates = [dict(product(i, 20), reference_price_raw=i * 10) for i in range(2, 8)]
         before = deepcopy(candidates)
-        for ids in ([], [2, 3, 4, 5]):
-            client = ScriptedModel([answer({'selected_item_ids': ids, 'summary': '选择了64个竞品。价格范围10到900元。适配iPhone 15，规格仍有缺失。'})])
+        for ids in ([], [2, 3, 4, 5], [2, 3, 4, 5, 6]):
+            selection = {str(item): True for item in ids}
+            if len(ids) == 4:
+                selection['6'] = False
+            client = ScriptedModel([answer({
+                'selected_items': selection,
+                'market_overview': '均价999元。市场价格覆盖不完整。',
+                'comparability': '选择了64个竞品。适配iPhone 15，规格仍有缺失。',
+                'price_position': '价格范围1到900元。报价处于主流价格带上沿，规格差异尚不明确。',
+            })])
             client.tokenizer = TokenizerFixture()
             model = ContextModel('fixture', competitor_candidates=5, client=client)
             selected, analysis = model.competitors(product(1, 10), candidates, {'median_price': 100})
             self.assertEqual([p['item_id'] for p in selected], ids)
             self.assertEqual(analysis['candidates_considered'], 5)
             self.assertEqual(analysis['selected_count'], len(ids))
-            self.assertEqual(analysis['selected_observed_price_raw_range'], [20, 50] if ids else None)
-            self.assertEqual(analysis['text'], '适配iPhone 15，规格仍有缺失。')
+            self.assertEqual(analysis['selected_observed_price_raw_range'], [min(ids)*10, max(ids)*10] if ids else None)
+            self.assertEqual(analysis['comparability'], '适配iPhone 15，规格仍有缺失。')
+            self.assertEqual(analysis['market_overview'], '市场价格覆盖不完整。')
+            self.assertIn('价格带上沿', analysis['price_position'])
+            import json
+            from agent_simulation.agents.prompts.context_format import unpack
+            payload = json.loads(client.requests[0]['messages'][1]['content'])
+            self.assertIn('$table', payload['candidates'])
+            self.assertEqual(unpack(payload)['candidates'], candidates[:5])
+            self.assertEqual(len(client.requests), 1)
+            from agent_simulation.inference.local.qwen import action_parser
+            output = json.dumps({'selected_items': selection, **{k: analysis[k] for k in
+                                ('market_overview', 'comparability', 'price_position')}}, ensure_ascii=False)
+            parser = action_parser(client.requests[0]['json_schema'], 1536, ''.join(set(output)))
+            for char in output:
+                self.assertIn(char, parser.get_allowed_characters())
+                parser = parser.add_character(char)
+            self.assertTrue(parser.can_end())
             self.assertEqual(selected, [p for p in candidates if p['item_id'] in ids])
         self.assertEqual(candidates, before)

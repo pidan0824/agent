@@ -35,7 +35,14 @@ SELLER_EVIDENCE_NOTE = (
     'imply neither unchanged prices nor zero activity. Retrieved entries are separate fragments. Sources identify '
     'ownership and clocks; observed and settled histories are separate. Memory references '
     'resolve to evidence_ref blocks; derived memories are not additional business events. '
-    'Older competitor references are not current quotes. decision.requested_item_ids gives the quote scope.'
+    'observed_market describes all eligible same-category public quotes, not just the selected competitors. '
+    'Price quantiles are per product; own_quote.percentile is a 0..1 midrank of the observed own price. '
+    'known_products includes unknown prices, while products counts valid quotes. same_brand is a subset. '
+    'largest_shop_product_share measures offer concentration, not sales share. '
+    'Generated market_overview, comparability and price_position interpret those facts and may be wrong. '
+    'Use original statistics and quote cards when they conflict. Logged exposures do not establish attention; '
+    'missing clicks or purchases do not establish rejection. Older competitor references are not current quotes. '
+    'decision.requested_item_ids gives the quote scope.'
 )
 
 SHOP_OVERVIEW_NOTE = 'Each product overview covers its retained recent records only. Windows may differ across products; inclusive start/end indices mark observations, not actual price-change times. Observation gaps do not mean zero activity. Detailed attributes for the selected products are in product_details.'

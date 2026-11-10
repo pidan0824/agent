@@ -22,7 +22,12 @@ SELLER_MARKET_NOTE = (
 
 
 SELLER_DECISION_MARKET_NOTE = (
-    "Recent observed prices are from other shops in the same three-level category. "
+    "Recent observed prices use each product's latest quote in the stated window, from other shops "
+    "in the same three-level category. Products/shops and price quantiles cover valid quotes; "
+    "known_products also includes unknown prices. Each product has equal weight. "
+    "Own percentile is a 0..1 midrank of the latest observed own quote, not the simulation price. "
+    "Same-brand summaries are subsets, not additional observations or proof of equivalent specifications. "
+    "Largest shop product share describes listed products, not sales or market share. "
     "Competitor examples may include older quotes. Simulation prices are active at the decision "
     "and simulation purchases count settled request-item events."
 )
@@ -171,10 +176,9 @@ def decision_market(position):
         "category_ids": position["category_ids"],
         "window": {k: position["window"][k] for k in ("start_inclusive", "end_exclusive")},
         "recent": {
-            "products": scope["products"],
-            "shops": scope["shops"],
+            **deepcopy(scope),
             "median_price": position["price_raw"]["median"],
-            "observation_range": scope["observation_range"],
+            **{key + "_price": value for key, value in position["price_raw"].items() if key != "median"},
         },
     }
 

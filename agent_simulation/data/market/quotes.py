@@ -4,8 +4,8 @@
 import json
 import duckdb
 from copy import deepcopy
-from collections import OrderedDict
-from bisect import bisect_left
+from collections import OrderedDict, Counter, defaultdict
+from bisect import bisect_left, bisect_right
 from itertools import groupby
 from heapq import nlargest
 from agent_simulation.data.common import iter_rows, rows, require, business_parts, literal, sha256
@@ -331,19 +331,53 @@ def _decision_positions(data, grouped, seller_id, before):
             peers = [row for row in category_snapshot(data, category, before, start=start)
                      if row['seller_id'] != seller_id]
             recent = [r for r in peers if r["price_raw"] is not None]
+            prices = sorted(r['price_raw'] for r in recent)
+            shops = Counter(r['seller_id'] for r in recent)
+            brands = defaultdict(list)
+            for row in recent:
+                if (row.get('brand_id') is not None and row['brand_id'] > 0
+                        and row.get('brand_name') not in (None, '', 'UNKNOWN', '无品牌')):
+                    brands[row['brand_id']].append(row['price_raw'])
+            brand_stats = {brand: {k: v for k, v in distribution(values, None).items()
+                                  if k in ('observed_products', 'p25', 'median', 'p75')}
+                           for brand, values in brands.items()}
             summary = {
                 "status": "available" if peers else "no_recent_quotes",
                 "category_ids": list(category),
                 "window": {"start_inclusive": start, "end_exclusive": before},
-                "recent_price_scope": {"products": len(recent), "shops": len({r['seller_id'] for r in recent}),
-                                       "observation_range": observation_range(r['price_time_index'] for r in recent)},
-                "price_raw": {"median": distribution([r['price_raw'] for r in recent], None)['median']},
+                "recent_price_scope": {
+                    "products": len(recent), "shops": len(shops),
+                    "known_products": len(peers),
+                    "valid_price_fraction": len(recent) / len(peers) if peers else None,
+                    "largest_shop_product_share": max(shops.values()) / len(recent) if recent else None,
+                    "observation_range": observation_range(r['price_time_index'] for r in recent),
+                    "median_observation_index": distribution([r['price_time_index'] for r in recent], None)['median'],
+                },
+                "price_raw": {k: v for k, v in distribution(prices, None).items()
+                              if k in ('p25', 'median', 'p75')},
             }
-            return summary
-        summary = data.decision_cached(('decision_summary', seller_id, category, before), summarize)
+            summary['price_raw'].update(min=prices[0] if prices else None, max=prices[-1] if prices else None)
+            return summary, prices, brand_stats
+        summary, prices, brand_stats = data.decision_cached(
+            ('decision_summary', seller_id, category, before), summarize)
         for profile in profiles:
             item = profile["item_id"]
-            yield item, dict(deepcopy(summary), item_id=item, semantics=MARKET_NOTE)
+            position = dict(deepcopy(summary), item_id=item, semantics=MARKET_NOTE)
+            own = profile.get('price_raw') if profile.get('price_status') == 'observed' else None
+            position['recent_price_scope']['own_quote'] = {
+                'price_raw': own, 'observation_index': profile.get('time_index'),
+                'percentile': ((bisect_left(prices, own) + bisect_right(prices, own)) / (2 * len(prices))
+                               if own is not None and len(prices) >= 2 else None),
+                'price_band': (None if own is None or len(prices) < 2 else
+                               'below_p25' if own < summary['price_raw']['p25'] else
+                               'above_p75' if own > summary['price_raw']['p75'] else 'p25_to_p75'),
+            }
+            brand = (brand_stats.get(profile.get('brand_id'))
+                     if profile.get('brand_name') not in (None, '', 'UNKNOWN', '无品牌') else None)
+            if brand is not None:
+                position['recent_price_scope']['same_brand'] = {
+                    'brand_name': profile.get('brand_name'), **brand}
+            yield item, position
 
 
 def _requested_profiles(data, seller_id, item_ids, before, profiles=None):

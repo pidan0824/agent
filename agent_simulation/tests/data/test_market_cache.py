@@ -13,6 +13,44 @@ from agent_simulation.data.market.quotes import owned_profiles, shop_period, _de
 
 
 class MarketCacheTests(unittest.TestCase):
+    def test_decision_summary_reuses_category_and_preserves_unknown_latest_quotes(self):
+        from agent_simulation.data.market import quotes
+        from agent_simulation.agents.context.market import decision_market
+        with tempfile.TemporaryDirectory() as temp, duckdb.connect() as c:
+            cfg = self.fixture(Path(temp))
+            data = DataRepository(c, cfg, 4)
+            profiles = [dict(item_id=i, brand_id=1, brand_name='brand',
+                             price_status='observed', price_raw=1000, time_index=1)
+                        for i in (1, 9)]
+            with patch.object(quotes, 'category_snapshot', wraps=quotes.category_snapshot) as read:
+                first = dict(_decision_positions(data, {(1,2,3): profiles[:1]}, 10, 4))[1]
+                second = dict(_decision_positions(data, {(1,2,3): profiles[1:]}, 10, 4))[9]
+                self.assertEqual(read.call_count, 1)
+            visible = decision_market(first)['recent']
+            self.assertEqual(visible['known_products'], 2)
+            self.assertEqual(visible['products'], 1)  # Latest invalid quote stays unknown.
+            self.assertEqual(visible['valid_price_fraction'], .5)
+            self.assertEqual(visible['same_brand']['observed_products'], 1)
+            self.assertEqual(visible['median_price'], 900)
+            self.assertIsNone(visible['own_quote']['percentile'])
+            self.assertIsNone(visible['own_quote']['price_band'])
+            self.assertEqual(visible, decision_market(second)['recent'])
+            # Add a second valid peer; future and own-shop quotes cannot enter the panel.
+            data = DataRepository(c, cfg, 51)
+            shown = decision_market(dict(_decision_positions(data, {(1,2,3): profiles[:1]}, 10, 51))[1])['recent']
+            self.assertEqual((shown['min_price'], shown['p25_price'], shown['median_price'],
+                              shown['p75_price'], shown['max_price']), (1, 225.75, 450.5, 675.25, 900))
+            self.assertEqual(shown['own_quote']['percentile'], 1)
+            self.assertEqual(shown['own_quote']['price_band'], 'above_p75')
+            self.assertEqual(shown['largest_shop_product_share'], .5)
+            missing = dict(profiles[0], price_status='invalid_price', price_raw=None)
+            shown = decision_market(dict(_decision_positions(data, {(1,2,3): [missing]}, 10, 51))[1])['recent']
+            self.assertIsNone(shown['own_quote']['percentile'])
+            self.assertIsNone(shown['own_quote']['price_band'])
+            unbranded = dict(profiles[0], brand_name='无品牌')
+            shown = decision_market(dict(_decision_positions(data, {(1,2,3): [unbranded]}, 10, 51))[1])['recent']
+            self.assertNotIn('same_brand', shown)
+
     def fixture(self, root):
         cfg = Config('test', root/'facts', {}, item_parts=1)
         parts = cfg.data/'seller_business';parts.mkdir(parents=True)
