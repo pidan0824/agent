@@ -231,11 +231,11 @@ def select_customer_checkpoint(args, checkpoints):
     model = PeftModel.from_pretrained(base, first, adapter_name=first.name)
     for checkpoint in others:
         model.load_adapter(checkpoint, adapter_name=checkpoint.name)
-    trainer = make_trainer(model, tokenizer, args, None, None)
-
     test = {"query": [], "response": []}
     for row in TokenStream(args.token_cache, "customer", "test"):
         test[row.sample_id.split(":", 1)[0]].append(row)
+    trainer = make_trainer(model, tokenizer, args, None, None,
+                           action_weights=action_multipliers(args, tokenizer, test["response"]))
     weights = {stage: math.fsum(row.weight for row in rows) for stage, rows in test.items()}
     total_rows = sum(map(len, test.values()))
     evaluations = []
@@ -345,6 +345,9 @@ def train(args):
     data_check = check_data(args)
     eval_split = selection_split(args.dataset)
     identity = training_identity(args, data_check, eval_split)
+    if relevant_weight > 1:
+        # Earlier checkpoints selected by unweighted loss cannot share the best-metric state.
+        identity["evaluation_action_weights"] = True
     if adapter is not None and any(adapter_identity.get(key) != identity[key]
                                    for key in ("base_config_sha256", "base_weight_sha256")):
         raise ValueError("Adapter training base differs from --model")
@@ -366,7 +369,7 @@ def train(args):
     )
     if samples_per_epoch == 0:
         raise ValueError("Empty training epoch")
-    action_weights = action_multipliers(args, tokenizer, train_data)
+    action_weights = action_multipliers(args, tokenizer, train_data, evaluation_data)
     if not args.resume:
         args.output.mkdir(parents=True)
         write_report(
@@ -377,7 +380,7 @@ def train(args):
                 "input_check": data_check,
                 "packages": packages,
                 "loss": "mean_over_examples(request_weight * action_multiplier * mean_answer_token_CE)",
-                "action_weighted_training_rows": len(action_weights),
+                "action_weighted_rows_across_splits": len(action_weights),
                 "checkpoint_selection": f"lowest {eval_split} answer loss",
                 "evaluation_split": eval_split,
                 "lora_reference": "PolicySim rank 64; targets/alpha/dropout are explicit project choices",
@@ -482,9 +485,9 @@ def parser():
         q.add_argument("--save-steps", "--eval-steps", dest="eval_steps", type=int, default=100,
                        help="Checkpoint interval for explicit step-budget runs")
         q.add_argument("--learning-rate", type=float, default=1e-6)
-        q.add_argument("--click-weight", type=float, default=ACTION_WEIGHTS["click_weight"], help="Training loss multiplier for Customer click rows (default: 2)")
-        q.add_argument("--purchase-weight", type=float, default=ACTION_WEIGHTS["purchase_weight"], help="Training loss multiplier for Customer purchase rows (default: 4)")
-        q.add_argument("--price-change-weight", type=float, default=ACTION_WEIGHTS["price_change_weight"], help="Training loss multiplier for Seller quote changes (default: 2)")
+        q.add_argument("--click-weight", type=float, default=ACTION_WEIGHTS["click_weight"], help="Train and evaluation loss multiplier for Customer click rows (default: 2)")
+        q.add_argument("--purchase-weight", type=float, default=ACTION_WEIGHTS["purchase_weight"], help="Train and evaluation loss multiplier for Customer purchase rows (default: 4)")
+        q.add_argument("--price-change-weight", type=float, default=ACTION_WEIGHTS["price_change_weight"], help="Train and evaluation loss multiplier for Seller quote changes (default: 2)")
         q.add_argument("--rank", type=int, default=64)
         q.add_argument("--loss-breakdown", action="store_true", help="Report stage and Response token-group evaluation losses")
         q.add_argument("--keep-checkpoints", type=int, default=2, help="Retained complete checkpoints; 0 keeps all")

@@ -117,17 +117,19 @@ class BehaviorTrainer(Trainer):
         finally:
             self._loss_totals = None
 
-    def _record_loss_parts(self, inputs, targets, token_losses, positions):
+    def _record_loss_parts(self, inputs, targets, token_losses, positions, effective_weights):
         parts = inputs["answer_parts"][:, positions + 1].detach().cpu()
         valid = targets.ne(-100).detach().cpu()
         losses = token_losses.detach().double().cpu()
-        for i, (stage, weight) in enumerate(zip(inputs["stages"].tolist(), inputs["sample_weights"].tolist())):
+        for i, (stage, request_weight, weight) in enumerate(zip(
+            inputs["stages"].tolist(), inputs["sample_weights"].tolist(), effective_weights.tolist()
+        )):
             stage = ("query", "response", "seller")[stage]
             totals = self._loss_totals.setdefault(stage, {"rows": 0, "weight": 0., "answer": 0.,
                 "parts": {p: [0, 0., 0., 0.] for p in ("structure", "click_id", "purchase_id")}})
             count = int(valid[i].sum())
             totals["rows"] += 1
-            totals["weight"] += weight
+            totals["weight"] += request_weight
             totals["answer"] += weight * float(losses[i][valid[i]].sum()) / count
             if stage == "response":
                 for number, name in enumerate(totals["parts"]):
@@ -158,6 +160,8 @@ class BehaviorTrainer(Trainer):
         labels, weights = inputs["labels"], inputs["sample_weights"]
         if torch.any(~torch.isfinite(weights)) or torch.any(weights <= 0) or torch.any(weights > 1):
             raise ValueError("Invalid sample weights")
+        if "action_multipliers" in inputs:
+            weights = weights * inputs["action_multipliers"]
         # Qwen can project only positions needed to predict answer tokens. Context
         # attention remains complete; neither facts nor supervised tokens are cut.
         positions = labels[:, 1:].ne(-100).any(0).nonzero().flatten()
@@ -172,11 +176,9 @@ class BehaviorTrainer(Trainer):
         targets = labels[:, positions + 1]
         if self._loss_totals is not None:
             losses, tokens = answer_losses(outputs.logits, targets, return_tokens=True)
-            self._record_loss_parts(inputs, targets, tokens, positions)
+            self._record_loss_parts(inputs, targets, tokens, positions, weights)
         else:
             losses = answer_losses(outputs.logits, targets)
-        if "action_multipliers" in inputs and model.training:
-            weights = weights * inputs["action_multipliers"]
         denominator = num_items_in_batch if num_items_in_batch is not None else labels.shape[0]
         loss = (losses * weights).sum() / denominator
         return (loss, outputs) if return_outputs else loss

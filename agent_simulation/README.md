@@ -788,6 +788,6 @@ python -m agent_simulation.datasets.tokens \
 
 Customer Response 默认权重为未记录点击/购买1、有点击无购买2、有购买4；同时有点击和购买取4，不叠乘。Query保持1。每个Response Batch原有的 `1 / batch_count` 权重继续保留，额外系数乘在整条答案的平均Token损失上，不是单独给购买ID加权。日志中未记录互动不等于用户明确拒绝商品。
 
-Seller观测价变化权重为2，持平为1。筛选与加权复用同一套严格更早有效价格比较。额外权重只应用于训练，Test损失和行为指标保持原口径。默认参数为 `--click-weight 2 --purchase-weight 4 --price-change-weight 2`，可显式设为1做无加权对照。行为加权读取完成的Token缓存；Query-only不要求行为权重索引。
+Seller观测价变化权重为2，持平为1。筛选与加权复用同一套严格更早有效价格比较。训练和 Test 损失使用相同行为权重，checkpoint 按加权后的评估损失选择。损失分项也应用这些权重，保留原有样本或请求权重的归一化。生成式行为评估仍按真实请求计算指标。默认参数为 `--click-weight 2 --purchase-weight 4 --price-change-weight 2`，可显式设为1做无加权对照。行为加权读取完成的Token缓存；Query-only不要求行为权重索引。
 
-新的样本选择和权重是新的实验设置，不直接续训旧配置的Checkpoint。旧Token缓存、训练产物和原候选目录均保留。上述筛选不会调用BGE、上下文模型或Tokenizer；下一步构造时才为保留的监督目标准备上下文。
+新的样本选择和权重是新的实验设置。已有按无加权评估损失选优的加权训练不能直接沿用旧的最佳 checkpoint 记录续训。旧Token缓存、训练产物和原候选目录均保留。上述筛选不会调用BGE、上下文模型或Tokenizer；下一步构造时才为保留的监督目标准备上下文。

@@ -60,7 +60,7 @@ class LoRATrainingTests(unittest.TestCase):
             samples.append(PreparedRow(f'response:{i}', np.array(list(map(ord, answer))), 0, .5))
         samples.append(PreparedRow('query:0', np.array([0]), 0, 1.))
         tokenizer = SimpleNamespace(decode=lambda values, **kw: ''.join(chr(int(v)) for v in values))
-        self.assertEqual(action_multipliers(args, tokenizer, samples),
+        self.assertEqual(action_multipliers(args, tokenizer, samples[:2], samples[2:]),
                          {'response:1': 2., 'response:2': 4., 'response:3': 4.})
         self.assertEqual([s.weight for s in samples], [.5, .5, .5, .5, 1.])
         samples.stage = 'query'
@@ -259,6 +259,7 @@ class LoRATrainingTests(unittest.TestCase):
         batch = tensor_batch()
         batch["answer_parts"] = torch.tensor([[-1, -1, 0, 1], [-1, -1, 2, -1]])
         batch["stages"] = torch.tensor([1, 1])
+        batch["action_multipliers"] = torch.tensor([2.0, 4.0])
         rows = [{k: v[i] for k, v in batch.items()} for i in range(2)]
         def collator(items):
             return {k: torch.stack([row[k] for row in items]) for k in batch}
@@ -272,6 +273,8 @@ class LoRATrainingTests(unittest.TestCase):
             metrics = trainer.evaluate()
             self.assertEqual(metrics["eval_response_rows"], 2)
             self.assertEqual(metrics["eval_response_weight"], 1.25)
+            self.assertEqual(metrics["eval_response_click_id_weighted_tokens"], 2.0)
+            self.assertEqual(metrics["eval_response_purchase_id_weighted_tokens"], 1.0)
             for part in ("structure", "click_id", "purchase_id"):
                 self.assertEqual(metrics[f"eval_response_{part}_tokens"], 1)
             self.assertAlmostEqual(metrics["eval_response_answer_loss"], sum(
@@ -303,7 +306,9 @@ class LoRATrainingTests(unittest.TestCase):
             actual = trainer.compute_loss(model, batch)
             torch.testing.assert_close(actual, expected)
             boosted = {**batch, "action_multipliers": torch.tensor([2.0, 4.0])}
-            torch.testing.assert_close(trainer.compute_loss(model, boosted), expected)
+            expected_eval = (answer_losses(full[:, :-1], batch["labels"][:, 1:])
+                             * batch["sample_weights"] * boosted["action_multipliers"]).mean()
+            torch.testing.assert_close(trainer.compute_loss(model, boosted), expected_eval)
             model.train()
             logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
             expected_train = (answer_losses(logits[:, :-1], batch["labels"][:, 1:])

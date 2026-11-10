@@ -9,7 +9,7 @@ import sys
 import time
 import torch
 from contextlib import closing
-from itertools import islice
+from itertools import chain, islice
 from pathlib import Path
 from agent_simulation.data.common import require, sha256
 from agent_simulation.datasets.tokenization import IGNORE_INDEX, collate
@@ -167,15 +167,15 @@ class TokenStream(torch.utils.data.IterableDataset):
         yield from _buffered_shuffle(rows, self.shuffle_buffer, rng)
 
 
-def action_multipliers(args, tokenizer, train_data):
-    """Index positive observed actions once from the frozen training stream."""
+def action_multipliers(args, tokenizer, *streams):
+    """Index positive observed actions from frozen training and evaluation rows."""
     if args.role == "customer":
         click = getattr(args, "click_weight", ACTION_WEIGHTS["click_weight"])
         purchase = getattr(args, "purchase_weight", ACTION_WEIGHTS["purchase_weight"])
-        if max(click, purchase) == 1 or train_data.stage == "query":
+        if max(click, purchase) == 1 or all(getattr(stream, "stage", None) == "query" for stream in streams):
             return {}
         result = {}
-        for row in train_data:
+        for row in chain.from_iterable(streams):
             if not row.sample_id.startswith("response:"):
                 continue
             answer = json.loads(tokenizer.decode(row.tokens[row.answer_start:], skip_special_tokens=True))
@@ -189,9 +189,11 @@ def action_multipliers(args, tokenizer, train_data):
     if factor == 1:
         return {}
     keys = []
-    for path in train_data.files:
+    for path in chain.from_iterable(stream.files for stream in streams):
         with np.load(path, allow_pickle=False) as shard:
             keys.extend(tuple(map(int, sid.split(":")[1:])) for sid in shard["ids"])
+    if not keys:
+        return {}
     sellers, items, times = map(list, zip(*keys))
     with closing(SFTDataset(args.dataset, None)) as data:
         from agent_simulation.datasets.sampling import changed_seller_records
