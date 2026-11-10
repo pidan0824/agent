@@ -10,7 +10,7 @@ from agent_simulation.agents.prompts.instructions import (
 import json
 from copy import deepcopy
 from agent_simulation.data.common import require
-from agent_simulation.agents.prompts.context_format import canonical, pack, unpack
+from agent_simulation.agents.prompts.context_format import answer_message, canonical, compact_json, pack, unpack
 
 REPRESENTATION = "customer-shared-attributes-v3"
 
@@ -39,6 +39,15 @@ def _history_events(state):
     yield from state["short_term_memory"]["search_history"]
     for segment in state.get("retrieved_context", {}).get("history", {}).get("segments", []):
         yield from segment.get("records", [])
+
+
+def _attribute_ref(attributes, records, indices):
+    """Keep the first occurrence of an attribute record and return its index."""
+    key = canonical(attributes)
+    if key not in indices:
+        indices[key] = len(records)
+        records.append(attributes)
+    return indices[key]
 
 
 def factor_history(state):
@@ -75,11 +84,7 @@ def factor_history(state):
                         require(name + "_ref" not in record, "Reserved attribute reference")
                         values = {k: record.pop(k) for k in fields if k in record}
                         if values:
-                            group_key = canonical(values)
-                            if group_key not in group_index[name]:
-                                group_index[name][group_key] = len(groups[name])
-                                groups[name].append(values)
-                            record[name + "_ref"] = group_index[name][group_key]
+                            record[name + "_ref"] = _attribute_ref(values, groups[name], group_index[name])
                     items.append(record)
                 refs.append(item_index[key])
             event.pop(field)
@@ -132,8 +137,7 @@ def unfactor_history(state):
 
 
 def _wire(value, path=()):
-    return json.dumps(pack(value, table_paths=TABLE_PATHS, path=path),
-                      ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return compact_json(pack(value, table_paths=TABLE_PATHS, path=path))
 
 
 def _share_titles(value, background):
@@ -186,11 +190,8 @@ def _prepare_display(state):
         if not attrs:
             offers.append(item)
             continue
-        key = canonical(attrs)
-        if key not in indices:
-            indices[key] = len(groups)
-            groups.append(attrs)
-        offers.append({k:v for k,v in item.items() if k not in attrs} | {"category_ref":indices[key]})
+        reference = _attribute_ref(attrs, groups, indices)
+        offers.append({k: v for k, v in item.items() if k not in attrs} | {"category_ref": reference})
     if groups:
         encoded_offers = _wire(offers, path)
         encoded_groups = _wire(groups, ("display_categories",))
@@ -309,10 +310,6 @@ def messages(
     if target is not None:
         result.append(answer_message(target))
     return result
-
-
-def answer_message(target):
-    return {"role": "assistant", "content": json.dumps(target, ensure_ascii=False, allow_nan=False)}
 
 
 def customer_decision_messages(

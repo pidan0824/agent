@@ -1,4 +1,4 @@
-"""Lossless JSON table encoding for explicitly selected prompt fields."""
+"""JSON formatting and lossless table encoding for model inputs."""
 
 import json
 from agent_simulation.data.common import require
@@ -6,10 +6,18 @@ from agent_simulation.data.common import require
 MIN_TABLE_SAVINGS = 12
 
 
-def canonical(value):
+def compact_json(value, *, sort_keys=False):
     return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        value, ensure_ascii=False, sort_keys=sort_keys, separators=(",", ":"), allow_nan=False
     )
+
+
+def canonical(value):
+    return compact_json(value, sort_keys=True)
+
+
+def answer_message(target):
+    return {"role": "assistant", "content": json.dumps(target, ensure_ascii=False, allow_nan=False)}
 
 
 def pack(value, *, table_paths=(), path=()):
@@ -45,8 +53,7 @@ def pack(value, *, table_paths=(), path=()):
                 "rows": [[row[key] for key in columns] for row in rows],
             }
         }
-        options = dict(ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-        savings = len(json.dumps(rows, **options)) - len(json.dumps(table, **options))
+        savings = len(compact_json(rows)) - len(compact_json(table))
         return table if savings >= MIN_TABLE_SAVINGS else rows
 
     return visit(value, path)

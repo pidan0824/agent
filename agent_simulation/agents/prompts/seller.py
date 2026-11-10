@@ -6,7 +6,7 @@ from agent_simulation.agents.context.pricing_evidence import EVIDENCE_SCHEMAS, p
 from agent_simulation.data.common import require
 from agent_simulation.agents.schemas import validate_arguments
 from agent_simulation.agents.actions import price_schema
-from agent_simulation.agents.prompts.context_format import pack, unpack
+from agent_simulation.agents.prompts.context_format import answer_message, compact_json, pack, unpack
 from agent_simulation.agents.prompts.instructions import (
     FACT_RULES, SELLER_STEPS, SELLER_EVIDENCE_NOTE, SELLER_SUPERVISED_SCOPE, SELLER_SYSTEM, SELLER_ANSWER_RULES,
     SHOP_BATCH_NOTE, TABLE_NOTE, VALUE_NOTE, MEMORY_NOTE,
@@ -31,10 +31,7 @@ def encode_input(state):
     """Render a projected Seller Evidence View."""
     require(isinstance(state, dict) and state.get("schema") in EVIDENCE_SCHEMAS,
             "Expected a projected Seller Evidence View")
-    encoded = json.dumps(
-        pack(state, table_paths=TABLE_PATHS), ensure_ascii=False, separators=(",", ":"), allow_nan=False
-    )
-    return encoded
+    return compact_json(pack(state, table_paths=TABLE_PATHS))
 
 
 def decode_input(text):
@@ -87,7 +84,7 @@ def seller_messages(state, target=None, *, system=SELLER_SYSTEM, rules=SELLER_AN
         requested = state["requested_price_item_ids"]
         require(len(requested) == 1, "Expected one requested Seller supervision ID")
         validate_arguments(target, price_schema(requested))
-        messages.append({"role": "assistant", "content": json.dumps(target, ensure_ascii=False, allow_nan=False)})
+        messages.append(answer_message(target))
     return messages
 
 
