@@ -298,11 +298,15 @@ class ModelCompetitorTests(unittest.TestCase):
             selection = {str(item): True for item in ids}
             if len(ids) == 4:
                 selection['6'] = False
-            result = {"selected_items": selection, "comparability": [pair, invalid]}
+            result = {"selected_items": selection, "comparability": [pair, invalid],
+                      "market_overview": "中间一半报价为20至50，最高报价70位于该区间之外。",
+                      "price_position": ""}
             client = ScriptedModel([answer(result)])
             client.tokenizer = TokenizerFixture()
             model = ContextModel('fixture', competitor_candidates=5, client=client)
-            selected, analysis = model.competitors(focal, candidates)
+            market = {"window": {"start_inclusive": 0, "end_exclusive": 10},
+                      "recent": {"p25_price": 20, "p75_price": 50, "max_price": 70}}
+            selected, analysis = model.competitors(focal, candidates, market)
             self.assertEqual([p['item_id'] for p in selected], ids)
             self.assertEqual(analysis['candidates_considered'], 5)
             self.assertEqual(analysis['selected_count'], len(ids))
@@ -312,9 +316,10 @@ class ModelCompetitorTests(unittest.TestCase):
             from agent_simulation.agents.prompts.context_format import unpack
             payload = json.loads(client.requests[0]['messages'][1]['content'])
             self.assertIn('$table', payload['candidates'])
-            self.assertEqual(unpack(payload)['candidates'], [
-                {k: p[k] for k in ("item_id", "item_title", "brand_name")} for p in candidates[:5]
-            ])
+            self.assertEqual(unpack(payload)['market'], market)
+            self.assertEqual(analysis['market_overview'], result['market_overview'])
+            self.assertNotIn('price_position', analysis)
+            self.assertEqual(unpack(payload)['candidates'], candidates[:5])
             self.assertEqual(len(client.requests), 1)
             from agent_simulation.inference.local.qwen import action_parser
             output = json.dumps(result, ensure_ascii=False)

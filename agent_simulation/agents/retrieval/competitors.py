@@ -232,7 +232,7 @@ def rank_competitors(focal, candidates, cutoff, *, embedder=DEFAULT_HISTORY_ENCO
 
 
 def competitor_examples(data, seller, item, cutoff, start, *, connection=None,
-                        embedder=DEFAULT_HISTORY_ENCODER, simulation=None, include_purchases=False):
+                        embedder=DEFAULT_HISTORY_ENCODER, simulation=None, include_purchases=False, market=None, own_quote=None):
     from agent_simulation.agents.context import context_model
 
     focal = data.product(item, cutoff)
@@ -273,8 +273,17 @@ def competitor_examples(data, seller, item, cutoff, start, *, connection=None,
               "start_inclusive": start, "end_exclusive": cutoff}, "products": cards}
     model = context_model()
     if model is not None and cards:
-        # The selector receives public catalog fields; quote cards stay intact for Seller.
-        selected_cards, analysis = model.competitors(focal, cards)
+        # The selector sees only public attributes; no private shop traffic or target label.
+        public_focal = {k: focal[k] for k in ("item_id", "item_title", "brand_name",
+                        "category_level3_name", "price_raw") if k in focal}
+        if own_quote:
+            public_focal["last_observed_quote"] = own_quote
+        if simulation is not None:
+            active = simulation["active_prices"].get(str(item))
+            if active is not None:
+                public_focal["simulation_price_raw"] = active["price_raw"]
+        public_cards = [{k: v for k, v in card.items() if k != "purchase_records"} for card in cards]
+        selected_cards, analysis = model.competitors(public_focal, public_cards, market)
         originals = {card["item_id"]: card for card in cards}
         result["products"] = [originals[card["item_id"]] for card in selected_cards]
         result["analysis"] = analysis

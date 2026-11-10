@@ -107,8 +107,8 @@ class ContextModel:
         summaries = [self._ask(task, {"scope": scope, "records": group}, schema)["summary"] for group in groups]
         return {"source": "model_summary", "text": "\n".join(summaries)}
 
-    def competitors(self, focal, cards):
-        """Select any number of supplied public offers and explain comparability."""
+    def competitors(self, focal, cards, market=None):
+        """Select public comparisons and interpret the supplied market statistics."""
         if not cards:
             return [], {"source": "model_summary", "candidates_considered": 0,
                         "selected_count": 0, "selected_observed_price_raw_range": None}
@@ -119,14 +119,33 @@ class ContextModel:
             "comparability 最多给两组会影响可比性的具体差异，例如件数、尺寸、材质或适配型号。"
             "item_id 必须是已选商品，focal_detail 和 competitor_detail 分别逐字摘录目标和竞品标题中"
             "对应同一属性的不同值，每段最多16字符。只摘录规格值，不抄整条标题。标题不能支持差异时留空数组。"
+            "market_overview：从 market.recent 的全类目有效报价统计中找一条最有用的分布特征，"
+            "例如中间一半报价与极端值的区别、主要报价区间或供给集中情况，并说明具体比较意义。"
+            "price_position：说明本商品最近观测价相对类目中间区间的位置，再结合已选竞品的用途、"
+            "规格和原始报价，指出哪些参照更贴近本商品；同品牌有有效数据且有解释价值时才提。"
+            "这两段各最多两句，可以引用少量输入中的关键数值，不照抄整张统计表，不重复选中数量。"
+            "价格沿用原始数值尺度，不写‘元’或其他货币单位，不自行换算。"
+            "报价位置使用给定 price_band 或 percentile，不猜测接近哪个分位点。"
+            "每段必须包含本样本的具体依据及其解释；没有有用结论时返回空字符串。"
+            "不要用‘跨度大，可比性受限’或‘缺同品牌，无法判断’作结论，不逐项报告缺失字段，"
+            "不要复述任务要求。不能解释极端值的成因时只描述它与四分位区间的差异，不编造原因。"
+            "不要把高报价称为高端产品，也不要由四分位区间推断分层、主流价位或商品聚集密度。"
+            "用途相近只支持用途比较，只有标题明确给出相同属性值才能说规格一致；"
+            "具体写出匹配或不同的属性，不使用‘规格差异大’‘可比性强’代替分析。"
+            "market.recent 覆盖全部合格同类目公开报价，候选列表只是检索子集，不能由候选推断全市场构成。"
+            "分位数按商品等权；own_quote.percentile 为0到1的中位秩；same_brand 是类目子集。"
+            "largest_shop_product_share 是报价商品占比，不是销量份额。"
+            "本商品报价必须称为最近观测价；当其观测索引早于 market.window.start_inclusive，"
+            "简要指出这是旧报价对近期市场的参照，不能当作当前仍在售的价格。仿真当前价另有字段。"
+            "time_index 不是天数。无品牌不是共同品牌，不从报价推断品质、需求、利润或调价效果，"
+            "不替 Seller 决定最终报价。"
             "只输出所需 JSON。$table 的 columns 定义行顺序，shared 适用于每行。"
         )
         offered = list(cards[:self.competitor_candidates])
-        fields = ("item_id", "item_title", "brand_name")
-        payload = {"focal": {k: focal[k] for k in fields if k in focal}}
+        payload = {"focal": focal, "market": market}
         budget = input_token_budget(1536)
         while True:
-            payload["candidates"] = [{k: p[k] for k in fields if k in p} for p in offered]
+            payload["candidates"] = offered
             packed = pack(payload, table_paths={("candidates",)})
             if len(prompt_tokens(self._messages(task, packed), [], self.tokenizer)) <= budget:
                 break
@@ -138,6 +157,8 @@ class ContextModel:
             "selected_items": {"type": "object",
                 "properties": {str(p["item_id"]): {"type": "boolean"} for p in offered},
                 "additionalProperties": False},
+            **{field: {"type": "string", "maxLength": 180}
+               for field in ("market_overview", "price_position")},
             "comparability": {"type": "array", "maxItems": 2, "items": {
                 "type": "object", "properties": {
                     "item_id": {"type": "integer", "enum": [p["item_id"] for p in offered]},
@@ -146,7 +167,7 @@ class ContextModel:
                 "required": ["item_id", "focal_detail", "competitor_detail"],
                 "additionalProperties": False,
             }}},
-            "required": ["selected_items", "comparability"],
+            "required": ["selected_items", "market_overview", "price_position", "comparability"],
             "additionalProperties": False}
         result = self._ask(task, packed, schema)
         by_id = {p["item_id"]: p for p in offered}
@@ -161,6 +182,9 @@ class ContextModel:
             "selected_count": len(selected),
             "selected_observed_price_raw_range": [min(prices), max(prices)] if prices else None,
         }
+        for field in ("market_overview", "price_position"):
+            if text := result[field].strip():
+                analysis[field] = text
         selected_by_id = {p["item_id"]: p for p in selected}
         focal_title = focal.get("item_title") or ""
         comparisons, seen_details = [], set()
