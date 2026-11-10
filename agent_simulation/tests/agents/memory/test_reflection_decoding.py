@@ -11,7 +11,7 @@ class ReflectionGrammarTests(unittest.TestCase):
     def setUpClass(cls):
         from lmformatenforcer.integrations.transformers import build_token_enforcer_tokenizer_data
         from agent_simulation.inference.requests import load_tokenizer
-        cls.tokenizer = load_tokenizer(PROJECT_ROOT / 'models/Qwen2.5-3B-Instruct-tokenizer', local_files_only=True)
+        cls.tokenizer = load_tokenizer(PROJECT_ROOT / 'models/Qwen2.5-3B-Instruct', local_files_only=True)
         cls.tokens = build_token_enforcer_tokenizer_data(cls.tokenizer)
 
     def setUp(self):

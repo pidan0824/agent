@@ -52,7 +52,7 @@ class LoRATrainingTests(unittest.TestCase):
         from agent_simulation.datasets.tokens import PreparedRow
         from agent_simulation.training.data_loader import TensorCollator
         checked = 0
-        for name in ("Qwen2.5-3B-Instruct-tokenizer", "Qwen3-32B", "Qwen3.5-9B", "Qwen3.5-27B"):
+        for name in ("Qwen2.5-3B-Instruct", "Qwen3-32B", "Qwen3.5-9B", "Qwen3.5-27B"):
             path = PROJECT_ROOT / "models" / name
             if not path.exists():
                 continue

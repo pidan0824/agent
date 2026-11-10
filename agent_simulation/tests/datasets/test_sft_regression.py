@@ -37,7 +37,7 @@ def digest(value):
 class SFTRegressionTests(unittest.TestCase):
     def test_reviewed_lite_sample_outputs(self):
         directory = PROJECT_ROOT / "data/kuaisearch/lite/sft"
-        tokenizer = PROJECT_ROOT / "models/Qwen2.5-3B-Instruct-tokenizer"
+        tokenizer = PROJECT_ROOT / "models/Qwen2.5-3B-Instruct"
         manifest = json.loads((directory / "manifest.json").read_text())
         catalog = Path(manifest["catalog"])
         if not (catalog / "catalog.duckdb").is_file() or not (tokenizer / "tokenizer.json").is_file():

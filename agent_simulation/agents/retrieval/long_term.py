@@ -140,7 +140,7 @@ MEMORY_INPUT_TOKEN_LIMIT = 1024
 def _memory_tokenizer():
     from agent_simulation import PROJECT_ROOT
     from agent_simulation.inference.requests import load_tokenizer
-    return load_tokenizer(PROJECT_ROOT / "models/Qwen2.5-3B-Instruct-tokenizer", local_files_only=True)
+    return load_tokenizer(PROJECT_ROOT / "models/Qwen2.5-3B-Instruct", local_files_only=True)
 
 
 def budget_memories(memories, *, tokenizer=None, limit=MEMORY_INPUT_TOKEN_LIMIT):

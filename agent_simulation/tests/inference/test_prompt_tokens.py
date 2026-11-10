@@ -15,7 +15,7 @@ from agent_simulation.tests.fixtures import answer
 class PromptTokenTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tokenizer = load_tokenizer(str(PROJECT_ROOT/'models/Qwen2.5-3B-Instruct-tokenizer'), local_files_only=True)
+        cls.tokenizer = load_tokenizer(str(PROJECT_ROOT/'models/Qwen2.5-3B-Instruct'), local_files_only=True)
 
     def request(self, text='保温杯'):
         return prepare_request([{'role':'system','content':'Decide.'}, {'role':'user','content':text}],

@@ -21,7 +21,7 @@ from agent_simulation.tests.data.fixtures import CatalogFixture
 
 class CatalogSampleTests(CatalogFixture, unittest.TestCase):
     def test_raw_catalog_to_training_stream_matches_every_frozen_record(self):
-        tok = PROJECT_ROOT / "models/Qwen2.5-3B-Instruct-tokenizer"
+        tok = PROJECT_ROOT / "models/Qwen2.5-3B-Instruct"
         release = self.root / "rolling_sft"
         build_labels(self.output, release)
         with closing(SFTDataset(release, tok)) as data:
@@ -92,7 +92,7 @@ class CatalogSampleTests(CatalogFixture, unittest.TestCase):
         self.assertEqual(product["last_valid_reference"]["time_index"], 1)
 
     def test_preview_exports_paired_samples_from_the_label_release(self):
-        tok = PROJECT_ROOT / "models/Qwen2.5-3B-Instruct-tokenizer"
+        tok = PROJECT_ROOT / "models/Qwen2.5-3B-Instruct"
         release = self.root / "preview_sft"
         output = self.root / "preview"
         build_labels(self.output, release)

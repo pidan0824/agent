@@ -30,7 +30,7 @@ class BatchTests(unittest.TestCase):
         data = SFTDataset.__new__(SFTDataset)
         data.tokenizer = self.tokenizer
         sample = data.check_sample(deepcopy(self.samples['response_batch']))
-        other = load_tokenizer(str(PROJECT_ROOT / 'models/Qwen2.5-3B-Instruct-tokenizer'), local_files_only=True)
+        other = load_tokenizer(str(PROJECT_ROOT / 'models/Qwen2.5-3B-Instruct'), local_files_only=True)
         with patch.object(other, 'apply_chat_template', wraps=other.apply_chat_template) as render:
             encoded = encode_sample(sample, other)
             self.assertEqual(render.call_count, 2)
@@ -45,7 +45,7 @@ class BatchTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = PROJECT_ROOT
-        cls.tokenizer = load_tokenizer(str(root / 'models/Qwen2.5-3B-Instruct-tokenizer'), local_files_only=True)
+        cls.tokenizer = load_tokenizer(str(root / 'models/Qwen2.5-3B-Instruct'), local_files_only=True)
         # These checks concern encoding and masks, not a particular published dataset.
         cls.samples = {}
         targets = {
@@ -119,7 +119,7 @@ class BatchTests(unittest.TestCase):
 class AnchoredEncodingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tokenizer=load_tokenizer(str(PROJECT_ROOT/'models/Qwen2.5-3B-Instruct-tokenizer'),local_files_only=True)
+        cls.tokenizer=load_tokenizer(str(PROJECT_ROOT/'models/Qwen2.5-3B-Instruct'),local_files_only=True)
 
     def test_single_full_encoding_matches_official_prefix_and_complete_for_unicode_and_special_text(self):
         from agent_simulation.datasets.tokenization import _anchored_tokens

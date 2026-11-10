@@ -18,7 +18,7 @@ from agent_simulation.inference.vllm import VLLMClient, structured_output
 class VLLMTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tokenizer = load_tokenizer(str(PROJECT_ROOT / 'models/Qwen2.5-3B-Instruct-tokenizer'),
+        cls.tokenizer = load_tokenizer(str(PROJECT_ROOT / 'models/Qwen2.5-3B-Instruct'),
                                        local_files_only=True)
 
     def request(self, stage='seller'):
@@ -129,7 +129,7 @@ class VLLMTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as output:
             args = parser().parse_args([
-                '--catalog', 'unused', '--model', str(PROJECT_ROOT/'models/Qwen2.5-3B-Instruct-tokenizer'),
+                '--catalog', 'unused', '--model', str(PROJECT_ROOT/'models/Qwen2.5-3B-Instruct'),
                 '--output', output, '--customers', '1', '--inference-backend', 'vllm',
                 '--customer-served-model', 'customer-sft', '--seller-served-model', 'seller-sft',
             ])

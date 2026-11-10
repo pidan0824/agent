@@ -367,7 +367,7 @@ BGE 默认按 CUDA、Apple MPS、CPU 的顺序选择可用设备。可用 `MEMOR
 ```bash
 ./agent_simulation/python.sh -m agent_simulation.datasets.labels preview \
   --dataset data/kuaisearch/lite/sft \
-  --tokenizer models/Qwen2.5-3B-Instruct-tokenizer \
+  --tokenizer models/Qwen2.5-3B-Instruct \
   --sample-id query:14 --sample-id response:14 \
   --sample-id seller:108629:579227:850769 \
   --output /absolute/new_examples
@@ -379,7 +379,7 @@ BGE 默认按 CUDA、Apple MPS、CPU 的顺序选择可用设备。可用 `MEMOR
 from pathlib import Path
 from agent_simulation.datasets.labels import SFTDataset
 
-data = SFTDataset(Path("data/kuaisearch/lite/sft"), Path("models/Qwen2.5-3B-Instruct-tokenizer"))
+data = SFTDataset(Path("data/kuaisearch/lite/sft"), Path("models/Qwen2.5-3B-Instruct"))
 try:
     sample = data.sample("seller:108629:579227:850769")
     messages, tools = sample["messages"], sample["tools"]
@@ -459,7 +459,7 @@ Prompt、Tokenizer 或检索设置改变后，用新目录重新生成 Token 分
 
 ./agent_simulation/python.sh -m agent_simulation.datasets.tokens \
   --dataset data/kuaisearch/lite/sft \
-  --tokenizer models/Qwen2.5-3B-Instruct-tokenizer \
+  --tokenizer models/Qwen2.5-3B-Instruct \
   --candidates data/kuaisearch/lite/candidates/manifest.json \
   --output runs/lite_sft_tokens \
   --market-cache /Users/pidan/Documents/Playground/ecommerce_policy_sandbox/runs/lite_full/benchmarks/market-cache-production \
