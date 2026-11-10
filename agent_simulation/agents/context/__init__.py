@@ -48,20 +48,26 @@ def quote_comparison(market):
         return ""
     start = (market or {}).get("window", {}).get("start_inclusive")
     observed = own.get("observation_index")
-    basis = ("窗口前旧报价" if start is not None and observed is not None and observed < start
-             else "最近观测价")
-    parts = [f"{basis}{price:.15g}"]
+    basis = ("Latest observed quote before the market window" if start is not None and observed is not None and observed < start
+             else "Latest observed quote")
+    parts = [f"{basis}: {price:.15g}"]
     low, high = recent.get("p25_price"), recent.get("p75_price")
-    where = {"below_p25": "低于", "above_p75": "高于", "p25_to_p75": "位于"}.get(own.get("price_band"))
+    where = {"below_p25": "below", "above_p75": "above", "p25_to_p75": "within"}.get(own.get("price_band"))
     if where is not None:
-        parts.append(f"{where}类目中间一半报价区间[{low:.15g}, {high:.15g}]")
+        parts.append(f"It is {where} the middle half of category quotes [{low:.15g}, {high:.15g}]")
     brand = recent.get("same_brand", {})
     median = brand.get("median")
     if median is not None and median > 0:
         change = 100 * (price / median - 1)
-        relation = f"低{abs(change):.2f}%" if change < 0 else f"高{change:.2f}%" if change > 0 else "相同"
-        parts.append(f"与同品牌{brand.get('brand_name', '')}中位数{median:.15g}相比{relation}")
-    return "；".join(parts) + "。"
+        brand_name = brand.get("brand_name")
+        brand_label = f"the {brand_name} median" if brand_name else "the same-brand median"
+        median_label = f"{brand_label} ({median:.15g})"
+        if change == 0:
+            parts.append(f"It equals {median_label}")
+        else:
+            direction = "below" if change < 0 else "above"
+            parts.append(f"It is {abs(change):.2f}% {direction} {median_label}")
+    return ". ".join(parts) + "."
 
 
 def market_comparisons(market):
@@ -71,22 +77,26 @@ def market_comparisons(market):
     low, high = recent.get("p25_price"), recent.get("p75_price")
     maximum = recent.get("max_price")
     if recent.get("products", 0) >= 2 and low is not None and high is not None:
-        text = f"类目中间一半报价在{low:.15g}至{high:.15g}之间"
+        text = f"The middle half of category quotes ranges from {low:.15g} to {high:.15g}"
         if maximum is not None and high > 0:
-            text += f"；最高报价{maximum:.15g}是上四分位报价的{maximum / high:.2f}倍"
-        views["middle_and_upper_end"] = text + "。"
+            text += f". The highest quote ({maximum:.15g}) is {maximum / high:.2f} times the 75th percentile"
+        views["middle_and_upper_end"] = text + "."
     brand_median = recent.get("same_brand", {}).get("median")
     category_median = recent.get("median_price")
     if brand_median is not None and category_median is not None and category_median > 0:
         views["brand_and_category"] = (
-            f"同品牌中位报价{brand_median:.15g}，全类目中位报价{category_median:.15g}；"
-            f"前者是后者的{brand_median / category_median:.2f}倍。")
+            f"The same-brand median ({brand_median:.15g}) is "
+            f"{brand_median / category_median:.2f} times the category median ({category_median:.15g}).")
     known, valid = recent.get("known_products"), recent.get("products")
     if known and valid is not None:
-        views["quote_coverage"] = f"近期观测到{known}件同类目商品，{valid}件具有有效报价；价格统计只覆盖这些有效报价。"
+        views["quote_coverage"] = (
+            f"{valid} of {known} recently observed products in the category have valid quotes. "
+            "Price statistics cover those valid quotes.")
     share = recent.get("largest_shop_product_share")
     if share is not None:
-        views["shop_offer_concentration"] = f"报价商品最多的店铺占有效报价商品的{share:.1%}，衡量的是供给商品数而非销量。"
+        views["shop_offer_concentration"] = (
+            f"The shop with the most quoted products accounts for {share:.1%} of products with valid quotes. "
+            "This share measures product count.")
     return views
 
 
@@ -113,7 +123,8 @@ class ContextModel:
             "Prices use the source raw scale: never append a currency unit or convert units. "
             "Do not invent costs, sales, preferences or causal effects. Brand names alone are not "
             "evidence of reputation, quality, market share or competitive strength. Do not infer "
-            "customer segments or demand from a price. Write concise Chinese. " + task)},
+            "customer segments or demand from a price. Write any narrative in English. "
+            "Copy any quoted product titles or search queries verbatim, without translating them. " + task)},
             {"role": "user", "content": _json(value)}]
 
     def _ask(self, task, value, schema):
@@ -137,15 +148,19 @@ class ContextModel:
             return None
         from agent_simulation.agents.prompts.instructions import TABLE_NOTE
         task = (
-            "按原顺序整理本组历史事实，直接写具体事件、变化与例外，不写人物介绍、总结开场或建议。"
-            "Customer 保留搜索主题变化、实际点击和购买的商品ID及关键价格；"
-            "Seller 保留同商品的报价变化及对应观测范围的曝光、点击和购买记录。"
-            "不同窗口和来源不相加；商品描述不是事件，只有记录中的行为才是行为证据。"
-            "合并同主题的重复搜索，不逐条复述每次请求；最多三个要点，每个行为例子最多列两个代表商品，整份摘要不超过400字符。"
-            "引用商品时写item_id=实际商品ID，价格写price_raw=原始数字，不添加元、角、分等单位。"
-            "没有购买记录只在整个摘要末尾说明一次，不推断不喜欢或不会购买。"
-            "保留关键时间边界和商品ID，同类重复事件可合并描述，不编造统计。"
-            "若分组，只写该组新增事实，不对整个历史下结论。中文简洁条目，返回JSON summary字符串。"
+            "Summarize the recorded events, changes, and exceptions in order. Skip introductions and advice. "
+            "For Customer history, retain changes in search topics, clicked and purchased item IDs, and key prices. "
+            "For Seller history, retain changes in quotes for the same item and its recorded exposures, clicks, "
+            "and purchases within the stated observation window. "
+            "Keep observation windows and sources separate. Product descriptions are attributes, not events. "
+            "Merge repeated searches on the same topic. Use up to three points and two representative items "
+            "per example, with at most 400 characters in total. "
+            "Identify products by item_id= and price_raw= with their original values. "
+            "Omit product titles from the summary. Quote any search query verbatim. "
+            "If no purchase is recorded, mention this once at the end. Do not infer dislike or future behavior. "
+            "Keep key time boundaries and item IDs. Combine repeated events without inventing statistics. "
+            "For grouped input, report only facts from that group without drawing conclusions about the full history. "
+            "Return a JSON object with an English summary string. "
         ) + TABLE_NOTE
         schema = {"type": "object", "properties": {"summary": {"type": "string", "minLength": 1, "maxLength": 500}},
                   "required": ["summary"], "additionalProperties": False}
@@ -181,18 +196,22 @@ class ContextModel:
                         "selected_count": 0, "selected_observed_price_raw_range": None}
         views = market_comparisons(market)
         task = (
-            "为卖家选择有参考价值的公开竞品。优先同用途、同规格的直接替代品，"
-            "只有存在有用区别时才选不同规格的替代品。只因同类目或标题相似不算可比。"
-            "排除不同用途、不同适配对象的商品，重复刊登的同款只留一件。数量不限，也可以不选。"
-            "selected_items是选中商品ID的数组，不要把整个候选池照抄进去。"
-            "market_overview从market_comparisons中选择对此商品最有用的比较角度，返回对应键名，"
-            "无可用比较时返回空字符串。有同品牌统计时优先考虑品牌与全类目是否给出不同参照。"
-            "price_position_facts已经算好，将直接提供给Seller；不重算分位、金额或时间。"
-            "comparability最多两组同一属性的不同取值，每组填已选item_id，"
-            "focal_detail和competitor_detail逐字摘录目标和竞品标题，各2至16字符。"
-            "型号对应型号、件数对应件数、尺寸对应尺寸；两边没有同一属性就留空数组。"
-            "不得以类目相同推断规格相同，不推断品牌质量、需求或价格差的成因。"
-            "$table的columns定义行顺序，shared适用于每行。只输出JSON。"
+            "Select public competitor listings useful to the seller. Prefer direct substitutes for the same use "
+            "and specifications. Include different specifications only when the difference is useful for comparison. "
+            "Category or title similarity alone is insufficient. Exclude different uses or intended fits. "
+            "Keep one listing per identical product. The selection may be empty and has no fixed size. "
+            "Return the selected item IDs in selected_items. Do not copy the whole candidate list. "
+            "For market_overview, return the key of the most useful angle in market_comparisons, "
+            "or an empty string if none applies. When same-brand statistics exist, consider whether they offer "
+            "a different reference from the category as a whole. "
+            "The seller already receives price_position_facts. Do not recalculate prices, percentiles, or times. "
+            "In comparability, report up to two pairs of differing values for the same attribute. "
+            "For each pair, use a selected item_id and copy 2 to 16 characters verbatim from the target and "
+            "competitor titles into focal_detail and competitor_detail respectively. "
+            "Compare model with model, quantity with quantity, or size with size. Return an empty array if "
+            "no shared attribute can be compared. Do not infer specifications from category, or infer brand "
+            "quality, demand, or reasons for a price gap. "
+            "In each $table, columns defines row positions and shared applies to every row. Return only JSON."
         )
         offered = list(cards[:self.competitor_candidates])
         payload = {"focal": focal, "market": market, "market_comparisons": views,

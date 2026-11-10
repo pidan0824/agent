@@ -275,9 +275,9 @@ class ModelCompetitorTests(unittest.TestCase):
             "median_price": 1684.5, "same_brand": {"brand_name": "雅鹿", "median": 3994.5}}}
         before = deepcopy(market)
         text = quote_comparison(market)
-        self.assertIn("窗口前旧报价3980", text)
-        self.assertIn("高于类目中间一半报价区间", text)
-        self.assertIn("中位数3994.5相比低0.36%", text)
+        self.assertIn("Latest observed quote before the market window: 3980", text)
+        self.assertIn("above the middle half of category quotes", text)
+        self.assertIn("0.36% below the 雅鹿 median (3994.5)", text)
         self.assertIn("brand_and_category", market_comparisons(market))
         self.assertEqual(market, before)
         self.assertEqual(quote_comparison({"recent": {"own_quote": {"price_raw": None}}}), "")
@@ -329,7 +329,9 @@ class ModelCompetitorTests(unittest.TestCase):
             payload = json.loads(client.requests[0]['messages'][1]['content'])
             self.assertIn('$table', payload['candidates'])
             self.assertEqual(unpack(payload)['market'], market)
-            self.assertEqual(analysis['market_overview'], '类目中间一半报价在20至50之间；最高报价70是上四分位报价的1.40倍。')
+            self.assertEqual(analysis['market_overview'],
+                         'The middle half of category quotes ranges from 20 to 50. '
+                         'The highest quote (70) is 1.40 times the 75th percentile.')
             self.assertNotIn('price_position', analysis)
             self.assertEqual(unpack(payload)['candidates'], candidates[:5])
             self.assertEqual(len(client.requests), 1)
