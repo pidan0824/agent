@@ -178,6 +178,8 @@ def project_seller(state, *, include_audit=True):
                 expected=logical if basis['clock']=='simulation_logical_time' else sim_end-1
                 require(basis['as_of']==expected,'Stale/future simulation market')
             entry['simulation_market']={'source':'public_simulation',**deepcopy(m['simulation'])}
+        if 'analysis' in m.get('competitor_examples', {}):
+            entry['competitor_analysis'] = deepcopy(m['competitor_examples']['analysis'])
         entry['competitors']=[]
         for c in m.get('competitor_examples',{}).get('products',[]):
             require(c['seller_id']!=seller and c['reference_price_time_index']<cutoff,'Foreign/future public quote')

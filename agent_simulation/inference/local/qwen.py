@@ -54,8 +54,8 @@ class QwenLocal:
             dtype=dtype if dtype == "auto" else getattr(torch, dtype),
             attn_implementation="sdpa",
         ).to(device)
-        if self.model.config.model_type != "qwen2":
-            raise ValueError("This adapter is validated for Qwen2.5 non-thinking checkpoints only")
+        if self.model.config.model_type not in {"qwen2", "qwen3"}:
+            raise ValueError("Local generation supports Qwen2.5 and Qwen3 text checkpoints")
         self.model.eval()
         self.model.requires_grad_(False)
         self.generator_id = (

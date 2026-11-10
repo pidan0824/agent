@@ -7,7 +7,9 @@ TABLE_NOTE = 'In each $table, columns defines row positions and shared applies t
 
 FACT_RULES = '\nEvidence\nUse supplied records as facts. Long-term memories are generated observations or hypotheses and may be wrong; indexed factual records take precedence. ' + PRICE_UNIT_NOTE + ' Unknown is not zero. Historical time_index and simulation indices are separate ordering clocks, not calendar dates or elapsed durations. Interpret counts only for the stated product and observation window.\n'
 
-FACT_RULES += ('Behavioral and business summaries are original historical snapshots at observed_time_index, '
+FACT_RULES += ('Text marked model_summary is generated compression or analysis, not an additional fact. '
+               'Original statistics and explicit quote records take precedence. '
+               'Behavioral and business summaries are original historical snapshots at observed_time_index, '
                'not new events. Their 30-day statistics may overlap recent and retrieved history; never add '
                'these counts together or add simulated feedback to claim a current 30-day total. '
                'Recent item lists preserve source repetition, not quantities or independently confirmed events. '

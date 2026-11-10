@@ -170,3 +170,75 @@ class SharedCustomerHistoryTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class ContextSummaryTests(unittest.TestCase):
+    def model(self, reply, threshold=1):
+        from agent_simulation.agents.context import ContextModel
+        from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
+        client = ScriptedModel([answer(reply)])
+        client.tokenizer = TokenizerFixture()
+        return ContextModel("fixture", history_tokens=threshold, client=client), client
+
+    def test_short_history_skips_generation_and_preserves_prompt(self):
+        from agent_simulation.agents.prompts.customer import messages
+        _, sample = sample_from_request('fixture', 50, request(), history_embedder=None, render=False)
+        before = deepcopy(sample['input'])
+        expected = messages(before, response=True)
+        model, client = self.model({'summary': 'unused'}, threshold=100000)
+        with patch('agent_simulation.agents.context.context_model', return_value=model):
+            self.assertEqual(messages(before, response=True), expected)
+        self.assertEqual(client.requests, [])
+        self.assertEqual(sample['input'], before)
+
+    def test_long_history_keeps_background_and_labels_and_summarizes_once_across_batches(self):
+        from agent_simulation.datasets.samples.customer import split_supervision
+        from agent_simulation.agents.prompts.customer import decode_input
+        from agent_simulation.tests.fixtures import DisplayBudgetTokenizer
+        source = request()
+        source['query_input']['behavioral_summary'] = {'observed_time_index': 40,
+            'statistics_30d': {'orders': 7}, 'recent_purchased_item_ids': [9], 'item_details': []}
+        source['response_input']['displayed_items'] = [{'item_id': i} for i in range(101, 230)]
+        source['response_target']['purchased_item_ids'] = [229]
+        _, sample = sample_from_request('fixture', 50, source, history_embedder=None, render=False)
+        before = deepcopy(sample)
+        model, client = self.model({'summary': '历史搜索涉及多个主题，没有购买记录。'})
+        with patch('agent_simulation.agents.context.context_model', return_value=model):
+            batches = split_supervision(sample, DisplayBudgetTokenizer(64))
+        self.assertGreater(len(batches), 1)
+        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(sample, before)
+        self.assertNotIn('response_target', client.requests[0]['messages'][1]['content'])
+        self.assertEqual([i for batch in batches for i in batch['target']['purchased_item_ids']], [229])
+        for batch in batches:
+            view = decode_input(batch['messages'][1]['content'])
+            self.assertEqual(view['behavioral_summary'], before['input']['behavioral_summary'])
+            self.assertEqual(view['short_term_memory']['summary']['source'], 'model_summary')
+
+    def test_rendered_response_reuses_summary_when_partitioned(self):
+        from agent_simulation.datasets.samples.customer import split_supervision
+        from agent_simulation.tests.fixtures import DisplayBudgetTokenizer
+        source = request()
+        source['response_input']['displayed_items'] = [{'item_id': i} for i in range(101, 230)]
+        model, client = self.model({'summary': '已有历史摘要'})
+        with patch('agent_simulation.agents.context.context_model', return_value=model):
+            _, sample = sample_from_request('fixture', 50, source, stage='response', history_embedder=None)
+            split_supervision(sample, DisplayBudgetTokenizer(64))
+        self.assertEqual(len(client.requests), 1)
+
+    def test_seller_summary_keeps_original_business_statistics_and_source(self):
+        from agent_simulation.tests.seller_context_fixture import seller_state
+        from agent_simulation.agents.prompts.seller import seller_messages, decode_input
+        state = seller_state()
+        state['owned_products'][0]['business_summary'] = {'observed_time_index': 2,
+            'statistics_30d': {'exposures': 100, 'clicks': 7, 'orders': 2}}
+        before = deepcopy(state)
+        model, client = self.model({'summary': '旧报价与经历'})
+        # The stub returns the same summary independently for older and recent histories.
+        client.replies = iter([{'role': 'assistant', 'content': '{"summary":"旧报价与经历"}'}] * 4)
+        with patch('agent_simulation.agents.context.context_model', return_value=model):
+            view = decode_input(seller_messages(state)[1]['content'])
+        self.assertEqual(state, before)
+        self.assertEqual(view['current_state']['products'][0]['business_summary'],
+                         before['owned_products'][0]['business_summary'])
+        self.assertEqual(view['history']['summary']['source'], 'model_summary')

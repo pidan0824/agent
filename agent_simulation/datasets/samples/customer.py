@@ -83,8 +83,13 @@ def sample_from_request(dataset, session, r, *, history_embedder=DEFAULT_HISTORY
 
 def split_supervision(sample, tokenizer, *, compact_background=False, max_output_tokens=0):
     """Intersect original labels only after computing label-blind partitions."""
+    prepared = None
+    if "messages" in sample:
+        visible = json.loads(sample["messages"][1]["content"])
+        prepared = {key: json.dumps(visible[key], ensure_ascii=False, separators=(",", ":"))
+                    for key in ("short_term_memory", "retrieved_context") if key in visible}
     batches = response_batches(sample["input"], tokenizer, compact_background=compact_background,
-                               max_output_tokens=max_output_tokens)
+                               max_output_tokens=max_output_tokens, prepared_history=prepared)
     result = []
     for index, (state, prompt) in enumerate(batches):
         selected = {p["item_id"] for p in state["displayed_items"]}

@@ -54,12 +54,12 @@ class CompetitorTests(unittest.TestCase):
         self.assertEqual(pool,coarse_candidates(focal,list(reversed(candidates))))
         tied=[dict(product(i,20 if i<12 else 30,time=i),reference_price_raw=100+(i%2)) for i in range(2,22)]
         pool=coarse_candidates(focal,tied)
-        self.assertEqual([p['item_id'] for p in pool],[21,20,19,18,11,10,9,8])
+        self.assertEqual([p['item_id'] for p in pool],list(range(21,1,-1)))
         selected,meta=rank_competitors(focal,[*peers,cheap,fresh,product(999,9999,time=100)],100,embedder=None)
         self.assertLessEqual(meta['coarse_candidates'],64)
         self.assertNotIn(999,[p['item_id'] for p in selected])
 
-    def test_only_past_other_shops_same_category_and_at_most_three_shops(self):
+    def test_only_past_other_shops_same_category_without_final_count_limit(self):
         focal = product(1, 10)
         peers = [product(2, 10), product(3, 20, time=100), product(4, 30),
                  product(5, 30), product(6, 40), product(7, 50), product(8, 60)]
@@ -68,6 +68,7 @@ class CompetitorTests(unittest.TestCase):
         selected, meta = rank_competitors(focal, peers, 100, embedder=None)
         self.assertEqual({p["seller_id"] for p in selected}, {30, 40, 50})
         self.assertEqual(meta["eligible_products"], 4)
+        self.assertEqual(len(selected), 4)
         self.assertEqual(peers, original)
 
     def test_freshness_breaks_equal_relevance_and_no_padding(self):
@@ -232,7 +233,7 @@ class CompetitorStabilityTests(unittest.TestCase):
         self.assertEqual([p['item_id'] for p in rank_competitors(focal, repriced, 100, embedder=encoder)[0]],
                          [p['item_id'] for p in baseline])
         # Comparable, recent quotes survive even when the older price is closer.
-        self.assertEqual([p['item_id'] for p in baseline], [89, 88, 87])
+        self.assertEqual([p['item_id'] for p in baseline], list(range(89,25,-1)))
 
     def test_snapshot_replacement_matches_rebuild_after_expiry_and_profile_changes(self):
         from agent_simulation.agents.retrieval.competitors import CoarseFeatures
@@ -262,3 +263,20 @@ class CompetitorStabilityTests(unittest.TestCase):
             with patch.object(features, '_update', wraps=features._update) as update:
                 self.assertEqual(features.select_snapshot(focal, snapshot, 10), (selected, eligible))
                 update.assert_not_called()
+
+
+class ModelCompetitorTests(unittest.TestCase):
+    def test_model_can_select_zero_or_more_than_three_without_changing_quotes(self):
+        from agent_simulation.agents.context import ContextModel
+        from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
+        candidates = [product(i, 20) for i in range(2, 8)]
+        before = deepcopy(candidates)
+        for ids in ([], [2, 3, 4, 5]):
+            client = ScriptedModel([answer({'selected_item_ids': ids, 'summary': '按用途比较，规格仍有缺失。'})])
+            client.tokenizer = TokenizerFixture()
+            model = ContextModel('fixture', client=client)
+            selected, analysis = model.competitors(product(1, 10), candidates, {'median_price': 100})
+            self.assertEqual([p['item_id'] for p in selected], ids)
+            self.assertEqual(analysis['candidates_considered'], len(candidates))
+            self.assertEqual(selected, [p for p in candidates if p['item_id'] in ids])
+        self.assertEqual(candidates, before)

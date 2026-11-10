@@ -13,10 +13,10 @@ from agent_simulation.agents.retrieval.ranking import reciprocal_rank_scores, fr
 from agent_simulation.agents.retrieval.retrieval_text import product_text
 from agent_simulation.agents.retrieval.similarity import cosine_scores
 
-COMPETITOR_POLICY = {"limit": 3, "shortlist": 64, "per_shop": 1,
+COMPETITOR_POLICY = {"shortlist": 64,
                      "shortlist_per_shop": 4,
                      "quote_scope": "recent_market_window",
-                     "ranking": "lexical_brand_freshness_then_rrf_semantic_v4"}
+                     "ranking": "public_candidate_shortlist_v5"}
 
 
 @lru_cache(maxsize=131072)
@@ -139,7 +139,8 @@ class CoarseFeatures:
             order = np.lexsort((self.numeric['ids'][group], self.numeric['times'][group], brand, scores))[::-1]
             for slot in group[order]:
                 owner = int(self.numeric['owners'][slot])
-                if shops[owner] >= COMPETITOR_POLICY['shortlist_per_shop']:
+                if (self.last_work['eligible'] > COMPETITOR_POLICY['shortlist']
+                        and shops[owner] >= COMPETITOR_POLICY['shortlist_per_shop']):
                     continue
                 selected.append(self.records[slot])
                 shops[owner] += 1
@@ -223,14 +224,7 @@ def rank_competitors(focal, candidates, cutoff, *, embedder=DEFAULT_HISTORY_ENCO
     if features is not None:
         features.last_timings["semantic_seconds"] = perf_counter() - start
     start = perf_counter()
-    selected, shops = [], set()
-    for i in order(pool, values):
-        peer = pool[i]
-        if peer["seller_id"] not in shops:
-            selected.append(peer)
-            shops.add(peer["seller_id"])
-        if len(selected) == COMPETITOR_POLICY["limit"]:
-            break
+    selected = [pool[i] for i in order(pool, values)]
     if features is not None:
         features.last_timings["fusion_seconds"] = perf_counter() - start
     return selected, {"eligible_products": eligible, "coarse_candidates":len(pool), "encoded_candidates": len(pool) if embedder is not None else 0,
@@ -238,7 +232,9 @@ def rank_competitors(focal, candidates, cutoff, *, embedder=DEFAULT_HISTORY_ENCO
 
 
 def competitor_examples(data, seller, item, cutoff, start, *, connection=None,
-                        embedder=DEFAULT_HISTORY_ENCODER, simulation=None, include_purchases=False):
+                        embedder=DEFAULT_HISTORY_ENCODER, simulation=None, include_purchases=False, market=None, own_quote=None):
+    from agent_simulation.agents.context import context_model
+
     focal = data.product(item, cutoff)
     # Each index covers just one bounded quote window, never an accumulating past pool.
     key=(cutoff,*(focal[k] for k in CATEGORY_FIELDS))
@@ -273,5 +269,22 @@ def competitor_examples(data, seller, item, cutoff, start, *, connection=None,
                     clock="simulation_logical_time" if clock else "simulation_settled_step",
                     as_of=clock["time"] if clock else simulation["simulation_step"])
         cards.append(card)
-    return {"selection": selection, "purchase_window": {"clock": "observed_time_index",
-            "start_inclusive": start, "end_exclusive": cutoff}, "products": cards}
+    result = {"selection": selection, "purchase_window": {"clock": "observed_time_index",
+              "start_inclusive": start, "end_exclusive": cutoff}, "products": cards}
+    model = context_model()
+    if model is not None and cards:
+        # The selector sees only public attributes; no private shop traffic or target label.
+        public_focal = {k: focal[k] for k in ("item_id", "item_title", "brand_name",
+                        "category_level3_name", "price_raw") if k in focal}
+        if own_quote:
+            public_focal["last_observed_quote"] = own_quote
+        if simulation is not None:
+            active = simulation["active_prices"].get(str(item))
+            if active is not None:
+                public_focal["simulation_price_raw"] = active["price_raw"]
+        public_cards = [{k: v for k, v in card.items() if k != "purchase_records"} for card in cards]
+        selected_cards, analysis = model.competitors(public_focal, public_cards, market)
+        originals = {card["item_id"]: card for card in cards}
+        result["products"] = [originals[card["item_id"]] for card in selected_cards]
+        result["analysis"] = analysis
+    return result

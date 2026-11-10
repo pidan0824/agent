@@ -58,7 +58,7 @@ def validate_release(root, directory, seed, *, role=None, tokenizer_path=None):
     expected = selected_identity(directory, selection, selection_hash, seed, spec['buckets'],
                                  tokenizer_digest=digest)
     require(selection['dataset_manifest_sha256'] == expected['dataset'], 'Selected cache source differs')
-    for key in ('background_sha256', 'compact_customer_background', 'customer_response_batching'):
+    for key in ('background_sha256', 'compact_customer_background', 'customer_response_batching', 'context_processing'):
         if key in spec:
             expected[key] = spec[key]
     require(spec == expected,
@@ -351,6 +351,11 @@ def preflight(args):
     spec['background_sha256'] = sha256(catalog / 'facts/customer_background.parquet')
     spec['tokenizer_sha256'] = cache_tokenizer_digest(args.tokenizer)
     spec['customer_response_batching'] = response_batch_policy()
+    from agent_simulation.agents.context import context_settings
+    settings = context_settings()
+    spec['context_processing'] = settings or {'competitors': 'public_candidate_shortlist_v5'}
+    if settings and not settings['url'] and args.workers > 1:
+        raise ValueError('Local context model requires --workers 1; use a shared model URL for parallel builders')
     if getattr(args, 'compact_customer_background', False):
         spec['compact_customer_background'] = True
     return spec, splits

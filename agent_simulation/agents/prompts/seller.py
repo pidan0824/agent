@@ -51,6 +51,20 @@ def seller_messages(state, target=None, *, system=SELLER_SYSTEM, rules=SELLER_AN
     visible, audit = project_seller(state, include_audit=audit_sink is not None)
     if audit_sink is not None:
         audit_sink.update(audit)
+    from agent_simulation.agents.context import context_model
+    model = context_model()
+    if model is not None:
+        # Summarize only historical evidence; original statistics and current quotes stay intact.
+        history = visible["history"]
+        records = [{"scope": key, "record": record}
+                   for key in ("price_changes", "similar_evidence") for record in history[key]]
+        summary = model.summarize(records, scope="Seller past price changes and retrieved business history")
+        if summary is not None:
+            history.update(price_changes=[], similar_evidence=[], summary=summary)
+        for product in visible["current_state"]["products"]:
+            summary = model.summarize(product["recent"], scope=f"Seller recent history for item {product['item_id']}")
+            if summary is not None:
+                product.update(recent=[], recent_summary=summary)
     content = encode_input(visible)
     note = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE
     messages = [

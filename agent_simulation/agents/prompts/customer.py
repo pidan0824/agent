@@ -169,6 +169,18 @@ def prepare_history(state):
     """Freeze serialized history once for all batches of one Response decision."""
     history = {key: value for key, value in state.items()
                if key in ("short_term_memory", "retrieved_context")}
+    from agent_simulation.agents.context import context_model
+    model = context_model()
+    if model is not None:
+        recent = history.get("short_term_memory", {}).get("search_history", [])
+        retrieved = history.get("retrieved_context", {}).get("history", {}).get("segments", [])
+        records = [{"scope": "recent", "event": event} for event in recent]
+        records.extend({"scope": "retrieved", "segment": segment} for segment in retrieved)
+        summary = model.summarize(records, scope="Customer recent and retrieved history")
+        if summary is not None:
+            return {"short_term_memory": _wire({"search_history": [], "summary": summary}),
+                    "retrieved_context": _wire({"history": {"segments": [],
+                        "included_in": "short_term_memory.summary"}})}
     compact = factor_history(history)
     encoded = {key: _wire(value, (key,)) for key, value in compact.items()}
     original = {key: _wire(value, (key,)) for key, value in history.items()}

@@ -14,13 +14,13 @@ def response_batch_policy():
             "reserved_output_tokens": policy["reserved_output_tokens"]}
 
 
-def response_batches(state, tokenizer, *, max_output_tokens=0, compact_background=False):
+def response_batches(state, tokenizer, *, max_output_tokens=0, compact_background=False, prepared_history=None):
     """Return each display slice with its exact, label-free model messages."""
     require("candidate_batch" not in state, "Response already partitioned")
     items = state["displayed_items"]
     require(len({p["item_id"] for p in items}) == len(items), "Duplicate exposure item")
     budget = input_token_budget(max_output_tokens)
-    history = prepare_history(project_customer(state))
+    history = prepare_history(project_customer(state)) if prepared_history is None else prepared_history
 
     def render(view):
         prompt = messages(view, response=True, prepared_history=history,

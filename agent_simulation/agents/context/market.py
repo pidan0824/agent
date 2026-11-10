@@ -201,6 +201,9 @@ def load_market_context(context, data, *, simulation=None, simulation_cache=None
         if position.get("category_ids"):
             visible["competitor_examples"] = competitor_examples(
                 data, seller, item, cutoff, start, embedder=history_embedder, simulation=simulation,
+                market={k: visible[k] for k in ("window", "recent", "simulation") if k in visible},
+                own_quote={k: products[item][k] for k in ("last_observed_price_raw",
+                    "last_observed_time_index", "price_status") if k in products[item]},
             )
         products[item]["market_position"] = visible
     return context
