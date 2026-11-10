@@ -99,7 +99,7 @@ def average(values):
     return statistics.mean(values) if values else None
 
 
-def choices(pairs):
+def choices(pairs, *, total_requests=None):
     """Score complete request sets; both-empty sets count as exact matches."""
     tp = predicted = actual = exact = 0
     f1s = []
@@ -114,7 +114,7 @@ def choices(pairs):
         f1s.append(2 * hits / (len(p) + len(t)) if p or t else 1.0)
         counts["predicted"].append(len(p))
         counts["actual"].append(len(t))
-    return {
+    metrics = {
         "requests": len(pairs),
         "precision": tp / predicted if predicted else None,
         "recall": tp / actual if actual else None,
@@ -124,6 +124,9 @@ def choices(pairs):
         "selected_count_histograms": {k: dict(Counter(v)) for k, v in counts.items()},
         "nonempty_request_rates": {k: average([n > 0 for n in v]) for k, v in counts.items()},
     }
+    if total_requests is not None:
+        metrics["end_to_end_exact_set_rate"] = exact / total_requests if total_requests else None
+    return metrics
 
 
 def prices(pairs):
@@ -250,12 +253,9 @@ def summarize(records):
             out.update(query_metrics(rows, valid))
         elif stage == "response":
             for key in ("clicked_item_ids", "purchased_item_ids"):
-                out[key] = choices([(r["prediction"][key], r["target"][key]) for r in valid])
-                out[key]["end_to_end_exact_set_rate"] = (
-                    sum(set(r["prediction"][key]) == set(r["target"][key]) for r in valid)
-                    / len(rows)
-                    if rows
-                    else None
+                out[key] = choices(
+                    [(r["prediction"][key], r["target"][key]) for r in valid],
+                    total_requests=len(rows),
                 )
         else:
             pairs = [

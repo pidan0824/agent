@@ -28,18 +28,17 @@ def auc_metrics(labels, scores):
     groups = defaultdict(list)
     for y, s in zip(labels, scores):
         groups[s].append(y)
-    below_negative = concordant = 0
-    for score in sorted(groups):
-        p = sum(groups[score])
-        n = len(groups[score]) - p
-        concordant += p * (below_negative + n / 2)
-        below_negative += n
-    tp = seen = 0
+    negatives_below = negatives
+    concordant = tp = seen = 0
     ap = 0.0
     for score in sorted(groups, reverse=True):
-        p = sum(groups[score])
+        group = groups[score]
+        p = sum(group)
+        n = len(group) - p
+        negatives_below -= n
+        concordant += p * (negatives_below + n / 2)
         tp += p
-        seen += len(groups[score])
+        seen += len(group)
         ap += (p / positives) * (tp / seen)
     return concordant / (positives * negatives), ap
 
