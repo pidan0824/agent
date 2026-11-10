@@ -238,3 +238,40 @@ class StreamTests(MarketFixture, unittest.TestCase):
         self.assertEqual(
             json.loads(result["messages"][-1]["content"]), result["target"]
         )
+
+    def test_seller_capacity_rejection_preserves_history_and_other_errors_propagate(self):
+        from agent_simulation.datasets.samples.seller import seller_records
+        from agent_simulation.inference.requests import ContextCapacityError
+        source = self.cfg.data / "seller_business/part_00.parquet"
+        self.c.execute(f"CREATE VIEW seller_history AS SELECT * FROM read_parquet({literal(source)})")
+        self.c.execute("""CREATE TABLE seller_targets AS SELECT seller_id,item_id,time_index,
+                       'train' assigned_split FROM seller_history WHERE item_id=1 AND time_index>=4""")
+        catalog = SimpleNamespace(connection=self.c, config=self.cfg)
+        rejected, histories = [], []
+
+        def prepare(catalog, sample, **kwargs):
+            cutoff = sample["source"]["time_index"]
+            state = kwargs["product_lookup"].__self__
+            self.assertLess(state.last_time, cutoff)
+            histories.append([r["time_index"] for r in state.windows[1].recent_rows()])
+            if cutoff == 4:
+                raise ContextCapacityError("fixture overflow")
+            return sample
+
+        with patch.object(SellerHistory, "retrieve", return_value={}), \
+             patch("agent_simulation.datasets.samples.seller.with_market_context", side_effect=prepare):
+            samples = list(seller_records(catalog, 0, 1,
+                           on_capacity_error=lambda *args: rejected.append(args)))
+        self.assertEqual([s["source"]["time_index"] for s in samples], [10])
+        self.assertEqual(histories, [[2], [2, 4]])
+        self.assertEqual(rejected[0][:2], ("seller:10:1:4", "train"))
+        for error in (ContextCapacityError("overflow"), ValueError("bad facts")):
+            with patch.object(SellerHistory, "retrieve", return_value={}), \
+                 patch("agent_simulation.datasets.samples.seller.with_market_context", side_effect=error):
+                if isinstance(error, ContextCapacityError):
+                    with self.assertRaises(ContextCapacityError):
+                        list(seller_records(catalog, 0, 1))
+                else:
+                    with self.assertRaisesRegex(ValueError, "bad facts"):
+                        list(seller_records(catalog, 0, 1,
+                             on_capacity_error=lambda *args: self.fail("Not a capacity failure")))

@@ -16,6 +16,8 @@ from agent_simulation.data.common import sha256
 
 
 class RoleCacheTests(unittest.TestCase):
+    # Entry/resume fixtures contain synthetic tokens, without Seller price facts.
+
     def fixture(self, root, role):
         dataset = root / 'dataset'
         dataset.mkdir()
@@ -81,7 +83,7 @@ class RoleCacheTests(unittest.TestCase):
                     validate_release(root, args.dataset, 42)
                 cli = parser().parse_args(['train', '--model', 'unused', '--tokenizer', 'unused',
                     '--dataset', str(args.dataset), '--token-cache', str(root), '--role', role,
-                    '--output', str(root / 'training'), '--device', 'cpu'])
+                    '--output', str(root / 'training'), '--device', 'cpu', '--price-change-weight', '1'])
                 # Exercise the production entry up to weight loading, without a model or SFT.
                 with patch('agent_simulation.training.run.check_data',
                            side_effect=lambda a: check_cached_data(a, data, [])), \
@@ -121,7 +123,7 @@ class RoleCacheTests(unittest.TestCase):
             cli = parser().parse_args(['train', '--model', str(root), '--dataset', str(args.dataset),
                                        '--role', 'seller', '--token-cache', str(root), '--output', str(run),
                                        '--device', 'cpu', '--dtype', 'float32',
-                                       '--tokenizer', str(root), '--resume', 'latest'])
+                                       '--tokenizer', str(root), '--resume', 'latest', '--price-change-weight', '1'])
             checked = check_cached_data(args, data, [])
             bound = training_identity(cli, checked, 'test')
             self.assertNotIn("training_code_sha256", bound)
@@ -168,7 +170,7 @@ class RoleCacheTests(unittest.TestCase):
             (adapter / "adapter_config.json").write_text(adapter_config)
             output = root / "training"
             cli = ["train", "--model", str(root), "--dataset", str(args.dataset),
-                   "--role", "seller", "--token-cache", str(root), "--output", str(output), "--device", "cpu"]
+                   "--role", "seller", "--token-cache", str(root), "--output", str(output), "--device", "cpu", "--price-change-weight", "1"]
             warm = parser().parse_args([*cli, "--init-adapter", str(adapter)])
             metadata = source / "run_config.json"
             metadata.write_text(json.dumps({"identity": {"role": "customer"}}))

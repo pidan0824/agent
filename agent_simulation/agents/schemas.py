@@ -2,6 +2,7 @@
 
 import json
 import math
+import unicodedata
 
 from jsonschema import Draft202012Validator, validators, ValidationError
 
@@ -21,8 +22,13 @@ def integer(value, minimum=0):
     return value
 
 
+def has_visible_text(value):
+    """Require at least one letter, number, punctuation mark or symbol."""
+    return any(unicodedata.category(char)[0] in "LNPS" for char in value)
+
+
 def text(value):
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not has_visible_text(value):
         raise ValueError("Expected nonempty text")
     return value
 
@@ -78,8 +84,10 @@ _types = Draft202012Validator.TYPE_CHECKER.redefine_many(
 
 
 def _min_length(validator, minimum, value, schema):
-    if isinstance(value, str) and len(value.strip()) < minimum:
-        yield ValidationError("String is too short after stripping whitespace")
+    if isinstance(value, str) and (
+        len(value.strip()) < minimum or (minimum > 0 and not has_visible_text(value))
+    ):
+        yield ValidationError("String is too short or contains no visible text")
 
 
 StrictSchema = validators.extend(

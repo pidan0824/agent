@@ -18,7 +18,7 @@ from agent_simulation.agents.retrieval.bge_encoder import bge_encoder
 from agent_simulation.data.common import require, sha256
 from agent_simulation.inference.local.qwen import QwenLocal, DEFAULT_REVISION
 from agent_simulation.inference.requests import prepare_request
-from agent_simulation.agents.schemas import validate_arguments
+from agent_simulation.agents.schemas import has_visible_text, validate_arguments
 from agent_simulation.datasets.labels import (
     SFTDataset, customer_records, expand_record, record_samples, select_record_ids,
 )
@@ -193,7 +193,7 @@ def query_metrics(rows, valid):
         prediction, target = row["prediction"]["query"], row["target"]["query"]
         hits += prediction == target
         prediction, target = prediction.strip(), target.strip()
-        if not prediction or not target:
+        if not has_visible_text(prediction) or not has_visible_text(target):
             scores[sample_id] = 0.0
         elif prediction == target:
             scores[sample_id] = 1.0
@@ -227,6 +227,13 @@ def summarize(records):
     result = {}
     for stage in ("query", "response", "seller"):
         rows = [r for r in records if r["stage"] == stage]
+        if stage == "query":
+            # Resumed reports can contain outputs accepted before this text check.
+            rows = [
+                {**r, "status": "invalid", "error": "Query contains no visible text"}
+                if r["status"] == "ok" and not has_visible_text(r["prediction"]["query"])
+                else r for r in rows
+            ]
         valid = [r for r in rows if r["status"] == "ok"]
         out = {
             "total": len(rows),

@@ -1,6 +1,7 @@
 """Build real price supervision, individually or with incremental Seller history."""
 
 from itertools import groupby
+from agent_simulation.inference.requests import ContextCapacityError
 from agent_simulation.data.market.quotes import CategorySnapshots
 from agent_simulation.data.common import iter_rows, require, rows
 from agent_simulation.agents.context.pricing import (
@@ -238,7 +239,7 @@ class SellerHistory:
         return self._retrieval_pool.retrieve(focus_ids, embedder=embedder)
 
 
-def seller_records(catalog, bucket, buckets, *, split=None):
+def seller_records(catalog, bucket, buckets, *, split=None, on_capacity_error=None):
     """Yield chronological contexts; read only each target's recent quote window."""
     require(0 <= bucket < buckets, "Invalid partition")
     cursor = catalog.connection.execute(
@@ -272,8 +273,13 @@ def seller_records(catalog, bucket, buckets, *, split=None):
                                 sample["input"]["requested_price_item_ids"],
                             ),
                         )
-                        yield sample
+                    except ContextCapacityError as error:
+                        if on_capacity_error is None:
+                            raise
+                        on_capacity_error(sample["sample_id"], sample["split"], error)
+                        continue
                     except ValueError as error:
                         raise ValueError(sample["sample_id"] + ": " + str(error)) from error
+                    yield sample
     finally:
         market_connection.close()

@@ -262,30 +262,39 @@ def build_splits(args, role, bucket, splits):
             writer.expected = counts[split]
             require(writer.restored <= {r for r, s in expected if s == split},
                     'Checkpoint records differ from frozen candidates')
+        pending = iter((record, split) for record, split in expected
+                       if record not in writers[split].restored)
+
+        def take_writer(record, split=None):
+            selected = next(pending, None)
+            require(selected is not None and selected[0] == record
+                    and (split is None or selected[1] == split),
+                    'Selected label sequence differs')
+            return writers[selected[1]]
+
+        def reject_context(record, split, error):
+            take_writer(record, split).reject(record, error)
+
         if role == 'customer':
             # Token shards only need the final model payload and sample weight.
             source = customer_records(data.catalog, bucket, args.buckets, include_history_ids=False)
         else:
-            source = seller_records(data.catalog, bucket, args.buckets, split=None)
-        for record, split in expected:
-            writer = writers[split]
-            if record in writer.restored:
-                continue
-            raw = next(source, None)
-            require(raw is not None, 'Missing selected record')
-            actual = raw['sample_id'] if role == 'seller' else str(raw[0]['key']['session_id'])
-            require(actual == record, 'Selected label sequence differs')
+            source = seller_records(data.catalog, bucket, args.buckets, split=None,
+                                    on_capacity_error=reject_context)
+        for raw in source:
+            record = raw['sample_id'] if role == 'seller' else str(raw[0]['key']['session_id'])
+            writer = take_writer(record)
             try:
                 rows = []
                 for sample in expand_record(role, raw, tokenizer=data.tokenizer):
-                    require(sample['split'] == split, 'Wrong selected split')
+                    require(sample['split'] == writer.split, 'Wrong selected split')
                     rows.append(PreparedRow.from_sample(sample, data.tokenizer))
             except ContextCapacityError as error:
                 writer.reject(record, error)
                 continue
             # Publish only after Query and every Response batch have encoded successfully.
             writer.add(record, rows)
-        require(next(source, None) is None, 'Unexpected extra selected record')
+        require(next(pending, None) is None, 'Missing selected record')
         results.update({split: writer.finish() for split, writer in writers.items()})
     return results
 

@@ -51,10 +51,11 @@ def prepare_request(messages, tools, tokenizer, *, max_output_tokens=0):
     tokens = prompt_tokens(request["messages"], request["tools"], tokenizer)
     count = len(tokens)
     budget = input_token_budget(max_output_tokens)
-    require(
-        count <= budget,
-        f"Model context overflow: {count} input tokens plus {_MODEL_POLICY['context_limit'] - budget} output reserve",
-    )
+    if count > budget:
+        raise ContextCapacityError(
+            f"Model context overflow: {count} input tokens plus "
+            f"{_MODEL_POLICY['context_limit'] - budget} output reserve"
+        )
     _attach_tokens(request, tokenizer, tokens)
     return request, count
 

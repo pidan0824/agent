@@ -423,5 +423,45 @@ class BehaviorTests(unittest.TestCase):
 
 
 
+    def test_invisible_queries_are_invalid_in_generation_and_saved_reports(self):
+        from agent_simulation.agents.schemas import text
+        tokenizer = SimpleNamespace(chat_template="fixture", apply_chat_template=lambda *a, **kw: [1])
+        model = Mock(tokenizer=tokenizer, max_new_tokens=8)
+        sample = {"sample_id": "query:1", "input": {}, "target": {"query": "杯子"}, "tools": [],
+                  "messages": [{"role": "system", "content": "fixture"},
+                               {"role": "user", "content": "fixture"},
+                               {"role": "assistant", "content": '{"query":"杯子"}'}]}
+        for query in ("\u200b", " \ufeff\u200d\n", "\u0301"):
+            with self.subTest(query=repr(query)):
+                model.complete.return_value = {"role": "assistant", "content": json.dumps({"query": query})}
+                self.assertEqual(predict(sample, model)["status"], "invalid")
+                with self.assertRaises(ValueError):
+                    text(query)
+                saved = {"stage": "query", "sample_id": "query:1", "status": "ok",
+                         "prediction": {"query": query}, "target": sample["target"]}
+                with patch("agent_simulation.evaluation.micro.behavior_prediction.bge_encoder",
+                           side_effect=AssertionError("Invisible query reached encoder")):
+                    metrics = summarize([saved])["query"]
+                self.assertEqual(metrics["invalid"], 1)
+                self.assertEqual(metrics["end_to_end_semantic_similarity_mean"], 0)
+                self.assertEqual(saved["status"], "ok")
+        self.assertEqual(text("café"), "café")
+        self.assertEqual(text("保温杯"), "保温杯")
+
+    def test_request_overflow_uses_capacity_error_and_keeps_output_reserve(self):
+        from agent_simulation.inference.requests import ContextCapacityError, prepare_request
+        tokenizer = SimpleNamespace(chat_template="fixture", apply_chat_template=Mock(return_value=[1] * 8))
+        with patch("agent_simulation.inference.requests._MODEL_POLICY",
+                   {"context_limit": 10, "reserved_output_tokens": 2}):
+            _, count = prepare_request([], [], tokenizer)
+            self.assertEqual(count, 8)
+            with self.assertRaises(ContextCapacityError):
+                prepare_request([], [], tokenizer, max_output_tokens=3)
+            tokenizer.apply_chat_template.side_effect = ValueError("broken template")
+            with self.assertRaisesRegex(ValueError, "broken template") as caught:
+                prepare_request([], [], tokenizer)
+            self.assertNotIsInstance(caught.exception, ContextCapacityError)
+
+
 if __name__ == "__main__":
     unittest.main()
