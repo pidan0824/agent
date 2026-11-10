@@ -21,6 +21,7 @@ from agent_simulation.datasets.tokens import cache_tokenizer_digest, validate_re
 from agent_simulation.environment.batching import response_batch_policy
 from agent_simulation.training.data_loader import (
     prepare_datasets,
+    action_multipliers,
     TensorCollator,
     TokenStream,
 )
@@ -148,7 +149,8 @@ def training_identity(args, data_check, eval_split):
     }
     for key, default in (("stage", None), ("loss_breakdown", False),
                          ("keep_checkpoints", 2), ("lr_schedule_epochs", None),
-                         ("activation_offload_tokens", None)):
+                         ("activation_offload_tokens", None), ("click_weight", 1.0),
+                         ("purchase_weight", 1.0), ("price_change_weight", 1.0)):
         if value.get(key) == default:
             value.pop(key, None)
     if value.get("init_adapter") is None:
@@ -280,6 +282,12 @@ def select_customer_checkpoint(args, checkpoints):
 
 
 def train(args):
+    multipliers = tuple(getattr(args, key, 1.0) for key in
+                        ("click_weight", "purchase_weight", "price_change_weight"))
+    if any(not math.isfinite(value) or value < 1 for value in multipliers):
+        raise ValueError("Action weights must be finite and at least 1")
+    if max(multipliers) > 1 and not args.token_cache:
+        raise ValueError("Action weighting requires a completed token cache")
     if getattr(args, "empty_cache_steps", None) is not None and args.empty_cache_steps < 1:
         raise ValueError("Cache release interval must be positive")
     if getattr(args, "lr_schedule_epochs", None) is not None and (args.max_steps or args.lr_schedule_epochs < args.epochs):
@@ -354,6 +362,7 @@ def train(args):
     )
     if samples_per_epoch == 0:
         raise ValueError("Empty training epoch")
+    action_weights = action_multipliers(args, tokenizer, train_data)
     if not args.resume:
         args.output.mkdir(parents=True)
         write_report(
@@ -363,7 +372,8 @@ def train(args):
                 "samples_per_epoch": samples_per_epoch,
                 "input_check": data_check,
                 "packages": packages,
-                "loss": "mean_over_examples(request_weight * mean_answer_token_CE)",
+                "loss": "mean_over_examples(request_weight * action_multiplier * mean_answer_token_CE)",
+                "action_weighted_training_rows": len(action_weights),
                 "checkpoint_selection": f"lowest {eval_split} answer loss",
                 "evaluation_split": eval_split,
                 "lora_reference": "PolicySim rank 64; targets/alpha/dropout are explicit project choices",
@@ -388,7 +398,8 @@ def train(args):
             ))
         model.print_trainable_parameters()
         trainer = make_trainer(
-            model, tokenizer, args, train_data, evaluation_data, evaluate_each_epoch=True
+            model, tokenizer, args, train_data, evaluation_data, evaluate_each_epoch=True,
+            action_weights=action_weights,
         )
         initial_metrics = trainer.evaluate() if not args.resume else None
         if initial_metrics is not None:
@@ -467,6 +478,9 @@ def parser():
         q.add_argument("--save-steps", "--eval-steps", dest="eval_steps", type=int, default=100,
                        help="Checkpoint interval for explicit step-budget runs")
         q.add_argument("--learning-rate", type=float, default=1e-6)
+        q.add_argument("--click-weight", type=float, default=1.0, help="Training loss multiplier for Customer click rows")
+        q.add_argument("--purchase-weight", type=float, default=1.0, help="Training loss multiplier for Customer purchase rows")
+        q.add_argument("--price-change-weight", type=float, default=1.0, help="Training loss multiplier for Seller quote changes")
         q.add_argument("--rank", type=int, default=64)
         q.add_argument("--loss-breakdown", action="store_true", help="Report stage and Response token-group evaluation losses")
         q.add_argument("--keep-checkpoints", type=int, default=2, help="Retained complete checkpoints; 0 keeps all")

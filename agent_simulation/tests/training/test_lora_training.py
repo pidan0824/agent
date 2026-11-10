@@ -280,6 +280,14 @@ class LoRATrainingTests(unittest.TestCase):
             ).mean()
             actual = trainer.compute_loss(model, batch)
             torch.testing.assert_close(actual, expected)
+            boosted = {**batch, "action_multipliers": torch.tensor([2.0, 4.0])}
+            torch.testing.assert_close(trainer.compute_loss(model, boosted), expected)
+            model.train()
+            logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
+            expected_train = (answer_losses(logits[:, :-1], batch["labels"][:, 1:])
+                              * batch["sample_weights"] * boosted["action_multipliers"]).mean()
+            torch.testing.assert_close(trainer.compute_loss(model, boosted), expected_train)
+            model.eval()
             one = {k: v[1:] for k, v in batch.items()}
             weighted = trainer.compute_loss(model, one)
             one["sample_weights"] = torch.ones(1)

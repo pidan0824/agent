@@ -164,6 +164,53 @@ class TokenStream(torch.utils.data.IterableDataset):
         yield from _buffered_shuffle(rows, self.shuffle_buffer, rng)
 
 
+def action_multipliers(args, tokenizer, train_data):
+    """Index positive observed actions once from the frozen training stream."""
+    if args.role == "customer":
+        click = getattr(args, "click_weight", 1.0)
+        purchase = getattr(args, "purchase_weight", 1.0)
+        if max(click, purchase) == 1 or train_data.stage == "query":
+            return {}
+        result = {}
+        for row in train_data:
+            if not row.sample_id.startswith("response:"):
+                continue
+            answer = json.loads(tokenizer.decode(row.tokens[row.answer_start:], skip_special_tokens=True))
+            factor = max(click if answer["clicked_item_ids"] else 1.0,
+                         purchase if answer["purchased_item_ids"] else 1.0)
+            if factor > 1:
+                result[row.sample_id] = factor
+        return result
+
+    factor = getattr(args, "price_change_weight", 1.0)
+    if factor == 1:
+        return {}
+    keys = []
+    for path in train_data.files:
+        with np.load(path, allow_pickle=False) as shard:
+            keys.extend(tuple(map(int, sid.split(":")[1:])) for sid in shard["ids"])
+    sellers, items, times = map(list, zip(*keys))
+    with closing(SFTDataset(args.dataset, None)) as data:
+        rows = data.catalog.connection.execute("""
+            WITH keys AS (
+                SELECT unnest(?::BIGINT[]) seller_id, unnest(?::BIGINT[]) item_id,
+                       unnest(?::BIGINT[]) time_index
+            ), targets AS (
+                SELECT k.*, h.price_raw FROM keys k
+                JOIN seller_history h USING (seller_id, item_id, time_index)
+            ), earlier AS (
+                SELECT h.seller_id, h.item_id, h.time_index, h.price_raw
+                FROM seller_history h SEMI JOIN keys k USING (seller_id, item_id)
+                WHERE h.price_status = 'observed' AND h.price_raw > 0 AND isfinite(h.price_raw)
+            )
+            SELECT t.seller_id, t.item_id, t.time_index FROM targets t
+            ASOF JOIN earlier h ON t.seller_id = h.seller_id AND t.item_id = h.item_id
+                                  AND t.time_index > h.time_index
+            WHERE t.price_raw <> h.price_raw
+        """, [sellers, items, times]).fetchall()
+    return {f"seller:{seller}:{item}:{time}": factor for seller, item, time in rows}
+
+
 class EvaluationStream(torch.utils.data.IterableDataset):
     """Read the fixed list of complete records chosen at training startup."""
 
@@ -200,9 +247,10 @@ def response_token_parts(tokenizer, tokens):
 class TensorCollator:
     """Keep IDs and provenance outside model kwargs; preserve request weights."""
 
-    def __init__(self, tokenizer, *, loss_breakdown=False):
+    def __init__(self, tokenizer, *, loss_breakdown=False, action_weights=None):
         self.tokenizer = tokenizer
         self.loss_breakdown = loss_breakdown
+        self.action_weights = action_weights or {}
 
     def __call__(self, samples):
         if isinstance(samples[0], PreparedRow):
@@ -217,6 +265,10 @@ class TensorCollator:
                 labels[i, start:n] = ids[i, start:n]
             result = {"input_ids": ids, "attention_mask": mask, "labels": labels,
                       "sample_weights": torch.tensor([s.weight for s in samples], dtype=torch.float32)}
+            if self.action_weights:
+                result["action_multipliers"] = torch.tensor([
+                    self.action_weights.get(sample.sample_id, 1.0) for sample in samples
+                ], dtype=torch.float32)
             if self.loss_breakdown:
                 stages = [s.sample_id.split(":", 1)[0] for s in samples]
                 parts = torch.full_like(ids, -1)

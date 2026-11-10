@@ -15,9 +15,13 @@ def context_settings():
     model = os.environ.get("SIMULATION_CONTEXT_MODEL", "")
     if not model:
         return None
-    return {"model": model, "url": os.environ.get("SIMULATION_CONTEXT_URL", ""),
-            "device": os.environ.get("SIMULATION_CONTEXT_DEVICE", "auto"),
-            "history_tokens": int(os.environ.get("SIMULATION_HISTORY_TOKENS", "4096"))}
+    settings = {"model": model, "url": os.environ.get("SIMULATION_CONTEXT_URL", ""),
+                "device": os.environ.get("SIMULATION_CONTEXT_DEVICE", "auto"),
+                "history_tokens": int(os.environ.get("SIMULATION_HISTORY_TOKENS", "4096"))}
+    limit = os.environ.get("SIMULATION_COMPETITOR_CANDIDATES")
+    if limit is not None:
+        settings["competitor_candidates"] = int(limit)
+    return settings
 
 
 def context_model():
@@ -26,8 +30,9 @@ def context_model():
 
 
 @lru_cache(maxsize=1)
-def _context_model(model, url, device, history_tokens):
-    return ContextModel(model, url=url, device=device, history_tokens=history_tokens)
+def _context_model(model, url, device, history_tokens, competitor_candidates=None):
+    return ContextModel(model, url=url, device=device, history_tokens=history_tokens,
+                        competitor_candidates=competitor_candidates)
 
 
 def _json(value):
@@ -37,11 +42,15 @@ def _json(value):
 class ContextModel:
     """One lazy model for competitor selection and history compression; no result cache."""
 
-    def __init__(self, model, *, url="", device="auto", history_tokens=4096, client=None):
+    def __init__(self, model, *, url="", device="auto", history_tokens=4096,
+                 competitor_candidates=None, client=None):
         if history_tokens <= 0:
             raise ValueError("History token threshold must be positive")
         self.model, self.url, self.device = model, url, device
         self.history_tokens = history_tokens
+        if competitor_candidates is not None and competitor_candidates < 1:
+            raise ValueError("Competitor candidate limit must be positive")
+        self.competitor_candidates = competitor_candidates
         self.client = client
         self.tokenizer = client.tokenizer if client is not None else load_tokenizer(model, local_files_only=True)
         self.lock = Lock()
@@ -113,15 +122,17 @@ class ContextModel:
                 "Do not state how many products or shops were selected or discuss prices, price differences "
                 "or market statistics. The program supplies counts and price ranges from the selected offers. "
                 "Do not decide the seller's final price. Return selected_item_ids and a summary.")
-        offered = list(cards)
+        # The existing retrieval order determines which offers the model sees.
+        offered = list(cards[:self.competitor_candidates])
         payload = {"focal": focal, "market": market, "candidates": offered,
-                   "available_candidates": len(cards)}
+                   "available_candidates": len(offered)}
         budget = input_token_budget(1536)
         while len(prompt_tokens(self._messages(task, payload), [], self.tokenizer)) > budget:
             if len(offered) == 1:
                 raise ValueError("One competitor record exceeds the context model input budget")
             offered = offered[:max(1, len(offered) // 2)]
             payload["candidates"] = offered
+            payload["available_candidates"] = len(offered)
         schema = {"type": "object", "properties": {
             "selected_item_ids": {"type": "array", "uniqueItems": True,
                 "items": {"type": "integer", "enum": [p["item_id"] for p in offered]}},

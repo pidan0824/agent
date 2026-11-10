@@ -175,12 +175,15 @@ class BehaviorTrainer(Trainer):
             self._record_loss_parts(inputs, targets, tokens, positions)
         else:
             losses = answer_losses(outputs.logits, targets)
+        if "action_multipliers" in inputs and model.training:
+            weights = weights * inputs["action_multipliers"]
         denominator = num_items_in_batch if num_items_in_batch is not None else labels.shape[0]
         loss = (losses * weights).sum() / denominator
         return (loss, outputs) if return_outputs else loss
 
 
-def make_trainer(model, tokenizer, args, train_data, eval_data, *, evaluate_each_epoch=False):
+def make_trainer(model, tokenizer, args, train_data, eval_data, *, evaluate_each_epoch=False,
+                 action_weights=None):
     """Share the identical training setup with bounded integration tests."""
     interval = min(args.eval_steps, args.max_steps) if args.max_steps else args.eval_steps
     evaluate = eval_data is not None
@@ -233,7 +236,8 @@ def make_trainer(model, tokenizer, args, train_data, eval_data, *, evaluate_each
         train_dataset=train_data,
         eval_dataset=eval_data,
         processing_class=tokenizer,
-        data_collator=TensorCollator(tokenizer, loss_breakdown=getattr(args, "loss_breakdown", False)),
+        data_collator=TensorCollator(tokenizer, loss_breakdown=getattr(args, "loss_breakdown", False),
+                                     action_weights=action_weights),
         callbacks=callbacks,
     )
     trainer.schedule_epochs = getattr(args, "lr_schedule_epochs", None)
