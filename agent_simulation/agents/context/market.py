@@ -33,6 +33,79 @@ SELLER_DECISION_MARKET_NOTE = (
 )
 
 
+def quote_comparison(market):
+    """Describe existing quote statistics without querying or changing the source."""
+    recent = (market or {}).get("recent", {})
+    own = recent.get("own_quote", {})
+    price = own.get("price_raw")
+    if price is None:
+        return ""
+    start = (market or {}).get("window", {}).get("start_inclusive")
+    observed = own.get("observation_index")
+    basis = ("Latest observed quote before the market window" if start is not None and observed is not None and observed < start
+             else "Latest observed quote")
+    parts = [f"{basis}: {price:.15g}"]
+    low, high = recent.get("p25_price"), recent.get("p75_price")
+    where = {"below_p25": "below", "above_p75": "above", "p25_to_p75": "within"}.get(own.get("price_band"))
+    if where is not None and low is not None and high is not None:
+        parts.append(f"It is {where} the middle half of category quotes [{low:.15g}, {high:.15g}]")
+    brand = recent.get("same_brand", {})
+    median = brand.get("median")
+    if median is not None and median > 0:
+        change = 100 * (price / median - 1)
+        brand_name = brand.get("brand_name")
+        brand_label = f"the {brand_name} median" if brand_name else "the same-brand median"
+        median_label = f"{brand_label} ({median:.15g})"
+        if change == 0:
+            parts.append(f"It equals {median_label}")
+        else:
+            direction = "below" if change < 0 else "above"
+            parts.append(f"It is {abs(change):.2f}% {direction} {median_label}")
+    return ". ".join(parts) + "."
+
+
+def market_comparisons(market):
+    """Describe the supplied category quote statistics."""
+    recent = (market or {}).get("recent", {})
+    views = {}
+    low, high = recent.get("p25_price"), recent.get("p75_price")
+    maximum = recent.get("max_price")
+    if recent.get("products", 0) >= 2 and low is not None and high is not None:
+        text = f"The middle half of category quotes ranges from {low:.15g} to {high:.15g}"
+        if maximum is not None and high > 0:
+            text += f". The highest quote ({maximum:.15g}) is {maximum / high:.2f} times the 75th percentile"
+        views["middle_and_upper_end"] = text + "."
+    brand_median = recent.get("same_brand", {}).get("median")
+    category_median = recent.get("median_price")
+    if brand_median is not None and category_median is not None and category_median > 0:
+        views["brand_and_category"] = (
+            f"The same-brand median ({brand_median:.15g}) is "
+            f"{brand_median / category_median:.2f} times the category median ({category_median:.15g}).")
+    known, valid = recent.get("known_products"), recent.get("products")
+    if known and valid is not None:
+        views["quote_coverage"] = (
+            f"{valid} of {known} recently observed products in the category have valid quotes. "
+            "Price statistics cover those valid quotes.")
+    share = recent.get("largest_shop_product_share")
+    if share is not None:
+        views["shop_offer_concentration"] = (
+            f"The shop with the most quoted products accounts for {share:.1%} of products with valid quotes. "
+            "This share measures product count.")
+    return views
+
+
+def market_analysis(market):
+    """Interpret every available market statistic, independently of competitor selection."""
+    analysis = {"source": "derived_analysis"}
+    views = market_comparisons(market)
+    if views:
+        analysis["market_overview"] = views
+    position = quote_comparison(market)
+    if position:
+        analysis["price_position"] = position
+    return analysis
+
+
 def context_view(position):
     """Project platform statistics onto the fields an ordinary seller is allowed to see."""
     result = {k: deepcopy(position[k]) for k in (
@@ -202,10 +275,10 @@ def load_market_context(context, data, *, simulation=None, simulation_cache=None
             visible["simulation"] = simulation_position(
                 simulation, item, cache=simulation_cache, decision_only=True,
             )
+        visible["analysis"] = market_analysis(visible)
         if position.get("category_ids"):
             visible["competitor_examples"] = competitor_examples(
                 data, seller, item, cutoff, start, embedder=history_embedder, simulation=simulation,
-                market={k: visible[k] for k in ("window", "recent", "simulation") if k in visible},
                 own_quote={k: products[item][k] for k in ("last_observed_price_raw",
                     "last_observed_time_index", "price_status") if k in products[item]},
             )

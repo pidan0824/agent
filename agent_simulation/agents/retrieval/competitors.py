@@ -232,7 +232,7 @@ def rank_competitors(focal, candidates, cutoff, *, embedder=DEFAULT_HISTORY_ENCO
 
 
 def competitor_examples(data, seller, item, cutoff, start, *, connection=None,
-                        embedder=DEFAULT_HISTORY_ENCODER, simulation=None, include_purchases=False, market=None, own_quote=None):
+                        embedder=DEFAULT_HISTORY_ENCODER, simulation=None, include_purchases=False, own_quote=None):
     from agent_simulation.agents.context import context_model
 
     focal = data.product(item, cutoff)
@@ -283,7 +283,7 @@ def competitor_examples(data, seller, item, cutoff, start, *, connection=None,
             if active is not None:
                 public_focal["simulation_price_raw"] = active["price_raw"]
         public_cards = [{k: v for k, v in card.items() if k != "purchase_records"} for card in cards]
-        selected_cards, analysis = model.competitors(public_focal, public_cards, market)
+        selected_cards, analysis = model.competitors(public_focal, public_cards)
         originals = {card["item_id"]: card for card in cards}
         result["products"] = [originals[card["item_id"]] for card in selected_cards]
         result["analysis"] = analysis

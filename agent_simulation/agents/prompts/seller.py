@@ -51,17 +51,15 @@ def seller_messages(state, target=None, *, system=SELLER_SYSTEM, rules=SELLER_AN
     from agent_simulation.agents.context import context_model
     model = context_model()
     if model is not None:
-        # Summarize only historical evidence; original statistics and current quotes stay intact.
+        # Own price runs are already compact facts; only long retrieved passages need a summary.
         history = visible["history"]
         cited = {ref for memory in history.get("long_term_memory", ())
                  for ref in memory["supporting_evidence_refs"]}
         similar = history["similar_evidence"]
-        records = [{"scope": "price_changes", "record": record} for record in history["price_changes"]]
-        records.extend({"scope": "similar_evidence", "record": record}
-                       for record in similar if record["evidence_ref"] not in cited)
-        summary = model.summarize(records, scope="Seller past price changes and retrieved business history")
+        records = [record for record in similar if record["evidence_ref"] not in cited]
+        summary = model.summarize(records, scope="Seller retrieved business history")
         if summary is not None:
-            history.update(price_changes=[], summary=summary,
+            history.update(summary=summary,
                            similar_evidence=[record for record in similar if record["evidence_ref"] in cited])
     content = encode_input(visible)
     note = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE

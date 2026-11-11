@@ -201,7 +201,7 @@ class ContextSummaryTests(unittest.TestCase):
         self.assertTrue(all(value == recent[0] for value in recent))
         self.assertEqual(sum(sample.get("batching", {}).get("request_weight", 0) for sample in samples), 1.)
 
-    def model(self, reply, threshold=1):
+    def model(self, reply, threshold=16):
         from agent_simulation.agents.context import ContextModel
         from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
         client = ScriptedModel([answer(reply), answer(reply)])
@@ -328,8 +328,10 @@ class ContextSummaryTests(unittest.TestCase):
         self.assertEqual(state, before)
         self.assertEqual(view['current_state']['products'][0]['business_summary'],
                          before['owned_products'][0]['business_summary'])
-        self.assertEqual(view['history']['summary']['source'], 'model_summary')
-        self.assertEqual(len(client.requests), 1)
+        from agent_simulation.agents.context.pricing_evidence import project_seller
+        self.assertEqual(view['history']['price_changes'], project_seller(before)[0]['history']['price_changes'])
+        self.assertNotIn('summary', view['history'])
+        self.assertEqual(len(client.requests), 0)
         self.assertNotIn('recent_summary', view['current_state']['products'][0])
 
     def test_long_retrieved_history_does_not_replace_short_recent_history(self):
@@ -378,3 +380,10 @@ class ContextSummaryTests(unittest.TestCase):
         self.assertEqual([r["evidence_ref"] for r in s["history"]["similar_evidence"]], ["H2"])
         self.assertEqual(s["history"]["long_term_memory"][0]["supporting_evidence_refs"], ["H2"])
         self.assertIn("summary", s["history"])
+
+    def test_oversized_single_summary_is_not_silently_used(self):
+        from agent_simulation.inference.requests import ContextCapacityError
+        model, client = self.model({"summary": "x" * 200}, threshold=16)
+        with self.assertRaisesRegex(ContextCapacityError, "summary exceeds"):
+            model.summarize([{"query": "long history " * 100}], scope="Customer recent history")
+        self.assertEqual(len(client.requests), 1)

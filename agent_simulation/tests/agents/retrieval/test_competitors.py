@@ -268,7 +268,7 @@ class CompetitorStabilityTests(unittest.TestCase):
 class ModelCompetitorTests(unittest.TestCase):
 
     def test_quote_comparison_distinguishes_old_category_and_brand_references(self):
-        from agent_simulation.agents.context import quote_comparison, market_comparisons
+        from agent_simulation.agents.context.market import quote_comparison, market_comparisons
         market = {"window": {"start_inclusive": 100}, "recent": {
             "own_quote": {"price_raw": 3980, "observation_index": 90, "price_band": "above_p75"},
             "p25_price": 1099.25, "p75_price": 3867.5, "max_price": 28310,
@@ -308,10 +308,7 @@ class ModelCompetitorTests(unittest.TestCase):
             client = ScriptedModel([answer(result)])
             client.tokenizer = TokenizerFixture()
             model = ContextModel('fixture', competitor_candidates=5, client=client)
-            market = {"window": {"start_inclusive": 0, "end_exclusive": 10},
-                      "recent": {"products": 5, "p25_price": 20, "p75_price": 50, "max_price": 70,
-                                 "own_quote": {"price_raw": 30, "price_band": "p25_to_p75"}}}
-            selected, analysis = model.competitors(focal, candidates, market)
+            selected, analysis = model.competitors(focal, candidates)
             self.assertEqual([p['item_id'] for p in selected], ids)
             self.assertEqual(analysis['candidates_considered'], 5)
             self.assertEqual(analysis['selected_count'], len(ids))
@@ -322,10 +319,6 @@ class ModelCompetitorTests(unittest.TestCase):
             payload = json.loads(client.requests[0]['messages'][1]['content'])
             self.assertIn('$table', payload['candidates'])
             self.assertNotIn('market', unpack(payload))
-            self.assertEqual(analysis['market_overview'],
-                         'The middle half of category quotes ranges from 20 to 50. '
-                         'The highest quote (70) is 1.40 times the 75th percentile.')
-            self.assertIn('within the middle half of category quotes [20, 50]', analysis['price_position'])
             self.assertEqual(unpack(payload)['candidates'], candidates[:5])
             self.assertEqual(len(client.requests), 1)
             from agent_simulation.inference.local.qwen import action_parser
@@ -361,3 +354,54 @@ class ModelCompetitorTests(unittest.TestCase):
         client.tokenizer = TokenizerFixture()
         selected, _ = ContextModel("fixture", client=client).competitors(focal, [other_kit, single])
         self.assertEqual(selected, [other_kit])
+
+    def test_market_analysis_keeps_all_views_without_competitors_or_model(self):
+        from agent_simulation.agents.context.market import load_market_context
+        from agent_simulation.agents.context.pricing_evidence import project_seller
+        from agent_simulation.tests.agents.test_seller_evidence import state
+        ctx = state()
+        cutoff = ctx["history_cutoff_exclusive"]
+        stats = {"products": 5, "known_products": 8, "largest_shop_product_share": .4,
+                 "same_brand": {"median": 40},
+                 "own_quote": {"price_raw": 110, "observation_index": 3, "price_band": "above_p75"}}
+        position = {"category_ids": [1, 2, 3],
+                    "window": {"start_inclusive": 0, "end_exclusive": cutoff},
+                    "recent_price_scope": stats,
+                    "price_raw": {"median": 30, "p25": 20, "p75": 50, "max": 70}}
+        with patch("agent_simulation.agents.context.market.shop_period", return_value={"end_exclusive": cutoff}), \
+             patch("agent_simulation.agents.context.market.iter_decision_positions", return_value=[(1, position)]), \
+             patch("agent_simulation.agents.context.market.competitor_examples", return_value={"products": []}):
+            load_market_context(ctx, None, history_embedder=None)
+        view, _ = project_seller(ctx, include_audit=False)
+        market = view["external_reference"][0]
+        self.assertEqual(market["competitors"], [])
+        self.assertEqual(set(market["market_analysis"]["market_overview"]), {
+            "middle_and_upper_end", "brand_and_category", "quote_coverage", "shop_offer_concentration"})
+        self.assertIn("above", market["market_analysis"]["price_position"])
+        self.assertEqual(market["observed_market"]["known_products"], 8)
+
+    def test_empty_candidates_do_not_claim_model_summary(self):
+        from agent_simulation.agents.context import ContextModel
+        from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture
+        client = ScriptedModel([])
+        client.tokenizer = TokenizerFixture()
+        products, analysis = ContextModel("fixture", client=client).competitors({}, [])
+        self.assertEqual(products, [])
+        self.assertEqual(client.requests, [])
+        self.assertEqual(analysis["source"], "derived_analysis")
+
+    def test_remote_context_requests_can_overlap(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from agent_simulation.agents.context import ContextModel
+        from agent_simulation.tests.fixtures import TokenizerFixture
+        gate = Barrier(2)
+        class Client:
+            tokenizer = TokenizerFixture()
+            def complete(self, request, *, call_id):
+                gate.wait(timeout=5)
+                return {"content": '{"selected_items":[]}'}
+        model = ContextModel("fixture", url="http://fixture/v1", client=Client())
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: model.competitors(product(1, 10), [product(2, 20)]), range(2)))
+        self.assertEqual([selected for selected, _ in results], [[], []])

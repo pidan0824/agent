@@ -34,67 +34,6 @@ def _context_model(model, url, device, history_tokens, competitor_candidates=Non
                         competitor_candidates=competitor_candidates)
 
 
-def quote_comparison(market):
-    """Describe existing quote statistics without querying or changing the source."""
-    recent = (market or {}).get("recent", {})
-    own = recent.get("own_quote", {})
-    price = own.get("price_raw")
-    if price is None:
-        return ""
-    start = (market or {}).get("window", {}).get("start_inclusive")
-    observed = own.get("observation_index")
-    basis = ("Latest observed quote before the market window" if start is not None and observed is not None and observed < start
-             else "Latest observed quote")
-    parts = [f"{basis}: {price:.15g}"]
-    low, high = recent.get("p25_price"), recent.get("p75_price")
-    where = {"below_p25": "below", "above_p75": "above", "p25_to_p75": "within"}.get(own.get("price_band"))
-    if where is not None and low is not None and high is not None:
-        parts.append(f"It is {where} the middle half of category quotes [{low:.15g}, {high:.15g}]")
-    brand = recent.get("same_brand", {})
-    median = brand.get("median")
-    if median is not None and median > 0:
-        change = 100 * (price / median - 1)
-        brand_name = brand.get("brand_name")
-        brand_label = f"the {brand_name} median" if brand_name else "the same-brand median"
-        median_label = f"{brand_label} ({median:.15g})"
-        if change == 0:
-            parts.append(f"It equals {median_label}")
-        else:
-            direction = "below" if change < 0 else "above"
-            parts.append(f"It is {abs(change):.2f}% {direction} {median_label}")
-    return ". ".join(parts) + "."
-
-
-def market_comparisons(market):
-    """Describe the supplied category quote statistics."""
-    recent = (market or {}).get("recent", {})
-    views = {}
-    low, high = recent.get("p25_price"), recent.get("p75_price")
-    maximum = recent.get("max_price")
-    if recent.get("products", 0) >= 2 and low is not None and high is not None:
-        text = f"The middle half of category quotes ranges from {low:.15g} to {high:.15g}"
-        if maximum is not None and high > 0:
-            text += f". The highest quote ({maximum:.15g}) is {maximum / high:.2f} times the 75th percentile"
-        views["middle_and_upper_end"] = text + "."
-    brand_median = recent.get("same_brand", {}).get("median")
-    category_median = recent.get("median_price")
-    if brand_median is not None and category_median is not None and category_median > 0:
-        views["brand_and_category"] = (
-            f"The same-brand median ({brand_median:.15g}) is "
-            f"{brand_median / category_median:.2f} times the category median ({category_median:.15g}).")
-    known, valid = recent.get("known_products"), recent.get("products")
-    if known and valid is not None:
-        views["quote_coverage"] = (
-            f"{valid} of {known} recently observed products in the category have valid quotes. "
-            "Price statistics cover those valid quotes.")
-    share = recent.get("largest_shop_product_share")
-    if share is not None:
-        views["shop_offer_concentration"] = (
-            f"The shop with the most quoted products accounts for {share:.1%} of products with valid quotes. "
-            "This share measures product count.")
-    return views
-
-
 class ContextModel:
     """One lazy model for competitor selection and history compression; no result cache."""
 
@@ -134,6 +73,9 @@ class ContextModel:
                     from agent_simulation.inference.local.qwen import QwenLocal
                     self.client = QwenLocal(self.model, revision="main", device=self.device,
                         dtype="bfloat16", max_new_tokens=1536, prefix_cache_entries=0)
+            if not self.url:
+                reply = self.client.complete(request, call_id="context")
+        if self.url:
             reply = self.client.complete(request, call_id="context")
         return strict_json(reply["content"])
 
@@ -153,7 +95,7 @@ class ContextModel:
             "Identify products by item_id= and price_raw= with their original values. "
             "Omit product titles from the summary. Quote any search query verbatim. "
             "If no purchase is recorded, mention this once at the end. Do not infer dislike or future behavior. "
-            "Keep key time boundaries and item IDs. Preserve recorded counts and do not infer totals. "
+            "Preserve recorded counts and key time boundaries; do not infer totals. "
             "For grouped input, report only facts from that group without drawing conclusions about the full history. "
             "Return a JSON object with an English summary string. "
         ) + TABLE_NOTE
@@ -183,16 +125,15 @@ class ContextModel:
                 raise ContextCapacityError("One history record exceeds the context model input budget")
         summaries = [self._ask(task, payload, schema)["summary"] for payload in payloads]
         summary = "\n".join(summaries)
-        if len(summaries) > 1 and len(self.tokenizer.encode(summary, add_special_tokens=False)) > self.history_tokens:
-            return None
+        if len(self.tokenizer.encode(summary, add_special_tokens=False)) > self.history_tokens:
+            raise ContextCapacityError("History summary exceeds its token budget")
         return {"source": "model_summary", "text": summary}
 
-    def competitors(self, focal, cards, market=None):
-        """Select public comparisons and interpret the supplied market statistics."""
+    def competitors(self, focal, cards):
+        """Select substitutes from public product descriptions and quotes."""
         if not cards:
-            return [], {"source": "model_summary", "candidates_considered": 0,
+            return [], {"source": "derived_analysis", "candidates_considered": 0,
                         "selected_count": 0, "selected_observed_price_raw_range": None}
-        views = market_comparisons(market)
         task = (
             "Select practical substitutes for the focal product from the ranked candidates. "
             "Judge product type, intended use, compatibility, and important variants together. "
@@ -229,9 +170,4 @@ class ContextModel:
             "selected_count": len(selected),
             "selected_observed_price_raw_range": [min(prices), max(prices)] if prices else None,
         }
-        if views:
-            analysis["market_overview"] = next(iter(views.values()))
-        position = quote_comparison(market)
-        if position:
-            analysis["price_position"] = position
         return selected, analysis

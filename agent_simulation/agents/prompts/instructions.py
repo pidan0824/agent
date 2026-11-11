@@ -34,7 +34,8 @@ SELLER_SYSTEM = 'Task\nYou manage this shop. Use the shop overview, visible prod
 SELLER_EVIDENCE_NOTE = (
     " Price-run counts total the stated observations. Inclusive ranges mark observed points, "
     "not continuous activity or exact change times; gaps imply neither unchanged prices nor zero activity. "
-    "observed_market covers all eligible same-category public quotes. Quantiles weight products equally; "
+    "observed_market covers eligible same-category public quotes in its stated window; competitors are "
+    "a selected subset, not extra market observations. Quantiles weight products equally; "
     "own_quote.percentile is a 0..1 midrank. known_products includes unknown quotes; products counts valid ones. "
     "same_brand is a subset, and largest_shop_product_share is offer concentration, not sales share. "
     "Use original titles to account for differences in size, material, and pack count before comparing quotes. "

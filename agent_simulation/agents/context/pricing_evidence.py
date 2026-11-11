@@ -1,4 +1,4 @@
-"""One decision view for SFT and simulation; full record identities stay in audit."""
+"""Present own facts, past experience and public comparisons without duplicating events."""
 from collections import defaultdict
 from copy import deepcopy
 from agent_simulation.data.common import require
@@ -178,6 +178,8 @@ def project_seller(state, *, include_audit=True):
                 expected=logical if basis['clock']=='simulation_logical_time' else sim_end-1
                 require(basis['as_of']==expected,'Stale/future simulation market')
             entry['simulation_market']={'source':'public_simulation',**deepcopy(m['simulation'])}
+        if 'analysis' in m:
+            entry['market_analysis'] = deepcopy(m['analysis'])
         if 'analysis' in m.get('competitor_examples', {}):
             entry['competitor_analysis'] = deepcopy(m['competitor_examples']['analysis'])
         entry['competitors']=[]
