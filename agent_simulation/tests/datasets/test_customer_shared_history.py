@@ -246,6 +246,29 @@ class ContextSummaryTests(unittest.TestCase):
         self.assertEqual(shown, before)
         self.assertEqual(state, before)
 
+    def test_background_title_sharing_avoids_unnecessary_summary(self):
+        import json
+        from agent_simulation.agents.prompts.customer import messages, decode_input, _encoded_history
+        from agent_simulation.agents.prompts.context_format import compact_json
+        products = [{"item_id": i, "item_title": str(i) + "杯子详情" * 100, "price_raw": 100}
+                    for i in range(10)]
+        state = {"profile": {"user_id": 1},
+                 "behavioral_summary": {"item_details": products},
+                 "short_term_memory": {"search_history": [
+                     {"time_index": i, "query": "杯子", "clicked_items": [p], "purchased_items": []}
+                     for i, p in enumerate(products)]}}
+        model, client = self.model({"summary": "unnecessary"})
+        history = {"short_term_memory": state["short_term_memory"]}
+        lengths = [len(model.tokenizer.encode(compact_json({
+            k: json.loads(v) for k, v in _encoded_history(history, background).items()
+        }), add_special_tokens=False)) for background in (None, state["behavioral_summary"])]
+        self.assertLess(lengths[1], lengths[0])
+        model.history_tokens = sum(lengths) // 2
+        with patch("agent_simulation.agents.context.context_model", return_value=model):
+            visible = decode_input(messages(state)[1]["content"])
+        self.assertEqual(client.requests, [])
+        self.assertEqual(visible["short_term_memory"], state["short_term_memory"])
+
     def test_title_sharing_keeps_old_titles_prices_and_background_sequences(self):
         from agent_simulation.agents.prompts.customer import messages, decode_input
         title = "同一商品的完整商品描述" * 20
@@ -366,6 +389,9 @@ class ContextSummaryTests(unittest.TestCase):
         seller = seller_fixture()
         seller["short_term_memory"] = []
         first = seller["retrieved_context"]["history"]["segments"][0]
+        first["item_id"] = 2
+        seller["product_details"].append({"item_id": 2, "item_title": "Other shop product",
+                                           "brand_name": "Example", "category_level3_name": "Cups"})
         second = {**first, "records": [dict(first["records"][0], index=2)]}
         seller["retrieved_context"]["history"]["segments"] = [first, second]
         m = memory(step=2)
@@ -380,6 +406,7 @@ class ContextSummaryTests(unittest.TestCase):
         self.assertEqual([r["evidence_ref"] for r in s["history"]["similar_evidence"]], ["H2"])
         self.assertEqual(s["history"]["long_term_memory"][0]["supporting_evidence_refs"], ["H2"])
         self.assertIn("summary", s["history"])
+        self.assertEqual(s["history"]["similar_evidence"][0]["product"]["item_title"], "Other shop product")
 
     def test_oversized_single_summary_is_not_silently_used(self):
         from agent_simulation.inference.requests import ContextCapacityError

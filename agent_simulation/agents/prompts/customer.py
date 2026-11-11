@@ -207,11 +207,12 @@ def prepare_history(state, *, recent_summary=...):
                if key in ("short_term_memory", "retrieved_context")}
     from agent_simulation.agents.context import context_model
     model = context_model()
+    background = state.get("behavioral_summary")
     if model is not None:
         recent = history.get("short_term_memory", {})
         summary = (model.summarize(recent.get("search_history", []), scope="Customer recent history",
                                   compact={k: json.loads(v) for k, v in
-                                           _encoded_history({"short_term_memory": recent}).items()})
+                                           _encoded_history({"short_term_memory": recent}, background).items()})
                    if recent_summary is ... else recent_summary)
         if summary is not None:
             history["short_term_memory"] = {**recent, "search_history": [], "summary": summary}
@@ -225,10 +226,10 @@ def prepare_history(state, *, recent_summary=...):
             summary = model.summarize(older.get("segments", []), scope="Customer retrieved older history",
                                       compact={k: json.loads(v) for k, v in _encoded_history({
                                           "short_term_memory": {"search_history": []},
-                                          "retrieved_context": {"history": older}}).items()})
+                                          "retrieved_context": {"history": older}}, background).items()})
             if summary is not None:
                 history["retrieved_context"] = {**retrieved, "history": {**older, "segments": [], "summary": summary}}
-    return _encoded_history(history, state.get("behavioral_summary"))
+    return _encoded_history(history, background)
 
 
 def encode_input(state, *, prepared_history=None):

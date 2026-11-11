@@ -59,8 +59,13 @@ def seller_messages(state, target=None, *, system=SELLER_SYSTEM, rules=SELLER_AN
         records = [record for record in similar if record["evidence_ref"] not in cited]
         summary = model.summarize(records, scope="Seller retrieved business history")
         if summary is not None:
-            history.update(summary=summary,
-                           similar_evidence=[record for record in similar if record["evidence_ref"] in cited])
+            kept = [record for record in similar if record["evidence_ref"] in cited]
+            descriptions = {record["item_id"]: record["product"]
+                            for record in similar if "product" in record}
+            for record in kept:
+                if record["item_id"] in descriptions:
+                    record["product"] = descriptions.pop(record["item_id"])
+            history.update(summary=summary, similar_evidence=kept)
     content = encode_input(visible)
     note = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE
     if visible["history"].get("long_term_memory"):
