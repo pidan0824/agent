@@ -13,6 +13,35 @@ from agent_simulation.inference.requests import prepare_request, read_tokens
 from agent_simulation.logs import ModelLog
 
 
+def export_lora(source, output, *, model):
+    """Copy a PEFT adapter for serving; Qwen3.5 keeps its language-model namespace."""
+    import json
+    from pathlib import Path
+    from shutil import copyfile
+    from tempfile import TemporaryDirectory
+    from safetensors.torch import load_file, save_file
+
+    source, output, model = Path(source), Path(output), Path(model)
+    if output.exists():
+        raise FileExistsError(output)
+    config = json.loads((model / 'config.json').read_text())
+    weights = load_file(source / 'adapter_model.safetensors')
+    if config.get('architectures') == ['Qwen3_5ForConditionalGeneration']:
+        original = 'base_model.model.model.layers.'
+        serving = 'base_model.model.model.language_model.layers.'
+        if not weights or not all(key.startswith(original) for key in weights):
+            raise ValueError('Expected a Qwen3.5 text LoRA checkpoint, not an exported serving copy')
+        weights = {serving + key[len(original):]: value for key, value in weights.items()}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=output.parent, prefix='.lora-') as temp:
+        stage = Path(temp) / 'adapter'
+        stage.mkdir()
+        copyfile(source / 'adapter_config.json', stage / 'adapter_config.json')
+        save_file(weights, stage / 'adapter_model.safetensors', metadata={'format': 'pt'})
+        stage.rename(output)
+    return output
+
+
 def _generation_schema(value):
     # The vLLM grammar cannot express uniqueness. finish_reply checks the original schema.
     if isinstance(value, dict):
@@ -111,3 +140,13 @@ def server_client(args, tokenizer):
         customer_stage_models={stage: name for stage in ('query', 'response')
                                if (name := getattr(args, 'customer_' + stage + '_served_model', None))},
         log_path=args.output / 'model_calls.jsonl')
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Export a training LoRA for vLLM serving')
+    parser.add_argument('--model', required=True, help='Base model directory served by vLLM')
+    parser.add_argument('--adapter', required=True, help='Original PEFT checkpoint directory')
+    parser.add_argument('--output', required=True, help='New serving-only adapter directory')
+    args = parser.parse_args()
+    print(export_lora(args.adapter, args.output, model=args.model))

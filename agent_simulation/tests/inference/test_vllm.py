@@ -163,3 +163,55 @@ class VLLMTests(unittest.TestCase):
                     client.complete(reflection, call_id='reflection')
             self.assertTrue(http.is_closed)
             self.assertEqual(sent, ['seller-sft', 'query-base', 'response-sft', 'qwen'])
+
+
+class LoraExportTests(unittest.TestCase):
+    def fixture(self, architecture):
+        import torch
+        from safetensors.torch import save_file
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        source, model = root / 'checkpoint', root / 'model'
+        source.mkdir()
+        model.mkdir()
+        (model / 'config.json').write_text(json.dumps({'architectures': [architecture]}))
+        (source / 'adapter_config.json').write_text(json.dumps({'r': 2, 'lora_alpha': 4}))
+        weights = {'base_model.model.model.layers.3.self_attn.q_proj.lora_A.weight':
+                   torch.arange(8, dtype=torch.float32).reshape(2, 4)}
+        save_file(weights, source / 'adapter_model.safetensors')
+        return source, model, root / 'serving', weights
+
+    def test_qwen35_serving_namespace_preserves_parameters_and_source(self):
+        import torch
+        from safetensors.torch import load_file
+        from agent_simulation.inference.vllm import export_lora
+        source, model, output, weights = self.fixture('Qwen3_5ForConditionalGeneration')
+        before = (source / 'adapter_model.safetensors').read_bytes()
+        export_lora(source, output, model=model)
+        actual = load_file(output / 'adapter_model.safetensors')
+        for key, value in weights.items():
+            mapped = key.replace('model.model.layers.', 'model.model.language_model.layers.')
+            self.assertTrue(torch.equal(actual[mapped], value))
+        self.assertEqual((source / 'adapter_model.safetensors').read_bytes(), before)
+        self.assertEqual((output / 'adapter_config.json').read_bytes(),
+                         (source / 'adapter_config.json').read_bytes())
+        with self.assertRaises(FileExistsError):
+            export_lora(source, output, model=model)
+
+    def test_qwen3_text_model_keeps_original_namespace(self):
+        from safetensors.torch import load_file
+        from agent_simulation.inference.vllm import export_lora
+        source, model, output, weights = self.fixture('Qwen3ForCausalLM')
+        export_lora(source, output, model=model)
+        self.assertEqual(set(load_file(output / 'adapter_model.safetensors')), set(weights))
+
+    def test_unexpected_qwen35_namespace_is_not_silently_exported(self):
+        from safetensors.torch import save_file
+        from agent_simulation.inference.vllm import export_lora
+        source, model, output, weights = self.fixture('Qwen3_5ForConditionalGeneration')
+        save_file({'wrong.layer.lora_A.weight': next(iter(weights.values()))},
+                  source / 'adapter_model.safetensors')
+        with self.assertRaises(ValueError):
+            export_lora(source, output, model=model)
+        self.assertFalse(output.exists())

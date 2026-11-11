@@ -97,14 +97,20 @@ Seller 自身价格段与原始统计保留结构化数值，只有较长的检�
 
 仿真和 `evaluation.micro.behavior_prediction` 均支持 `--inference-backend vllm`。默认仍是 Transformers。vLLM 客户端使用本地匹配 tokenizer 生成原始 chat-template token，经 `/v1/completions` 发送；服务端负责并发调度和前缀缓存。Customer 决策、Seller 报价／等待、反思的 JSON 通过 `structured_outputs` 约束，失败直接记录并抛出，不重试、不切回本地模型。两类后端共享决策输出 schema。
 
-在 GPU 机器上启动支持 `structured_outputs.json` 的 vLLM 服务。若使用训练导出的两个 Agent LoRA，在服务端分别注册它们的名称和路径。
+在 GPU 机器上启动支持 `structured_outputs.json` 的 vLLM 服务。Qwen3.5 的训练入口加载文本模型，vLLM 从完整模型配置加载语言模块，两者的 LoRA 层名前缀不同。先导出供服务使用的副本，训练 checkpoint 和优化器状态保持原样：
 
 ```bash
-vllm serve /path/to/Qwen2.5-3B-Instruct --served-model-name qwen \
+python -m agent_simulation.inference.vllm --model /path/to/Qwen3.5-9B \
+  --adapter /path/to/customer/checkpoint --output /path/to/serving/customer
+python -m agent_simulation.inference.vllm --model /path/to/Qwen3.5-9B \
+  --adapter /path/to/seller/checkpoint --output /path/to/serving/seller
+vllm serve /path/to/Qwen3.5-9B --served-model-name qwen --language-model-only \
   --max-model-len 32768 --enable-prefix-caching --generation-config vllm \
   --enable-lora --max-lora-rank 64 --max-loras 2 \
-  --lora-modules customer-sft=/path/to/customer/adapter seller-sft=/path/to/seller/adapter
+  --lora-modules customer-sft=/path/to/serving/customer seller-sft=/path/to/serving/seller
 ```
+
+`/v1/models` 中存在 LoRA 名称，只能证明名称已注册。首次评估前，用相同真实输入比较底座和各 LoRA 的 next-token logprobs，确认权重实际影响输出；不把这种探测加入每次决策。导出的副本仅用于 vLLM，续训和 Transformers 推理继续使用原 checkpoint。Qwen2.5／Qwen3 的普通文本模型导出时不改层名。
 
 在现有仿真命令上增加 `--inference-backend vllm --vllm-url http://127.0.0.1:8000/v1 --served-model qwen --customer-served-model customer-sft --seller-served-model seller-sft`。两个角色用各自的 SFT 模型决策。`--served-model` 指定反思和未单独配置角色时使用的默认模型。所有名称都以服务的 `/v1/models` 为准。`--model` 指向与服务器相同 revision 的本地 tokenizer 目录，行为评估使用其已有 `--tokenizer`。需要认证时设置 `VLLM_API_KEY`，不写入模型日志。
 
