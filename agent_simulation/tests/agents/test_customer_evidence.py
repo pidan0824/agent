@@ -84,6 +84,7 @@ class CustomerEvidenceTests(unittest.TestCase):
                                   category_level3_name="水杯", category_level3_id=8,
                                   seller_id=20, category_level1_name="日用") for i in (1, 2)],
         }
+        original["behavioral_summary"]["item_details"][1]["category_level3_name"] = "UNKNOWN"
         original.update(query="杯子", displayed_items=[
             {"item_id": i, "price_raw": 100 + i} for i in range(1, 69)
         ])
@@ -103,6 +104,8 @@ class CustomerEvidenceTests(unittest.TestCase):
                 self.assertEqual(background[field], original["behavioral_summary"][field])
             for item in background["item_details"]:
                 self.assertEqual(set(item), {"item_id", "item_title", "brand_name", "category_level3_name"})
+            titles = [p["item_title"] for p in background["item_details"]]
+            self.assertEqual(titles, [None, "杯子"] if row["sample_id"].startswith("query") else ["杯子", "杯子"])
             self.assertEqual(row["messages"][1], customer_decision_messages(
                 row["input"], response=row["sample_id"].startswith("response"))[1])
         for field in response["target"]:

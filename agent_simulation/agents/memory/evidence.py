@@ -17,14 +17,27 @@ QUERY_TOOLS = {
     "read_business_report",
     "query_displayed_products",
 }
-EVIDENCE_KINDS = QUERY_TOOLS | {"historical_segment", "market_position", "public_products"}
+EVIDENCE_KINDS = QUERY_TOOLS | {
+    "historical_segment", "market_position", "public_products",
+    "behavioral_summary", "business_summary", "observed_shop_period",
+}
 
 def context_parts(role, context):
-    """Capture factual retrieval and market information, never generated summaries."""
+    """Capture observed background, business statistics and retrieval facts."""
     for segment in context.get("retrieved_context", {}).get("history", {}).get("segments", []):
         yield "historical_segment", segment
+    if role == "customer" and context.get("behavioral_summary") is not None:
+        yield "behavioral_summary", context["behavioral_summary"]
     if role == "seller":
+        if "observed_shop_period" in context:
+            yield "observed_shop_period", context["observed_shop_period"]
         for product in context.get("owned_products", []):
+            if "business_summary" in product:
+                yield "business_summary", {
+                    "item_id": product["item_id"],
+                    "item_title": product.get("item_title"),
+                    **product["business_summary"],
+                }
             if "market_position" in product:
                 yield "market_position", {
                     "item_id": product["item_id"],
@@ -119,6 +132,9 @@ def retrieval_text(entry):
         "exposure_records",
         "click_records",
         "purchase_records",
+        "exposures",
+        "clicks",
+        "orders",
         "median",
         "own_value",
         "own_percentile",

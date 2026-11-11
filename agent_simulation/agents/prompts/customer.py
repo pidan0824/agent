@@ -281,13 +281,15 @@ def messages(
     prepared_history=None,
 ):
     from agent_simulation.agents.context.shopping import project_customer
-    visible = project_customer(state)
+    visible = project_customer(state, query=not response)
     content = encode_input(visible, prepared_history=prepared_history)
     notes = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE
     if '"history_encoding":' in content:
         notes += " " + HISTORY_NOTE
     if '"title_ref"' in content:
         notes += " " + TITLE_NOTE
+    if not response and visible.get("behavioral_summary"):
+        notes += " Background titles may be omitted; use their brands and categories together with the shopping history."
     if visible.get("long_term_memory"):
         notes += " " + MEMORY_NOTE
     if '"display_categories":' in content:

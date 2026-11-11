@@ -34,6 +34,43 @@ class MemoryEvidenceTests(MarketFixture, unittest.TestCase):
         return self.runtime.long_term_memory.update("seller", 10, generate=callback, model_id="test-only",
                                           embedder=lambda text: [1., 0.], encoder_id="test-only")
 
+    def test_observed_statistics_reach_reflection_without_becoming_events(self):
+        self.seed(10)
+        state = self.runtime.snapshot()
+        records = self.data.records
+        def with_statistics(item):
+            return [{**row, "item_shows_30d_hist": 100, "item_clicks_30d_hist": 12,
+                     "item_orders_30d_hist": 3} for row in records(item)]
+        with patch.object(self.data, "records", side_effect=with_statistics):
+            _, facts = self.runtime.inputs.reflection_evidence("seller", 10, state=state)
+        self.runtime.long_term_memory.observe_context("seller", 10, facts, state)
+        store = self.runtime.long_term_memory.evidence
+        self.assertEqual(store.eligible("seller:10", 9, 0), [])
+        entries = store.eligible("seller:10", 10, 0)
+        summaries = [e for e in entries if e["kind"] == "business_summary"]
+        self.assertTrue(summaries)
+        item = next(e for e in summaries if e["content"]["item_id"] == 1)
+        self.assertEqual(item["content"]["statistics_30d"],
+                         {"exposures": 100, "clicks": 12, "orders": 3})
+        self.assertLess(item["content"]["observed_time_index"], self.data.cutoff)
+        self.assertTrue(any(e["kind"] == "observed_shop_period" for e in entries))
+        self.assertEqual(state, self.runtime.snapshot())
+
+    def test_customer_background_is_available_as_a_separate_memory_source(self):
+        self.runtime.catalog = ProfileCatalogFixture(self.runtime)
+        summary = {"observed_time_index": 1, "statistics_30d": {"orders": 2}}
+        read = self.runtime.catalog.customer_history
+        def with_summary(*args, **kwargs):
+            return {**read(*args, **kwargs), "behavioral_summary": summary}
+        self.runtime.catalog.customer_history = with_summary
+        state = self.runtime.snapshot()
+        _, facts = self.runtime.inputs.reflection_evidence("customer", 7, state=state)
+        self.runtime.long_term_memory.observe_context("customer", 7, facts, state)
+        entries = self.runtime.long_term_memory.evidence.eligible("customer:7", 100, 0)
+        background = next(e for e in entries if e["kind"] == "behavioral_summary")
+        self.assertEqual(background["content"], summary)
+        self.assertEqual(state, self.runtime.snapshot())
+
     def test_customer_observed_snapshots_are_filtered_at_all_memory_entry_points(self):
         state = self.runtime.snapshot()
         event = state["customers"]["7"]["observed_history"][0]

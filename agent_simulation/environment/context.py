@@ -207,25 +207,17 @@ class AgentContextBuilder:
         actor_key(state, role, actor)
         if role == "customer":
             require(self.runtime.catalog is not None, "Customer memory needs a verified profile")
-            profile, history, _ = self._prepare_customer_history(actor, state)
+            profile, history, summary = self._prepare_customer_history(actor, state)
             facts = history.retrieve(embedder=self._history_encoder(), diagnostics=False)
-            return profile, {"retrieved_context": {"history": facts}}
+            return profile, {"retrieved_context": {"history": facts}, "behavioral_summary": summary}
 
         from agent_simulation.agents.context.market import load_market_context
 
-        owned, observed, feedback = self._seller_records(actor, state)
-        history = self._seller_history_index(actor, state, observed, feedback)
+        context, _, history = self._seller_overview(actor, state, retrieve=True)
+        owned = [product["item_id"] for product in context["owned_products"]]
         profile = {
             "seller_id": actor,
             "products": [state["products"][str(item)] for item in owned],
-        }
-        context = {
-            "profile": {"seller_id": actor},
-            "history_cutoff_exclusive": self.runtime.data.cutoff,
-            "owned_products": [
-                {"item_id": item, "item_title": history.profiles[item]["item_title"]}
-                for item in sorted(owned)
-            ],
         }
         load_market_context(context, self.runtime.data, simulation=state,
                             history_embedder=self._history_encoder())

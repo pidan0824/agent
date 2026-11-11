@@ -72,7 +72,7 @@ def displayed_details(displayed, item_ids):
     return {"products": [model_product(by_id[item]) for item in item_ids]}
 
 
-def project_customer(state):
+def project_customer(state, *, query=False):
     """Keep event boundaries and clocks while omitting internal search metadata."""
     require(isinstance(state, dict), "Customer context must be an object")
     profile = state.get("profile", {})
@@ -107,6 +107,11 @@ def project_customer(state):
                 for item in background["item_details"]
             ],
         }
+    if query and background is not None:
+        # Query needs background interests; full titles remain in facts and the Response view.
+        for item in visible["behavioral_summary"]["item_details"]:
+            if item.get("category_level3_name") not in (None, "", "UNKNOWN"):
+                item["item_title"] = None
     displayed = visible.get("displayed_items", ())
     if any("price_provenance" in item for item in displayed):
         visible["displayed_items"] = [
