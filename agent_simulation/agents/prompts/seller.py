@@ -63,15 +63,6 @@ def seller_messages(state, target=None, *, system=SELLER_SYSTEM, rules=SELLER_AN
         if summary is not None:
             history.update(price_changes=[], summary=summary,
                            similar_evidence=[record for record in similar if record["evidence_ref"] in cited])
-        cited.update(record["recent_evidence_ref"] for record in history["price_changes"]
-                     if "recent_evidence_ref" in record)
-        for product in visible["current_state"]["products"]:
-            recent = product["recent"]
-            summary = model.summarize([record for record in recent if record["evidence_ref"] not in cited],
-                                      scope=f"Seller recent history for item {product['item_id']}")
-            if summary is not None:
-                product.update(recent=[record for record in recent if record["evidence_ref"] in cited],
-                               recent_summary=summary)
     content = encode_input(visible)
     note = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE
     if visible["history"].get("long_term_memory"):

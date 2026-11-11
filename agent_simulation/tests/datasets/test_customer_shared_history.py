@@ -208,6 +208,20 @@ class ContextSummaryTests(unittest.TestCase):
         client.tokenizer = TokenizerFixture()
         return ContextModel("fixture", history_tokens=threshold, client=client), client
 
+    def test_history_groups_fit_complete_requests_and_keep_event_order(self):
+        import json
+        from agent_simulation.inference.requests import ContextCapacityError
+
+        model, client = self.model({"summary": "Recorded quote changed."}, threshold=1024)
+        records = [{"time_index": i, "query": "x" * 8000} for i in (3, 7)]
+        with patch("agent_simulation.agents.context.input_token_budget", return_value=3500):
+            model.summarize(records, scope="history")
+            groups = [json.loads(r["messages"][1]["content"]) for r in client.requests]
+            self.assertEqual([r["records"] for r in groups], [[records[0]], [records[1]]])
+            with self.assertRaises(ContextCapacityError):
+                model.summarize([{"query": "x" * 20000}], scope="history")
+            self.assertEqual(len(client.requests), 2)
+
     def test_compact_history_avoids_a_model_call_and_preserves_every_event(self):
         import json
         from agent_simulation.agents.prompts.customer import messages, decode_input, _encoded_history
@@ -309,14 +323,14 @@ class ContextSummaryTests(unittest.TestCase):
             'statistics_30d': {'exposures': 100, 'clicks': 7, 'orders': 2}}
         before = deepcopy(state)
         model, client = self.model({'summary': '旧报价与经历'})
-        # The stub returns the same summary independently for older and recent histories.
-        client.replies = iter([{'role': 'assistant', 'content': '{"summary":"旧报价与经历"}'}] * 4)
         with patch('agent_simulation.agents.context.context_model', return_value=model):
             view = decode_input(seller_messages(state)[1]['content'])
         self.assertEqual(state, before)
         self.assertEqual(view['current_state']['products'][0]['business_summary'],
                          before['owned_products'][0]['business_summary'])
         self.assertEqual(view['history']['summary']['source'], 'model_summary')
+        self.assertEqual(len(client.requests), 1)
+        self.assertNotIn('recent_summary', view['current_state']['products'][0])
 
     def test_long_retrieved_history_does_not_replace_short_recent_history(self):
         import json

@@ -1,14 +1,12 @@
 """Prepare concise model-visible evidence while retaining the original facts."""
 
 from functools import lru_cache
-import json
 import math
 import os
 from threading import Lock
-from unicodedata import normalize
 
 from agent_simulation.agents.schemas import strict_json
-from agent_simulation.agents.prompts.context_format import pack
+from agent_simulation.agents.prompts.context_format import compact_json, pack
 from agent_simulation.inference.requests import ContextCapacityError, load_tokenizer, prepare_request, input_token_budget, prompt_tokens
 
 
@@ -36,10 +34,6 @@ def _context_model(model, url, device, history_tokens, competitor_candidates=Non
                         competitor_candidates=competitor_candidates)
 
 
-def _json(value):
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-
-
 def quote_comparison(market):
     """Describe existing quote statistics without querying or changing the source."""
     recent = (market or {}).get("recent", {})
@@ -54,7 +48,7 @@ def quote_comparison(market):
     parts = [f"{basis}: {price:.15g}"]
     low, high = recent.get("p25_price"), recent.get("p75_price")
     where = {"below_p25": "below", "above_p75": "above", "p25_to_p75": "within"}.get(own.get("price_band"))
-    if where is not None:
+    if where is not None and low is not None and high is not None:
         parts.append(f"It is {where} the middle half of category quotes [{low:.15g}, {high:.15g}]")
     brand = recent.get("same_brand", {})
     median = brand.get("median")
@@ -72,7 +66,7 @@ def quote_comparison(market):
 
 
 def market_comparisons(market):
-    """Offer factual comparison angles from the already prepared category statistics."""
+    """Describe the supplied category quote statistics."""
     recent = (market or {}).get("recent", {})
     views = {}
     low, high = recent.get("p25_price"), recent.get("p75_price")
@@ -126,7 +120,7 @@ class ContextModel:
             "evidence of reputation, quality, market share or competitive strength. Do not infer "
             "customer segments or demand from a price. Write any narrative in English. "
             "Copy any quoted product titles or search queries verbatim, without translating them. " + task)},
-            {"role": "user", "content": _json(value)}]
+            {"role": "user", "content": compact_json(value)}]
 
     def _ask(self, task, value, schema):
         request, _ = prepare_request(self._messages(task, value), [], self.tokenizer, max_output_tokens=1536)
@@ -154,41 +148,44 @@ class ContextModel:
             "For Seller history, retain changes in quotes for the same item and its recorded exposures, clicks, "
             "and purchases within the stated observation window. "
             "Keep observation windows and sources separate. Product descriptions are attributes, not events. "
-            "Merge repeated searches on the same topic. Use up to three points and two representative items "
-            "per example, with at most 400 characters in total. "
+            "Preserve topic changes and repeated price changes in their original order. Use concise points "
+            "with at most 400 characters in total. "
             "Identify products by item_id= and price_raw= with their original values. "
             "Omit product titles from the summary. Quote any search query verbatim. "
             "If no purchase is recorded, mention this once at the end. Do not infer dislike or future behavior. "
-            "Keep key time boundaries and item IDs. Combine repeated events without inventing statistics. "
+            "Keep key time boundaries and item IDs. Preserve recorded counts and do not infer totals. "
             "For grouped input, report only facts from that group without drawing conclusions about the full history. "
             "Return a JSON object with an English summary string. "
         ) + TABLE_NOTE
-        schema = {"type": "object", "properties": {"summary": {"type": "string", "minLength": 1, "maxLength": 500}},
+        schema = {"type": "object", "properties": {"summary": {"type": "string", "minLength": 1, "maxLength": 400}},
                   "required": ["summary"], "additionalProperties": False}
-        value = {"scope": scope, "records": pack(records, table_paths={
+        table_paths = {
             ("clicked_items",), ("purchased_items",),
             ("records", "clicked_items"), ("records", "purchased_items"),
-            ("record", "runs"), ("record", "price_runs"), ("price_runs",)})}
-        measured = compact if compact is not None else value["records"]
-        if len(self.tokenizer.encode(_json(measured), add_special_tokens=False)) <= self.history_tokens:
+            ("record", "runs"), ("record", "price_runs"), ("price_runs",)}
+        packed = pack(records, table_paths=table_paths)
+        measured = compact if compact is not None else packed
+        if len(self.tokenizer.encode(compact_json(measured), add_special_tokens=False)) <= self.history_tokens:
             return None
-        if len(prompt_tokens(self._messages(task, value), [], self.tokenizer)) <= input_token_budget(1536):
-            summaries = [self._ask(task, value, schema)["summary"]]
-        else:
-            # Only oversized inputs need multiple calls; no second-pass summary.
-            groups, group, count = [], [], 0
-            for record in records:
-                size = len(self.tokenizer.encode(_json(record), add_special_tokens=False))
-                if group and count + size > 8192:
-                    groups.append(group)
-                    group, count = [], 0
-                group.append(record)
-                count += size
-            if group:
-                groups.append(group)
-            summaries = [self._ask(task, {"scope": scope, "group": i + 1, "records": group},
-                                   schema)["summary"] for i, group in enumerate(groups)]
-        return {"source": "model_summary", "text": "\n".join(summaries)}
+        groups = [(records, packed)]
+        payloads = []
+        while groups:
+            group, packed_group = groups.pop()
+            payload = {"scope": scope, "group": len(payloads) + 1,
+                       "records": packed_group}
+            if len(prompt_tokens(self._messages(task, payload), [], self.tokenizer)) <= input_token_budget(1536):
+                payloads.append(payload)
+            elif len(group) > 1:
+                middle = len(group) // 2
+                for part in (group[middle:], group[:middle]):
+                    groups.append((part, pack(part, table_paths=table_paths)))
+            else:
+                raise ContextCapacityError("One history record exceeds the context model input budget")
+        summaries = [self._ask(task, payload, schema)["summary"] for payload in payloads]
+        summary = "\n".join(summaries)
+        if len(summaries) > 1 and len(self.tokenizer.encode(summary, add_special_tokens=False)) > self.history_tokens:
+            return None
+        return {"source": "model_summary", "text": summary}
 
     def competitors(self, focal, cards, market=None):
         """Select public comparisons and interpret the supplied market statistics."""
@@ -196,44 +193,16 @@ class ContextModel:
             return [], {"source": "model_summary", "candidates_considered": 0,
                         "selected_count": 0, "selected_observed_price_raw_range": None}
         views = market_comparisons(market)
-        def title_key(text):
-            return "".join(normalize("NFKC", text).casefold().split())
-
-        focal_title = title_key(focal.get("item_title") or "")
-        kit_markers = ("套装", "套盒", "件套", "套组", "组合装")
-        focal_is_kit = any(marker in focal_title for marker in kit_markers)
-        selection = (
-            "Find direct substitutes for the same specific purchase. First return match_terms, one to three "
-            "short fragments copied from the focal title. Use separate fragments for the product type and "
-            "essential variants. Pick the shortest useful wording so different word order still matches. "
-            "Ignore brand, promotional wording, and delivery speed unless they define compatibility. "
-            "Include the exact pack count, device model, or intended wearer when it determines the purchase. "
-            "For example, a four-piece set requires the four-piece wording; a single item or unspecified set "
-            "does not qualify. A wall decoration cannot substitute for a door-handle decoration. "
-            "For a recharge, separate operator, face value, and service type. Use the core operator name "
-            "移动, 联通, or 电信 when present, omitting prefixes like 中国 or 全国. "
-            "For example, 中国电信 50 元话费充值 uses 电信, 50 元, and 话费. "
-            "For clothing, use a short wearer marker and product type, such as 男 and 衬衫, "
-            "instead of a long phrase or full title. "
-            "Next return selected_items. Include only IDs for the same product type with all match_terms in "
-            "their titles. Exclude incompatible items and repeated listings. Return [] if none qualifies. "
-        )
-        if focal_is_kit:
-            selection = (
-                "Select kits serving the same concrete use. For match_terms, copy one core product noun "
-                "from the focal title, such as 粉扑 or 梳. Size, brand, and piece count can differ. "
-                "Include only kits with that product and the same use. A single item, accessory, "
-                "or product used in a different way does not qualify. Skip duplicates. "
-                "Return the qualifying IDs in selected_items, or [] when no kit is comparable. "
-            )
-        task = selection + (
-            "For market_overview, choose the most useful key in market_comparisons, or an empty string if none applies. "
-            "Use the supplied price_position_facts and market comparisons as given. "
+        task = (
+            "Select practical substitutes for the focal product from the ranked candidates. "
+            "Judge product type, intended use, compatibility, and important variants together. "
+            "Different wording, brands, sizes, and pack counts can still be comparable. "
+            "Exclude incompatible uses, accessories that cannot replace the product, and duplicate listings. "
+            "Return as many comparable IDs as the evidence supports, or [] if none is comparable. "
             "In each $table, columns defines row positions and shared applies to every row. Return only JSON."
         )
         offered = list(cards[:self.competitor_candidates])
-        payload = {"focal": focal, "market": market, "market_comparisons": views,
-                   "price_position_facts": quote_comparison(market)}
+        payload = {"focal": focal}
         budget = input_token_budget(1536)
         while True:
             payload["candidates"] = offered
@@ -244,28 +213,12 @@ class ContextModel:
                 raise ContextCapacityError("One competitor record exceeds the context model input budget")
             offered = offered[:len(offered) // 2]
         schema = {"type": "object", "properties": {
-            "match_terms": {"type": "array", "minItems": 1, "maxItems": 1 if focal_is_kit else 3,
-                            "items": {"type": "string", "minLength": 1, "maxLength": 32}},
             "selected_items": {"type": "array", "uniqueItems": True,
-                "items": {"type": "integer", "enum": [p["item_id"] for p in offered]}},
-            "market_overview": {"type": "string", "enum": [*views, ""]}},
-            "required": ["match_terms", "selected_items", "market_overview"],
-            "additionalProperties": False}
+                "items": {"type": "integer", "enum": [p["item_id"] for p in offered]}}},
+            "required": ["selected_items"], "additionalProperties": False}
         result = self._ask(task, packed, schema)
         by_id = {p["item_id"]: p for p in offered}
-        terms = [title_key(term) for term in result["match_terms"]]
-        selected = []
-        if terms and all(term and term in focal_title for term in terms):
-            # The full carrier name and its common short form identify the same operator.
-            carrier_names = {"中国移动": "移动", "中国联通": "联通", "中国电信": "电信"}
-            terms = [carrier_names.get(term, term) for term in terms]
-            for item in result["selected_items"]:
-                card = by_id[item]
-                title = title_key(card.get("item_title") or "")
-                if focal_is_kit and not any(marker in title for marker in kit_markers):
-                    continue
-                if all(term in title for term in terms):
-                    selected.append(card)
+        selected = [by_id[item] for item in result["selected_items"]]
         prices = [p["reference_price_raw"] for p in selected
                   if p.get("price_status") == "observed"
                   and p.get("reference_price_raw") is not None
@@ -276,8 +229,9 @@ class ContextModel:
             "selected_count": len(selected),
             "selected_observed_price_raw_range": [min(prices), max(prices)] if prices else None,
         }
-        if result["market_overview"]:
-            analysis["market_overview"] = views[result["market_overview"]]
-        if payload["price_position_facts"]:
-            analysis["price_position"] = payload["price_position_facts"]
+        if views:
+            analysis["market_overview"] = next(iter(views.values()))
+        position = quote_comparison(market)
+        if position:
+            analysis["price_position"] = position
         return selected, analysis

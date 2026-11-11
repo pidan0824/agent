@@ -303,12 +303,8 @@ class ModelCompetitorTests(unittest.TestCase):
                            item_title=f"适配ｉＰｈｏｎｅ１５的保护壳，款式{i}") for i in range(2, 8)]
         candidates[4]["item_title"] = "适配iPhone 14的保护壳"
         before = deepcopy(candidates)
-        for terms, proposed, ids in (
-            (["iPhone 15", "保护壳"], [], []),
-            (["iPhone 15", "保护壳"], [2, 3, 4, 5, 6], [2, 3, 4, 5]),
-            (["iPhone 14", "保护壳"], [6], []),
-        ):
-            result = {"match_terms": terms, "selected_items": proposed, "market_overview": "middle_and_upper_end"}
+        for ids in ([], [2, 3, 4, 5]):
+            result = {"selected_items": ids}
             client = ScriptedModel([answer(result)])
             client.tokenizer = TokenizerFixture()
             model = ContextModel('fixture', competitor_candidates=5, client=client)
@@ -325,7 +321,7 @@ class ModelCompetitorTests(unittest.TestCase):
             from agent_simulation.agents.prompts.context_format import unpack
             payload = json.loads(client.requests[0]['messages'][1]['content'])
             self.assertIn('$table', payload['candidates'])
-            self.assertEqual(unpack(payload)['market'], market)
+            self.assertNotIn('market', unpack(payload))
             self.assertEqual(analysis['market_overview'],
                          'The middle half of category quotes ranges from 20 to 50. '
                          'The highest quote (70) is 1.40 times the 75th percentile.')
@@ -342,28 +338,26 @@ class ModelCompetitorTests(unittest.TestCase):
             self.assertEqual(selected, [p for p in candidates if p['item_id'] in ids])
         self.assertEqual(candidates, before)
 
-    def test_short_carrier_name_still_requires_matching_face_value(self):
+    def test_model_selected_carrier_comparison_is_preserved(self):
         from agent_simulation.agents.context import ContextModel
         from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
 
         focal = dict(product(1, 10), item_title="中国移动100元话费充值")
         matching = dict(product(2, 20), item_title="移动话费100元")
         wrong_value = dict(product(3, 30), item_title="移动话费200元")
-        client = ScriptedModel([answer({"match_terms": ["中国移动", "100元", "话费"],
-                                        "selected_items": [2, 3], "market_overview": ""})])
+        client = ScriptedModel([answer({"selected_items": [2]})])
         client.tokenizer = TokenizerFixture()
         selected, _ = ContextModel("fixture", client=client).competitors(focal, [matching, wrong_value])
         self.assertEqual(selected, [matching])
 
-    def test_kit_matches_other_sizes_and_pack_counts_but_not_a_single_item(self):
+    def test_model_selected_kit_comparison_is_preserved(self):
         from agent_simulation.agents.context import ContextModel
         from agent_simulation.tests.fixtures import ScriptedModel, TokenizerFixture, answer
 
         focal = dict(product(1, 10), item_title="XL粉扑四件套")
         other_kit = dict(product(2, 20), item_title="L号粉扑三件套装")
         single = dict(product(3, 30), item_title="大号粉扑单个")
-        client = ScriptedModel([answer({"match_terms": ["粉扑"], "selected_items": [2, 3],
-                                        "market_overview": ""})])
+        client = ScriptedModel([answer({"selected_items": [2]})])
         client.tokenizer = TokenizerFixture()
         selected, _ = ContextModel("fixture", client=client).competitors(focal, [other_kit, single])
         self.assertEqual(selected, [other_kit])
