@@ -181,6 +181,11 @@ def training_identity(args, data_check, eval_split):
     return value
 
 
+def resume_settings(identity):
+    """Compare learning settings independently of checkpoint file retention."""
+    return {key: value for key, value in identity.items() if key != "keep_checkpoints"}
+
+
 def resume_checkpoint(output, requested, *, device="cpu", world_size=1):
     """Select a complete PEFT snapshot with RNG state from every rank."""
     output = output.resolve()
@@ -329,7 +334,7 @@ def train(args):
     if args.resume:
         if adapter is not None:
             identity["init_adapter"] = saved_identity["init_adapter"]
-        if saved_identity != identity:
+        if resume_settings(saved_identity) != resume_settings(identity):
             raise ValueError("Resume data/model/config differs")
         if config["packages"] != packages:
             raise ValueError("Resume package versions differ")

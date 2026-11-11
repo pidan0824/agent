@@ -4,6 +4,7 @@ from collections import defaultdict
 from copy import deepcopy
 
 from agent_simulation.data.common import require
+from agent_simulation.data.market.statistics import COUNTS
 from agent_simulation.data.market.statistics import BUSINESS_NOTE
 from agent_simulation.agents.prompts.instructions import SHOP_OVERVIEW_NOTE
 from agent_simulation.data.history_records import (
@@ -133,7 +134,7 @@ def build_pricing_context(
     return state, coverage
 
 
-COUNTS = ("exposure_records", "click_records", "purchase_records")
+
 
 
 def attach_retrieved_products(context, lookup):

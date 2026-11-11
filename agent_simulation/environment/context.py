@@ -70,7 +70,7 @@ class AgentContextBuilder:
             simulation_before=state["simulation_step"] + 1,
         )
 
-    def _seller_overview(self, actor_id, state, *, public_pages=(), detail_item_ids=(), retrieve):
+    def _seller_overview(self, actor_id, state, *, public_pages=(), detail_item_ids=(), retrieve, include_intervals=True):
         """Share one collection of records between the shop view and retrieval."""
         owned, observed, feedback = self._seller_records(actor_id, state)
         context, coverage = build_pricing_context(
@@ -99,7 +99,7 @@ class AgentContextBuilder:
         )
         if "clock" in state:
             context["decision_time"] = self.decision_time(state, "seller", actor_id)
-            report = seller_reports.read(state, actor_id)
+            report = seller_reports.read(state, actor_id, include_intervals=include_intervals)
             context["business_report"] = {
                 k: report[k]
                 for k in (
@@ -113,12 +113,13 @@ class AgentContextBuilder:
             products = {p["item_id"]: p for p in report["products"]}
             for product in context["owned_products"]:
                 row = products[product["item_id"]]
-                spans = row["activity_intervals"]
+                if include_intervals:
+                    spans = row["activity_intervals"]
+                    product["activity_intervals"] = spans[-state["history_per_item"] :]
+                    product["earlier_intervals_available"] = len(spans) > state["history_per_item"]
                 product["new_feedback"] = {
                     k: row[k] for k in (*seller_reports.COUNTS, "estimated_units_sold")
                 }
-                product["activity_intervals"] = spans[-state["history_per_item"] :]
-                product["earlier_intervals_available"] = len(spans) > state["history_per_item"]
         history_index = self._seller_history_index(actor_id, state, observed, feedback) if retrieve else None
         return context, coverage, history_index
 
@@ -151,7 +152,7 @@ class AgentContextBuilder:
         from agent_simulation.agents.context.pricing import PricingSnapshot
 
         require(type(batch_size) is int and 1 <= batch_size <= 16, "Expected 1..16 price targets")
-        overview, _, index = self._seller_overview(actor_id, state, retrieve=True)
+        overview, _, index = self._seller_overview(actor_id, state, retrieve=True, include_intervals=False)
         snapshot = PricingSnapshot(overview)
         owned = list(snapshot.products)
         simulation_cache = simulation_market_cache(state)

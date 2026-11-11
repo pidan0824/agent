@@ -6,7 +6,7 @@ from hashlib import sha256
 from math import isfinite
 from statistics import mean, median
 
-from agent_simulation.agents.prompts.customer import messages
+from agent_simulation.agents.context import customer_messages as messages
 
 
 PRICE_MULTIPLIERS = (0.8, 1.0, 1.2)

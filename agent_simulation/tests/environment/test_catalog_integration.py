@@ -327,7 +327,7 @@ class IntegratedTests(CatalogFixture, unittest.TestCase):
 
         before = deepcopy(self.runtime.snapshot())
         with self.assertRaisesRegex(ValueError, "context overflow"):
-            list(SellerAgent(self.runtime, ScriptedModel([]), TokenizerFixture()).preview_requests(10))
+            list(SellerAgent(self.runtime, ScriptedModel([]), TokenizerFixture()).prepare_requests(10))
         self.assertEqual(before, self.runtime.snapshot())
 
     def test_ten_event_batches_are_not_skipped(self):

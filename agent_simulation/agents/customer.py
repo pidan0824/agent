@@ -10,7 +10,7 @@ from agent_simulation.agents.decisions import action_output, run_workflow
 from agent_simulation.environment.operations.actions import require_open_market
 from agent_simulation.agents.schemas import validate_arguments
 from agent_simulation.agents.actions import validate_response
-from agent_simulation.agents.prompts.customer import customer_decision_messages
+from agent_simulation.agents.context import customer_decision_messages
 
 
 class CustomerAgent(BaseAgent):
@@ -26,8 +26,8 @@ class CustomerAgent(BaseAgent):
             expected_request_id=expected_request_id, observe=observe,
         )
 
-    def preview_requests(self, actor, *, response=False):
-        """Render requests from the current state without running memory reflection."""
+    def prepare_requests(self, actor, *, response=False):
+        """Prepare requests, including optional history summaries; do not run decisions or memory reflection."""
         stage = "response" if response else "query"
         if response:
             batches = self._response_inputs(actor, observe=False)

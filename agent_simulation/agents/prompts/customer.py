@@ -201,35 +201,12 @@ def _prepare_display(state):
     return {"displayed_items": original}
 
 
-def prepare_history(state, *, recent_summary=...):
-    """Freeze serialized history once for all batches of one Response decision."""
+def prepare_history(state):
+    """Serialize already prepared history without generating summaries."""
     history = {key: value for key, value in state.items()
                if key in ("short_term_memory", "retrieved_context")}
-    from agent_simulation.agents.context import context_model
-    model = context_model()
-    background = state.get("behavioral_summary")
-    if model is not None:
-        recent = history.get("short_term_memory", {})
-        summary = (model.summarize(recent.get("search_history", []), scope="Customer recent history",
-                                  compact={k: json.loads(v) for k, v in
-                                           _encoded_history({"short_term_memory": recent}, background).items()})
-                   if recent_summary is ... else recent_summary)
-        if summary is not None:
-            history["short_term_memory"] = {**recent, "search_history": [], "summary": summary}
-        retrieved = history.get("retrieved_context", {})
-        older = retrieved.get("history", {})
-        # Citations use segment and record positions. Keep their numbering intact.
-        cited = any(evidence.get("same_observations_in_retrieved_history")
-                    for memory in state.get("long_term_memory", ())
-                    for evidence in memory.get("evidence_times", ()))
-        if not cited:
-            summary = model.summarize(older.get("segments", []), scope="Customer retrieved older history",
-                                      compact={k: json.loads(v) for k, v in _encoded_history({
-                                          "short_term_memory": {"search_history": []},
-                                          "retrieved_context": {"history": older}}, background).items()})
-            if summary is not None:
-                history["retrieved_context"] = {**retrieved, "history": {**older, "segments": [], "summary": summary}}
-    return _encoded_history(history, background)
+    return _encoded_history(history, state.get("behavioral_summary"))
+
 
 
 def encode_input(state, *, prepared_history=None):
@@ -278,10 +255,10 @@ def decode_input(text):
 
 def messages(
     state, target=None, *, response=False, query_output=QUERY_OUTPUT, query_task=QUERY_TASK,
-    prepared_history=None,
+    prepared_history=None, prepared_evidence=None,
 ):
     from agent_simulation.agents.context.shopping import project_customer
-    visible = project_customer(state, query=not response)
+    visible = project_customer(state, query=not response) if prepared_evidence is None else prepared_evidence
     content = encode_input(visible, prepared_history=prepared_history)
     notes = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE
     if '"history_encoding":' in content:
@@ -316,11 +293,11 @@ def messages(
 
 
 def customer_decision_messages(
-    context, *, response=False, prepared_history=None,
+    context, *, response=False, prepared_history=None, prepared_evidence=None,
 ):
     return messages(
         context,
-        response=response, prepared_history=prepared_history,
+        response=response, prepared_history=prepared_history, prepared_evidence=prepared_evidence,
         query_output=(QUERY_RUNTIME_OUTPUT if "decision_time" in context else QUERY_OUTPUT),
         query_task=(QUERY_RUNTIME_TASK if "decision_time" in context else QUERY_TASK),
     )

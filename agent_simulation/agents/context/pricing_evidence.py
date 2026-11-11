@@ -2,10 +2,11 @@
 from collections import defaultdict
 from copy import deepcopy
 from agent_simulation.data.common import require
+from agent_simulation.data.market.statistics import COUNTS
 
 SCHEMA = "seller-decision-evidence-v5"
 EVIDENCE_SCHEMAS = frozenset((SCHEMA,))
-COUNTS = ("exposure_records", "click_records", "purchase_records")
+
 
 
 def runs(rows):

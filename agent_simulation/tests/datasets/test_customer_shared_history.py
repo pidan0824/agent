@@ -340,7 +340,8 @@ class ContextSummaryTests(unittest.TestCase):
 
     def test_seller_summary_keeps_original_business_statistics_and_source(self):
         from agent_simulation.tests.seller_context_fixture import seller_state
-        from agent_simulation.agents.prompts.seller import seller_messages, decode_input
+        from agent_simulation.agents.context import pricing_messages as seller_messages
+        from agent_simulation.agents.prompts.seller import decode_input
         state = seller_state()
         state['owned_products'][0]['business_summary'] = {'observed_time_index': 2,
             'statistics_30d': {'exposures': 100, 'clicks': 7, 'orders': 2}}
@@ -359,7 +360,7 @@ class ContextSummaryTests(unittest.TestCase):
 
     def test_long_retrieved_history_does_not_replace_short_recent_history(self):
         import json
-        from agent_simulation.agents.prompts.customer import prepare_history
+        from agent_simulation.agents.context import prepare_customer_history as prepare_history
         recent = {"search_history": [{"query": "杯子", "clicked_items": [], "purchased_items": []}]}
         state = {"short_term_memory": recent, "retrieved_context": {"history": {
             "segments": [{"records": [{"query": "旧经历" * 2000}]}]}}}
@@ -376,8 +377,10 @@ class ContextSummaryTests(unittest.TestCase):
     def test_runtime_summaries_keep_cited_customer_and_seller_records(self):
         from agent_simulation.tests.agents.test_customer_evidence import state as customer_fixture
         from agent_simulation.tests.agents.test_seller_evidence import state as seller_fixture, memory
-        from agent_simulation.agents.prompts.customer import customer_decision_messages, decode_input as customer_decode
-        from agent_simulation.agents.prompts.seller import seller_decision_messages, decode_input as seller_decode
+        from agent_simulation.agents.context import customer_decision_messages
+        from agent_simulation.agents.prompts.customer import decode_input as customer_decode
+        from agent_simulation.agents.context import seller_decision_messages
+        from agent_simulation.agents.prompts.seller import decode_input as seller_decode
 
         class LongHistory:
             def summarize(self, records, *, scope, compact=None):

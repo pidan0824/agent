@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 from agent_simulation.agents.customer import CustomerAgent
 from agent_simulation.agents.seller import SellerAgent
-from agent_simulation.agents.prompts.customer import decode_input, prepare_history
+from agent_simulation.agents.prompts.customer import decode_input
+from agent_simulation.agents.context import prepare_customer_history as prepare_history
 from agent_simulation.tests.fixtures import DisplayBudgetTokenizer, MarketFixture, ProfileCatalogFixture, ScriptedModel, TokenizerFixture, answer
 
 
@@ -20,7 +21,7 @@ class RequestPreviewTests(MarketFixture, unittest.TestCase):
         agent = SellerAgent(self.runtime, model, TokenizerFixture())
         revision = self.runtime.revision
         changes = self.runtime.db.total_changes
-        preview = list(agent.preview_requests(10))
+        preview = list(agent.prepare_requests(10))
         self.assertEqual(self.runtime.db.total_changes, changes)
         self.assertEqual(self.runtime.revision, revision)
         self.assertEqual([r['action_output']['final_schemas'][0]['properties']['prices']['items']['properties']['item_id']['enum'] for r in preview], [[1], [3]])
@@ -31,7 +32,7 @@ class RequestPreviewTests(MarketFixture, unittest.TestCase):
         self.runtime.catalog = ProfileCatalogFixture(self.runtime)
         query_model = ScriptedModel([answer({'query': '保温杯'})])
         agent = CustomerAgent(self.runtime, query_model, DisplayBudgetTokenizer(2))
-        preview = list(agent.preview_requests(7))
+        preview = list(agent.prepare_requests(7))
         run = agent.prepare_decision(7)
         asyncio.run(agent.choose_query(run))
         self.assertEqual(preview, query_model.requests)
@@ -41,7 +42,7 @@ class RequestPreviewTests(MarketFixture, unittest.TestCase):
         changes = self.runtime.db.total_changes
         with patch("agent_simulation.environment.batching.prepare_history",
                    wraps=prepare_history) as history:
-            preview = list(agent.preview_requests(7, response=True))
+            preview = list(agent.prepare_requests(7, response=True))
             self.assertEqual(self.runtime.db.total_changes, changes)
             history.assert_called_once()
             asyncio.run(agent.choose_response(run))
@@ -56,3 +57,39 @@ class RequestPreviewTests(MarketFixture, unittest.TestCase):
                 self.assertEqual(field['items']['enum'], displayed)
             scopes.append(set(displayed))
         self.assertFalse(scopes[0] & scopes[1])
+
+    def test_context_preparation_finishes_before_any_quote(self):
+        import threading
+        main_thread = threading.get_ident()
+        inputs = self.runtime.inputs.seller_targets
+        prepared = []
+        def contexts(*args, **kwargs):
+            for context in inputs(*args, **kwargs):
+                self.assertEqual(threading.get_ident(), main_thread)
+                prepared.append(context)
+                yield context
+        def quote(request, call_id):
+            self.assertEqual(len(prepared), 2)
+            item = request['action_output']['final_schemas'][0]['properties']['prices']['items']['properties']['item_id']['enum'][0]
+            return answer({'prices': [{'item_id': item, 'price_raw': 120}]})
+        model = ScriptedModel([quote, quote])
+        with patch.object(self.runtime.inputs, 'seller_targets', side_effect=contexts):
+            SellerAgent(self.runtime, model, TokenizerFixture()).run(10)
+        self.assertEqual(len(model.requests), 2)
+
+    def test_formatting_does_not_call_context_model(self):
+        from agent_simulation.tests.agents.test_customer_evidence import state as customer_fixture
+        from agent_simulation.tests.agents.test_seller_evidence import state as seller_fixture
+        from agent_simulation.agents.prompts.customer import messages
+        from agent_simulation.agents.prompts.seller import seller_messages
+        with patch('agent_simulation.agents.context.context_model', side_effect=AssertionError('Unexpected model')):
+            messages(customer_fixture())
+            seller_messages(seller_fixture())
+
+    def test_customer_preparation_projects_facts_once(self):
+        from agent_simulation.agents.context import customer_messages
+        from agent_simulation.agents.context.shopping import project_customer
+        from agent_simulation.tests.agents.test_customer_evidence import state
+        with patch('agent_simulation.agents.context.shopping.project_customer', wraps=project_customer) as project:
+            customer_messages(state())
+        project.assert_called_once()

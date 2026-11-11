@@ -34,7 +34,11 @@ Customer 和 Seller 共用近期 10 条观察、较早历史检索与最终输�
 | [evaluation/](README.md#evaluation) | 行为预测、轨迹与分布评价 |
 | [tests/](README.md#tests) | 程序测试 |
 
-[共享规则、价格约定和 SFT 决策指令](agents/prompts/instructions.py)、角色 Prompt（[Customer](agents/prompts/customer.py)、[Seller](agents/prompts/seller.py)）和[记忆反思指令](agents/memory/prompts.py)按用途分开。指令和长期总结要求英文，Query 输出中文，原始商品与搜索文本保留原文。
+[共享规则、价格约定和 SFT 决策指令](agents/prompts/instructions.py)、角色 Prompt（[Customer](agents/prompts/customer.py)、[Seller](agents/prompts/seller.py)）和[记忆反思指令](agents/memory/reflection.py)按用途分开。指令和长期总结要求英文，Query 输出中文，原始商品与搜索文本保留原文。
+
+历史摘要在 `agents/context` 准备，`agents/prompts` 只格式化已经准备好的事实。Agent 的 `prepare_requests()` 会准备完整请求，启用上下文模型时可能调用摘要或竞品选择；查看已有请求应直接读取返回值或运行日志中的 `request`。Seller 在同一冻结快照上准备各批上下文，再并发报价，最后统一结算；数据库读取仍在原线程。
+
+长期记忆的模型输入预算使用调用方传入的 tokenizer；直接环境查询返回选中的完整记忆，不会隐式加载其他 Qwen 模型。续训允许改变 `keep_checkpoints`，数据、模型及学习设置仍须与原训练一致。
 
 ## Environment 与 Platform 的职责
 

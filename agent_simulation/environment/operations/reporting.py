@@ -95,7 +95,7 @@ def price_intervals(state, seller, *, before=None):
     return result
 
 
-def report(state, seller, after):
+def report(state, seller, after, *, include_intervals=True):
     owned = sorted(int(i) for i, p in state["products"].items() if p["seller_id"] == seller)
     require(bool(owned), "Unknown Seller")
     all_events = defaultdict(list)
@@ -103,7 +103,7 @@ def report(state, seller, after):
         if event["seller_id"] == seller and event["settled_step"] <= state["simulation_step"]:
             all_events[event["item_id"]].append(event)
     events = [e for rows in all_events.values() for e in rows if e["settled_step"] > after]
-    intervals = price_intervals(state, seller)
+    intervals = price_intervals(state, seller) if include_intervals else None
     return {
         "after_step_exclusive": after,
         "through_step_inclusive": state["simulation_step"],
@@ -117,7 +117,7 @@ def report(state, seller, after):
         "products": [
             {
                 "item_id": i,
-                "price_intervals": intervals[i],
+                **({"price_intervals": intervals[i]} if include_intervals else {}),
                 **totals([e for e in all_events[i] if e["settled_step"] > after]),
                 "cumulative": totals(all_events[i]),
             }
@@ -126,7 +126,7 @@ def report(state, seller, after):
     }
 
 
-def read(state, seller):
+def read(state, seller, *, include_intervals=True):
     # Share one read-only shop slice across the report and timeline calculations.
     state = {
         **state,
@@ -136,16 +136,17 @@ def read(state, seller):
     }
     if "clock" in state:
         previous = state["clock"]["last_decisions"].get(f"seller:{seller}", {})
-        result = report(state, seller, previous.get("input_step", 0))
+        result = report(state, seller, previous.get("input_step", 0), include_intervals=include_intervals)
         result["logical_window"] = {
             "start_inclusive": previous.get("time", state["clock"]["start"]),
             "end_exclusive": state["clock"]["time"],
         }
-        timelines = activity_timeline(state, seller)
-        for product in result["products"]:
-            product["activity_intervals"] = timelines[product["item_id"]]
+        if include_intervals:
+            timelines = activity_timeline(state, seller)
+            for product in result["products"]:
+                product["activity_intervals"] = timelines[product["item_id"]]
         return result
-    return report(state, seller, 0)
+    return report(state, seller, 0, include_intervals=include_intervals)
 
 
 def activity_timeline(state, seller, *, item_ids=None):

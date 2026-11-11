@@ -3,7 +3,7 @@
 import asyncio
 from copy import deepcopy
 from agent_simulation.data.common import require
-from agent_simulation.agents.prompts.seller import seller_decision_messages
+from agent_simulation.agents.context import seller_decision_messages
 from agent_simulation.environment.operations.actions import SellerReview, require_open_market
 from agent_simulation.agents.base import BaseAgent
 from agent_simulation.agents.concurrency import map_decisions
@@ -44,21 +44,25 @@ class SellerAgent(BaseAgent):
             self.logs.save(run, "failed", str(error))
             raise
 
-    def preview_requests(self, actor):
-        """Prepare the same initial target requests as execution, without model calls or writes."""
+    def prepare_requests(self, actor):
+        """Prepare target requests, including optional context-model calls; do not submit prices or write state."""
         baseline = self.runtime.snapshot()
-        for context in self.runtime.inputs.seller_targets(
-            actor, state=baseline, batch_size=self.price_batch_size, memory_tokenizer=self.tokenizer
-        ):
-            messages = seller_decision_messages(context)
+        for context, messages in self.prepare_prices(actor, baseline):
             request, _ = self.prepare_request(messages, [], 'seller', role='seller',
                 price_ids=context["requested_price_item_ids"])
             yield request
 
-    async def _quote(self, run, batch, review, baseline, request_slots):
+    def prepare_prices(self, actor, baseline):
+        """Finish database reads and optional context inference before dispatching quotes."""
+        return [(context, seller_decision_messages(context))
+                for context in self.runtime.inputs.seller_targets(
+                    actor, state=baseline, batch_size=self.price_batch_size,
+                    memory_tokenizer=self.tokenizer)]
+
+    async def _quote(self, run, prepared, review, baseline, request_slots):
         """One isolated target workflow; only its validated draft enters the review."""
+        batch, prompt = prepared
         ids = batch["requested_price_item_ids"]
-        prompt = seller_decision_messages(batch)
         self.runtime.long_term_memory.observe_context("seller", run["actor"], batch, baseline)
 
         def stage(arguments):
@@ -83,21 +87,20 @@ class SellerAgent(BaseAgent):
         return {"item_ids": ids, "result": result}
 
     async def review_prices(self, run, *, baseline=None, commit=False,
-                            request_slots=None):
-        """Share one versioned snapshot, keep quote workers busy, then publish atomically."""
+                            request_slots=None, prepared_batches=None):
+        """Prepare one frozen input set, run quotes concurrently, then publish atomically."""
         try:
             baseline = self.runtime.freeze() if baseline is None else baseline
             actor = run["actor"]
-            contexts = self.runtime.inputs.seller_targets(
-                actor, state=baseline.state, batch_size=self.price_batch_size,
-                memory_tokenizer=self.tokenizer)
+            batches = (self.prepare_prices(actor, baseline.state)
+                       if prepared_batches is None else prepared_batches)
             review = SellerReview(self.runtime, actor, baseline)
             concurrency = self.price_concurrency
             request_slots = request_slots or asyncio.Semaphore(concurrency)
             run.update(price_batches=[], pricing_mode="target", price_concurrency=concurrency)
 
             run["price_batches"] = await map_decisions(
-                contexts, lambda ctx: self._quote(run, ctx, review, baseline.state, request_slots),
+                batches, lambda ctx: self._quote(run, ctx, review, baseline.state, request_slots),
                 concurrency=concurrency)
 
             if commit:

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from agent_simulation.agents.memory.reflection import SummaryGenerator
 from agent_simulation.inference.client import ModelOutputError
 from agent_simulation.agents.memory.validation import ReflectionDraftError, read_draft
-from agent_simulation.agents.memory.prompts import SUMMARY_INSTRUCTION
+from agent_simulation.agents.memory.reflection import SUMMARY_INSTRUCTION
 from agent_simulation.agents.memory.reflection import SUMMARY_PROMPTS
 
 

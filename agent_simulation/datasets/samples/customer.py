@@ -5,7 +5,8 @@ from itertools import groupby
 from agent_simulation.data.catalog import DISPLAY_PRICE_SQL, customer_summary
 from agent_simulation.data.market.products import PROFILE_FIELDS
 from agent_simulation.agents.context.shopping import context
-from agent_simulation.agents.prompts.customer import answer_message, messages
+from agent_simulation.agents.prompts.context_format import answer_message
+from agent_simulation.agents.context import customer_messages as messages
 from agent_simulation.data.common import iter_rows, require
 from agent_simulation.data.history_records import shopping_event, customer_history_limit
 from agent_simulation.environment.batching import response_batches

@@ -112,7 +112,7 @@ def _finish_run(output, report, started, model_resources, runtime, catalog, inje
 def warm_initial_memory(path, runtime, seller, customer, initial, args):
     """Prepare or restore memory for this frozen market before its first decision."""
     from agent_simulation.agents.context import context_settings
-    from agent_simulation.agents.memory.prompts import EVIDENCE_ORDER, SUMMARY_INSTRUCTION, SUMMARY_PROMPTS
+    from agent_simulation.agents.memory.reflection import EVIDENCE_ORDER, SUMMARY_INSTRUCTION, SUMMARY_PROMPTS
 
     memory = runtime.long_term_memory
     memory.ensure_encoder()

@@ -8,6 +8,19 @@ from agent_simulation.data.market.statistics import METRICS
 
 
 class BusinessStatisticsTests(MarketFixture, unittest.TestCase):
+    def test_count_report_matches_full_report_without_building_intervals(self):
+        from unittest.mock import patch
+        from agent_simulation.environment.operations import reporting
+        state = self.runtime.snapshot()
+        full = reporting.read(state, 10)
+        with patch.object(reporting, 'price_intervals', side_effect=AssertionError('Unneeded intervals')):
+            counts = reporting.read(state, 10, include_intervals=False)
+        expected = deepcopy(full)
+        for product in expected['products']:
+            product.pop('price_intervals', None)
+            product.pop('activity_intervals', None)
+        self.assertEqual(counts, expected)
+
     def query(self, **overrides):
         args = dict(item_ids=[1], before_time_index=10, limit=1, metrics=list(METRICS))
         args.update(overrides)

@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 import math
+import json
 import os
 from threading import Lock
 
@@ -182,3 +183,94 @@ class ContextModel:
             "selected_observed_price_raw_range": [min(prices), max(prices)] if prices else None,
         }
         return selected, analysis
+
+
+def prepare_customer_history(state, *, recent_summary=...):
+    """Freeze serialized history once for all batches of one Response decision."""
+    history = {key: value for key, value in state.items()
+               if key in ("short_term_memory", "retrieved_context")}
+    from agent_simulation.agents.prompts.customer import _encoded_history
+    model = context_model()
+    background = state.get("behavioral_summary")
+    if model is not None:
+        recent = history.get("short_term_memory", {})
+        summary = (model.summarize(recent.get("search_history", []), scope="Customer recent history",
+                                  compact={k: json.loads(v) for k, v in
+                                           _encoded_history({"short_term_memory": recent}, background).items()})
+                   if recent_summary is ... else recent_summary)
+        if summary is not None:
+            history["short_term_memory"] = {**recent, "search_history": [], "summary": summary}
+        retrieved = history.get("retrieved_context", {})
+        older = retrieved.get("history", {})
+        # Citations use segment and record positions. Keep their numbering intact.
+        cited = any(evidence.get("same_observations_in_retrieved_history")
+                    for memory in state.get("long_term_memory", ())
+                    for evidence in memory.get("evidence_times", ()))
+        if not cited:
+            summary = model.summarize(older.get("segments", []), scope="Customer retrieved older history",
+                                      compact={k: json.loads(v) for k, v in _encoded_history({
+                                          "short_term_memory": {"search_history": []},
+                                          "retrieved_context": {"history": older}}, background).items()})
+            if summary is not None:
+                history["retrieved_context"] = {**retrieved, "history": {**older, "segments": [], "summary": summary}}
+    return _encoded_history(history, background)
+
+
+def customer_messages(state, target=None, *, response=False, prepared_history=None, **kwargs):
+    """Prepare optional summaries before rendering a supervised request."""
+    from agent_simulation.agents.context.shopping import project_customer
+    from agent_simulation.agents.prompts.customer import messages
+    visible = project_customer(state, query=not response)
+    if prepared_history is None:
+        prepared_history = prepare_customer_history(visible)
+    return messages(state, target, response=response, prepared_history=prepared_history,
+                    prepared_evidence=visible, **kwargs)
+
+
+def customer_decision_messages(state, *, response=False, prepared_history=None):
+    from agent_simulation.agents.context.shopping import project_customer
+    from agent_simulation.agents.prompts.customer import customer_decision_messages as render
+    visible = project_customer(state, query=not response)
+    if prepared_history is None:
+        prepared_history = prepare_customer_history(visible)
+    return render(state, response=response, prepared_history=prepared_history, prepared_evidence=visible)
+
+
+def prepare_seller_evidence(state, *, audit_sink=None):
+    """Summarize retrieved history while retaining original cited facts."""
+    from agent_simulation.agents.context.pricing_evidence import project_seller
+    visible, audit = project_seller(state, include_audit=audit_sink is not None)
+    if audit_sink is not None:
+        audit_sink.update(audit)
+    model = context_model()
+    if model is not None:
+        # Own price runs are already compact facts; only long retrieved passages need a summary.
+        history = visible["history"]
+        cited = {ref for memory in history.get("long_term_memory", ())
+                 for ref in memory["supporting_evidence_refs"]}
+        similar = history["similar_evidence"]
+        records = [record for record in similar if record["evidence_ref"] not in cited]
+        summary = model.summarize(records, scope="Seller retrieved business history")
+        if summary is not None:
+            kept = [record for record in similar if record["evidence_ref"] in cited]
+            descriptions = {record["item_id"]: record["product"]
+                            for record in similar if "product" in record}
+            for record in kept:
+                if record["item_id"] in descriptions:
+                    record["product"] = descriptions.pop(record["item_id"])
+            history.update(summary=summary, similar_evidence=kept)
+    return visible
+
+
+def pricing_messages(state, target=None, audit_sink=None):
+    from agent_simulation.agents.prompts.seller import pricing_messages as render
+    visible = prepare_seller_evidence(state, audit_sink=audit_sink)
+    return render(state, target, prepared_evidence=visible)
+
+
+def seller_decision_messages(state, *, audit_sink=None):
+    from agent_simulation.agents.prompts.seller import seller_decision_messages as render
+    if "product_batch" in state:
+        state = {**state, "price_scope": "Submit one price per owned product in this batch."}
+    visible = prepare_seller_evidence(state, audit_sink=audit_sink)
+    return render(state, prepared_evidence=visible)

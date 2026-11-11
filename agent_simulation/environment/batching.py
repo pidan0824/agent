@@ -3,7 +3,8 @@
 from copy import deepcopy
 
 from agent_simulation.agents.context.shopping import project_customer
-from agent_simulation.agents.prompts.customer import messages, prepare_history
+from agent_simulation.agents.prompts.customer import messages
+from agent_simulation.agents.context import prepare_customer_history as prepare_history
 from agent_simulation.data.common import require
 from agent_simulation.inference.requests import ContextCapacityError, input_token_budget, model_policy, prompt_tokens
 

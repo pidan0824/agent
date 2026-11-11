@@ -483,7 +483,7 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
         episode = self.make_episode([keep] * 6, [WAIT] * 2, ticks=2)
         episode.step()
         listing = self.runtime.execute("customer", 7, "search_products", {"query": "杯子"})
-        messages = next(self.customer.preview_requests(7, response=True))["messages"]
+        messages = next(self.customer.prepare_requests(7, response=True))["messages"]
         seen = decode_input(messages[1]["content"])
         self.assertEqual(seen["last_search_time"], listing["logical_time"])
         self.assertEqual(seen["no_new_search_interval"],

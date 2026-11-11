@@ -2,7 +2,6 @@
 
 from collections import defaultdict
 from math import log1p
-from functools import lru_cache
 import json
 
 from agent_simulation.data.common import require
@@ -136,18 +135,10 @@ def select_memories(state, role, key, query, embedder, encoder_id, events, evide
 MEMORY_INPUT_TOKEN_LIMIT = 1024
 
 
-@lru_cache(maxsize=1)
-def _memory_tokenizer():
-    from agent_simulation import PROJECT_ROOT
-    from agent_simulation.inference.requests import load_tokenizer
-    return load_tokenizer(PROJECT_ROOT / "models/Qwen2.5-3B-Instruct", local_files_only=True)
-
-
-def budget_memories(memories, *, tokenizer=None, limit=MEMORY_INPUT_TOKEN_LIMIT):
+def budget_memories(memories, *, tokenizer, limit=MEMORY_INPUT_TOKEN_LIMIT):
     """Keep complete ranked summaries with citations; stored memories are untouched."""
     if not memories:
         return []
-    tokenizer = _memory_tokenizer() if tokenizer is None else tokenizer
 
     def fits(entries):
         text = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
@@ -170,7 +161,7 @@ def present_memories(selected, sources, role, key, query, *, tokenizer=None):
         for number, segment in enumerate(segments, 1):
             for row, identity in enumerate(segment_keys(role, segment), 1):
                 positions.setdefault(identity, []).append((number, row))
-    return budget_memories([
+    memories = [
         {
             "memory_id": memory_id(e),
             "owner": key,
@@ -184,4 +175,6 @@ def present_memories(selected, sources, role, key, query, *, tokenizer=None):
             ],
         }
         for e in selected
-    ], tokenizer=tokenizer)
+    ]
+    # Direct environment queries return facts; model callers supply their own tokenizer.
+    return memories if tokenizer is None else budget_memories(memories, tokenizer=tokenizer)

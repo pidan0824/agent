@@ -10,7 +10,7 @@ from agent_simulation.agents.context.pricing import (
 from agent_simulation.data.history_records import (
     ObservedPriceHistory, has_observed_price, price_point, seller_history_policy,
 )
-from agent_simulation.agents.prompts.seller import pricing_messages
+from agent_simulation.agents.context import pricing_messages
 from agent_simulation.agents.retrieval.history import (
     DEFAULT_HISTORY_ENCODER, SellerItemWindow, PreparedSellerHistory, CachedHistoryEncoder,
 )

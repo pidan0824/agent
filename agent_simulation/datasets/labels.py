@@ -6,7 +6,7 @@ import json
 from os import PathLike
 from contextlib import ExitStack, closing
 from tempfile import TemporaryDirectory
-from agent_simulation.agents.prompts.customer import messages, prepare_history
+from agent_simulation.agents.context import customer_messages as messages, prepare_customer_history as prepare_history
 from pathlib import Path
 from agent_simulation.data.common import require, sha256
 from agent_simulation.data.catalog import Catalog

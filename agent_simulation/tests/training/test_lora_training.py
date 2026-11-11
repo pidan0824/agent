@@ -43,6 +43,14 @@ def tensor_batch():
     }
 
 
+class ResumeSettingsTests(unittest.TestCase):
+    def test_retention_can_change_but_learning_settings_cannot(self):
+        from agent_simulation.training.run import resume_settings
+        saved = {'rank': 64, 'epochs': 1, 'keep_checkpoints': 2}
+        self.assertEqual(resume_settings(saved), resume_settings({**saved, 'keep_checkpoints': 4}))
+        self.assertNotEqual(resume_settings(saved), resume_settings({**saved, 'rank': 32}))
+
+
 class LoRATrainingTests(unittest.TestCase):
 
     def test_response_format_weights_keep_action_boundaries_and_reuse_old_tokens(self):

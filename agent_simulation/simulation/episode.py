@@ -72,7 +72,11 @@ class Episode:
             for actor in sellers:
                 runs.append(self.seller.prepare_review(actor))
             baseline = self.runtime.freeze()
-            self._collect(runs, self.seller.review_prices, baseline=baseline, share_request_limit=True)
+            prepared = {run["actor"]: self.seller.prepare_prices(run["actor"], baseline.state)
+                        for run in runs}
+            self._collect(runs, lambda run, **kwargs: self.seller.review_prices(
+                run, prepared_batches=prepared[run["actor"]], **kwargs),
+                baseline=baseline, share_request_limit=True)
         except Exception as error:
             for run in runs:
                 self.seller.logs.save(run, "failed", f"Seller phase aborted: {error}")

@@ -43,29 +43,14 @@ def decode_input(text):
 
 
 def seller_messages(state, target=None, *, system=SELLER_SYSTEM, rules=SELLER_ANSWER_RULES,
-                    audit_sink=None):
+                    audit_sink=None, prepared_evidence=None):
     """Use one model-facing representation in supervision and the runtime harness."""
-    visible, audit = project_seller(state, include_audit=audit_sink is not None)
-    if audit_sink is not None:
-        audit_sink.update(audit)
-    from agent_simulation.agents.context import context_model
-    model = context_model()
-    if model is not None:
-        # Own price runs are already compact facts; only long retrieved passages need a summary.
-        history = visible["history"]
-        cited = {ref for memory in history.get("long_term_memory", ())
-                 for ref in memory["supporting_evidence_refs"]}
-        similar = history["similar_evidence"]
-        records = [record for record in similar if record["evidence_ref"] not in cited]
-        summary = model.summarize(records, scope="Seller retrieved business history")
-        if summary is not None:
-            kept = [record for record in similar if record["evidence_ref"] in cited]
-            descriptions = {record["item_id"]: record["product"]
-                            for record in similar if "product" in record}
-            for record in kept:
-                if record["item_id"] in descriptions:
-                    record["product"] = descriptions.pop(record["item_id"])
-            history.update(summary=summary, similar_evidence=kept)
+    if prepared_evidence is None:
+        visible, audit = project_seller(state, include_audit=audit_sink is not None)
+        if audit_sink is not None:
+            audit_sink.update(audit)
+    else:
+        visible = prepared_evidence
     content = encode_input(visible)
     note = TABLE_NOTE if '"$table":{' in content else VALUE_NOTE
     if visible["history"].get("long_term_memory"):
@@ -82,15 +67,15 @@ def seller_messages(state, target=None, *, system=SELLER_SYSTEM, rules=SELLER_AN
     return messages
 
 
-def pricing_messages(context, target=None, audit_sink=None):
-    result = seller_messages(context, target, audit_sink=audit_sink)
+def pricing_messages(context, target=None, audit_sink=None, *, prepared_evidence=None):
+    result = seller_messages(context, target, audit_sink=audit_sink, prepared_evidence=prepared_evidence)
     result[0]["content"] += SELLER_SUPERVISED_SCOPE
     if "product_batch" in context:
         result[0]["content"] += SHOP_BATCH_NOTE
     return result
 
 
-def seller_decision_messages(context, *, audit_sink=None):
+def seller_decision_messages(context, *, audit_sink=None, prepared_evidence=None):
     rules = (FACT_RULES + SELLER_STEPS + "\nOutput\n"
              + "Return one JSON object with the requested prices." + SELLER_RUNTIME_PRICES)
     if "product_batch" in context:
@@ -101,4 +86,4 @@ def seller_decision_messages(context, *, audit_sink=None):
         rules += ' Prices take effect together after all Sellers finish.'
     else:
         rules += ' Prices take effect after the shop review is complete.'
-    return seller_messages(context, rules=rules, audit_sink=audit_sink)
+    return seller_messages(context, rules=rules, audit_sink=audit_sink, prepared_evidence=prepared_evidence)
