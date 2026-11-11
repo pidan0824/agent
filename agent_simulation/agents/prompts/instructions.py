@@ -51,7 +51,7 @@ SHOP_BATCH_NOTE = ' This capacity-limited batch belongs to the same Seller. Shop
 
 QUERY_TASK = 'Task\nYou are an e-commerce customer. Generate the next product search query from your profile, shopping history and accumulated experience. Write the query in Chinese; preserve original product and brand names.\n'
 
-QUERY_OUTPUT = '\nOutput\nReturn one JSON object with exactly one key, query. Its value must be the specific Chinese product search query you choose from the context. Do not output a placeholder, Markdown, explanations or extra fields.'
+QUERY_OUTPUT = '\nOutput\nReturn one JSON object with exactly one key, query. Its value must be a specific Chinese product search query inferred from the available context. It may be a new expression rather than a copy of a historical query. Do not output a placeholder, Markdown, explanations or extra fields.'
 
 RESPONSE_SYSTEM = 'Task\nYou are an e-commerce customer. Evaluate the currently displayed products for the current query.\n' + FACT_RULES + CUSTOMER_STEPS + 'Identify the need expressed by the query, inspect product descriptions, attributes and prices, and assess their fit with your preferences. Do not invent missing attributes. Stored product order does not establish actual screen position. If candidate_batch is present, evaluate only this subset; a capacity batch is not a recorded page.\n\nOutput\nReturn only {"clicked_item_ids":[integer IDs],"purchased_item_ids":[integer IDs]}. Include both fields with no extra text. Each set may independently be empty or contain multiple currently displayed item IDs.'
 

@@ -15,7 +15,14 @@ from agent_simulation.data.common import require
 @cache
 def _policy():
     path = Path(__file__).parents[1] / "inference" / "model_policy.json"
-    return json.loads(path.read_text())["history_windows"]
+    policy = json.loads(path.read_text())["history_windows"]
+    seller = policy["seller"]
+    require(seller["selection"] == "latest_observations_per_item", "Unexpected history selection")
+    require(type(seller["observations_per_item"]) is int and seller["observations_per_item"] > 0,
+            "Invalid Seller history window")
+    recent = policy["customer"]["recent_requests"]
+    require(type(recent) is int and 1 <= recent <= 100, "Invalid Customer history window")
+    return policy
 
 
 def has_observed_price(row):
@@ -35,23 +42,11 @@ def last_valid_reference(records, before):
 
 
 def seller_history_policy():
-    policy = _policy()["seller"]
-    require(
-        policy["selection"] == "latest_observations_per_item",
-        "Unexpected history selection",
-    )
-    require(
-        type(policy["observations_per_item"]) is int
-        and policy["observations_per_item"] > 0,
-        "Invalid Seller history window",
-    )
-    return policy.copy()
+    return _policy()["seller"].copy()
 
 
 def customer_history_limit():
-    n = _policy()["customer"]["recent_requests"]
-    require(type(n) is int and 1 <= n <= 100, "Invalid Customer history window")
-    return n
+    return _policy()["customer"]["recent_requests"]
 
 
 EVENT_FIELDS = (

@@ -84,22 +84,28 @@ class ContextModel:
         if not records:
             return None
         from agent_simulation.agents.prompts.instructions import TABLE_NOTE
+        if scope.startswith("Customer"):
+            focus = (
+                "Use three compact points: Purchases; Search-topic sequence; Click examples. "
+                "Purchases: keep each purchased item ID, observation time and price, or say none recorded. "
+                "Search-topic sequence: combine repeated topics and quote the original queries without editing. "
+                "Click examples: mention selected recorded clicked item IDs as examples, not a complete list or a claim of repeated clicks. "
+                "Describe recorded actions, not inferred preferences. Do not repeat absence of purchases "
+                "for each search. "
+            )
+        else:
+            focus = (
+                "Group by item ID. Keep quote changes in time order with their prices and observation windows. "
+                "Keep the associated exposure, click and purchase counts; combine repeated unchanged events. "
+            )
         task = (
-            "Summarize the recorded events, changes, and exceptions in order. Skip introductions and advice. "
-            "For Customer history, retain changes in search topics, clicked and purchased item IDs, and key prices. "
-            "For Seller history, retain changes in quotes for the same item and its recorded exposures, clicks, "
-            "and purchases within the stated observation window. "
-            "Keep observation windows and sources separate. Product descriptions are attributes, not events. "
-            "Preserve topic changes and repeated price changes in their original order. Use concise points "
-            "with at most 400 characters in total. "
-            "Identify products by item_id= and price_raw= with their original values. "
-            "Omit product titles from the summary. Quote any search query verbatim. "
-            "If no purchase is recorded, mention this once at the end. Do not infer dislike or future behavior. "
-            "Preserve recorded counts and key time boundaries; do not infer totals. "
-            "For grouped input, report only facts from that group without drawing conclusions about the full history. "
-            "Return a JSON object with an English summary string. "
+            "Write a compact factual summary, not a transcript. " + focus +
+            "Keep sources and time windows distinct. Do not invent totals, dislike or future behavior. "
+            "Preserve original IDs and numbers. Omit product descriptions, introductions and advice. "
+            "The supplied character limit is a maximum, not a target: finish all points well before it. "
+            "Describe only the supplied group. Return a JSON object with an English summary string. "
         ) + TABLE_NOTE
-        schema = {"type": "object", "properties": {"summary": {"type": "string", "minLength": 1, "maxLength": 400}},
+        schema = {"type": "object", "properties": {"summary": {"type": "string", "minLength": 1}},
                   "required": ["summary"], "additionalProperties": False}
         table_paths = {
             ("clicked_items",), ("purchased_items",),
@@ -114,6 +120,7 @@ class ContextModel:
         while groups:
             group, packed_group = groups.pop()
             payload = {"scope": scope, "group": len(payloads) + 1,
+                       "summary_character_limit": 2 * min(768, self.history_tokens),
                        "records": packed_group}
             if len(prompt_tokens(self._messages(task, payload), [], self.tokenizer)) <= input_token_budget(1536):
                 payloads.append(payload)
@@ -123,7 +130,11 @@ class ContextModel:
                     groups.append((part, pack(part, table_paths=table_paths)))
             else:
                 raise ContextCapacityError("One history record exceeds the context model input budget")
-        summaries = [self._ask(task, payload, schema)["summary"] for payload in payloads]
+        # Share the existing history allowance across groups; never add a second summary pass.
+        summary_characters = 2 * min(768, max(1, self.history_tokens // len(payloads)))
+        schema["properties"]["summary"]["maxLength"] = summary_characters
+        summaries = [self._ask(task, {**payload, "summary_character_limit": summary_characters}, schema)["summary"]
+                     for payload in payloads]
         summary = "\n".join(summaries)
         if len(self.tokenizer.encode(summary, add_special_tokens=False)) > self.history_tokens:
             raise ContextCapacityError("History summary exceeds its token budget")

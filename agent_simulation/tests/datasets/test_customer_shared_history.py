@@ -408,6 +408,16 @@ class ContextSummaryTests(unittest.TestCase):
         self.assertIn("summary", s["history"])
         self.assertEqual(s["history"]["similar_evidence"][0]["product"]["item_title"], "Other shop product")
 
+    def test_history_summary_can_preserve_facts_beyond_old_character_limit(self):
+        summary = " ".join(f"At index {i}, item_id={i + 100} had price_raw={i + 50}." for i in range(12))
+        self.assertGreater(len(summary), 400)
+        model, client = self.model({"summary": summary}, threshold=1024)
+        result = model.summarize([{"query": "long history " * 1000}], scope="Customer recent history")
+        self.assertEqual(result["text"], summary)
+        self.assertEqual(len(client.requests), 1)
+        from agent_simulation.agents.schemas import validate_arguments
+        validate_arguments({"summary": summary}, client.requests[0]["json_schema"])
+
     def test_oversized_single_summary_is_not_silently_used(self):
         from agent_simulation.inference.requests import ContextCapacityError
         model, client = self.model({"summary": "x" * 200}, threshold=16)

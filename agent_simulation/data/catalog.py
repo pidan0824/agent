@@ -269,22 +269,11 @@ class DataRepository:
 
     def public_pool(self, seller_id, focal_item_id, before_time_index):
         """Share one category/time-bound pool between discovery and detail lookup."""
-        self.window(before_time_index, 1)
-        profile = self.product(focal_item_id, before_time_index)
-        require(profile["seller_id"] == seller_id, "Invalid owned product binding")
-        candidates = []
-        if complete_category(profile):
-            from agent_simulation.data.market.quotes import category_snapshot
-            category = tuple(profile[k] for k in CATEGORY_FIELDS)
-            def read():
-                panel = category_snapshot(self, category, before_time_index)
-                return [dict(row["_public"]) for row in panel
-                        if row["_complete_category"] and row["seller_id"] != seller_id]
-            candidates = self.decision_cached(('public_pool', seller_id, category, before_time_index), read)
         return {
             "item_id": focal_item_id,
             "history_cutoff_exclusive": before_time_index,
-            "candidates": candidates,
+            "candidates": [dict(row) for row in
+                           self.competitor_pool(seller_id, focal_item_id, before_time_index)],
         }
 
     def discover(

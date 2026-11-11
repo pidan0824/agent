@@ -110,6 +110,18 @@ class PublicCompetitorTests(unittest.TestCase):
                 self.assertEqual(pool["candidates"], candidates)
                 self.assertEqual([row["item_id"] for row in candidates], expected_ids)
 
+    def test_public_result_edits_do_not_change_reused_competitor_facts(self):
+        self.c.execute("ALTER TABLE events ADD COLUMN exposure_records BIGINT DEFAULT 1000")
+        self.export()
+        data = DataRepository(self.c, self.cfg, 10)
+        peers = data.competitor_pool(1, 1, 10)
+        expected_title = peers[0]["item_title"]
+        page = data.public_pool(1, 1, 10)
+        page["candidates"][0]["item_title"] = "caller annotation"
+        page["candidates"].clear()
+        self.assertEqual(data.public_pool(1, 1, 10)["candidates"], peers)
+        self.assertEqual(peers[0]["item_title"], expected_title)
+
     def test_only_public_fields_and_all_candidates_retained(self):
         result = snapshot(self.c, self.cfg, 1, 10)
         self.assertEqual([row["item_id"] for row in result["candidates"]], [2, 6])
