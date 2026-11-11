@@ -44,6 +44,8 @@ Seller 上下文按三层组织：`context/pricing.py` 构造自身商品、历�
 
 Seller 自身价格段与原始统计保留结构化数值，只有较长的检索经历会摘要，被长期记忆引用的片段仍保留原文。历史摘要统一检查最终长度，超限直接报告容量错误，不静默退回完整历史或再调用一次模型。远程上下文服务可并发，本地模型生成仍串行。
 
+仿真市场摘要的 `active_products` 是同类目其他店铺的全部商品数，`priced_products` 是当前有报价的商品数。价格中位数和窗口购买记录中位数均使用后者，与完整市场查询的近期比较口径一致；完整查询的累计购买统计另覆盖全部商品。市场查询中的 CTR、CVR 分别是点击／曝光、购买／曝光；点击后购买转化率是独立指标。
+
 `environment/` 根目录保留环境入口 `market.py`、状态事务 `store.py`、记忆持久化 `memory.py`、上下文装配 `context.py` 和纯分批函数 `batching.py`。业务操作集中在 `operations/`：`actions.py` 执行搜索、报价暂存与行为结算；`queries.py` 查询授权历史；`reporting.py` 计算经营报表；`api.py` 定义程序调用的参数并分派操作。环境查询接口仍可由程序直接调用。运行库只接受当前 v5 格式，不再兼容旧 v4。
 
 决策输入沿 `Agent → context → agents/context、retrieval、memory` 构建；动作沿 `Agent/Episode → market → operations/api → actions/queries/reporting` 执行。`market` 统一授权、动作记录和提交，`store` 提供事务及版本机制。长期记忆的生成算法在 `agents/memory`，环境的 `memory.py` 负责证据存取和提交。

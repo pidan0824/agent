@@ -129,12 +129,16 @@ class SimulationAndRepresentationTests(MarketFixture,unittest.TestCase):
         self.assertEqual(len(cache["summaries"]), 1)
         self.assertEqual(compact, {
             "active_products": full["peer_products"],
+            "priced_products": full["coverage"]["comparable_products"],
             "price_as_of": full["price_time_basis"],
             "median_active_price": full["price_raw"]["median"],
             "purchase_window": full["window"],
+            "purchase_scope": "currently_priced_peer_products",
             "median_purchase_records": full["purchase_records"]["median"],
         })
         self.assertEqual(compact["median_purchase_records"], 3)
+        self.assertEqual((compact["active_products"], compact["priced_products"]), (2, 1))
+        self.assertEqual(full["cumulative"]["purchase_records"]["observed_products"], 2)
         compact["purchase_window"]["start_inclusive"] = 0
         self.assertEqual(repeated["purchase_window"]["start_inclusive"], 1020)
 

@@ -107,7 +107,7 @@ def market_analysis(market):
 
 
 def context_view(position):
-    """Project platform statistics onto the fields an ordinary seller is allowed to see."""
+    """Filter full market_position results for public queries; decision summaries bypass this view."""
     result = {k: deepcopy(position[k]) for k in (
         "item_id", "status", "clock", "window", "scope", "category_ids", "peer_products",
         "recent_price_scope", "expanded_price_sample", "historical_reference", "price_time_basis",
@@ -198,6 +198,7 @@ def simulation_position(state, item_id, *, cache=None, decision_only=False):
             prices, purchases = [], []
             for peer in peers:
                 price = state["active_prices"][str(peer)]["price_raw"]
+                # Match the priced-peer cohort used by full market_position comparisons.
                 if price is not None:
                     prices.append(price)
                     purchases.append(sum(
@@ -206,9 +207,11 @@ def simulation_position(state, item_id, *, cache=None, decision_only=False):
                     ))
             summaries[key] = {
                 "active_products": len(peers),
+                "priced_products": len(prices),
                 "price_as_of": price_basis,
                 "median_active_price": distribution(prices, None)["median"],
                 "purchase_window": window,
+                "purchase_scope": "currently_priced_peer_products",
                 "median_purchase_records": distribution(purchases, None)["median"],
             }
         return deepcopy(summaries[key])
@@ -287,7 +290,7 @@ def load_market_context(context, data, *, simulation=None, simulation_cache=None
 
 
 def public_prices(result, name, *, active_prices=None):
-    """Expose a competitor's posted price, without its private action provenance."""
+    """Add posted prices to already-public catalog rows, omitting active-price action metadata."""
     key = "candidates" if name == "discover_public_products" else "products"
     rows = []
     for row in result[key]:
