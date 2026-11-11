@@ -377,10 +377,11 @@ def run(args):
         else:
             selection = {}
             for role in roles:
-                key = "session_id" if role == "customer" else "sample_id"
                 path = candidates / f"{role}-test-candidates.parquet"
+                # Candidate files use record_id for both roles. Customer request IDs are numeric.
+                record_id = "CAST(record_id AS BIGINT)" if role == "customer" else "record_id"
                 selection[role] = [record for (record,) in connection.execute(
-                    f"SELECT {key} FROM read_parquet(?) ORDER BY {key}", [str(path)]
+                    f"SELECT {record_id} FROM read_parquet(?) ORDER BY 1", [str(path)]
                 ).fetchall()]
                 require(selection[role], f"No {role} test candidates in {path}")
             sampling = "all records in the frozen test candidate files"
