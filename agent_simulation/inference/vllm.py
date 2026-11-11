@@ -13,11 +13,21 @@ from agent_simulation.inference.requests import prepare_request, read_tokens
 from agent_simulation.logs import ModelLog
 
 
+def _generation_schema(value):
+    # The vLLM grammar cannot express uniqueness. finish_reply checks the original schema.
+    if isinstance(value, dict):
+        return {key: _generation_schema(child) for key, child in value.items()
+                if key != "uniqueItems" or not isinstance(child, bool)}
+    if isinstance(value, list):
+        return [_generation_schema(child) for child in value]
+    return value
+
+
 def structured_output(request):
     """Use vLLM's native JSON-schema constraint for decisions and reflections."""
     schema = output_schema(request)
     require(schema is not None, "vLLM requires a JSON output contract")
-    return {"json": schema}
+    return {"json": _generation_schema(schema)}
 
 
 class VLLMClient:

@@ -75,8 +75,17 @@ class VLLMTests(unittest.TestCase):
             if ids:
                 for field in schema['properties'].values():
                     self.assertEqual(field['items']['enum'], ids)
+                    self.assertNotIn("uniqueItems", field)
             else:
                 self.assertEqual(schema, {'const': {'clicked_item_ids': [], 'purchased_item_ids': []}})
+
+    def test_duplicate_customer_items_are_rejected_after_generation(self):
+        backend = self.client(lambda _: httpx.Response(200, json={
+            "choices": [{"text": '{"clicked_item_ids":[1,1],"purchased_item_ids":[]}', "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 10},
+        }))
+        with self.assertRaises(ModelOutputError):
+            backend.complete(self.request("response"), call_id="duplicate-items")
 
     def test_failed_and_truncated_responses_are_not_retried_or_repaired(self):
         for code,raw,finish,error in [(503,'',None,httpx.HTTPStatusError),
