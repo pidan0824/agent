@@ -192,7 +192,7 @@ class TrainingDataProcessor:
             age_idx = 9
         else:
             gender_idx = gender_map.get(user.get('gender'))
-            age_idx = age_map.get(user.get('age'))
+            age_idx = age_map.get(user.get('age_bucket', user.get('age')))
 
 
         return {
