@@ -6,6 +6,17 @@ from agent_simulation.agents.memory.validation import MAX_MEMORY_SOURCES
 from agent_simulation.data.common import require
 
 
+_CUSTOMER_INTERNAL_KEYS = {"user_id", "session_id", "request_id", "owner", "owner_id"}
+
+
+def _customer_view(value):
+    if isinstance(value, dict):
+        return {k: _customer_view(v) for k, v in value.items() if k not in _CUSTOMER_INTERNAL_KEYS}
+    if isinstance(value, list):
+        return [_customer_view(v) for v in value]
+    return value
+
+
 def prepare(payload):
     events = [*payload['experiences'], *payload.get('supplemental_evidence', [])]
     new = set(payload['new_evidence_ids'])
@@ -28,8 +39,9 @@ def prepare(payload):
     visible = {'actor_role': payload['actor_role'], 'profile': payload['profile'],
                'evidence': cards, 'previous_memory': previous}
     if customer:
+        visible = _customer_view(visible)
         purchases = {}
-        for card in cards:
+        for card in visible["evidence"]:
             for product in card.get('content', {}).get('purchased_items', []):
                 key = (product['item_id'], product['seller_id'])
                 purchases.setdefault(key, []).append(card['ref'])

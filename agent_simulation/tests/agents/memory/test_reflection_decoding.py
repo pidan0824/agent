@@ -23,6 +23,25 @@ class ReflectionGrammarTests(unittest.TestCase):
                                          'content':'Old claim.', 'source_ids':['s1']}]}
         self.visible, self.schema, self.references = prepare(self.payload)
 
+    def test_customer_reflection_uses_local_refs_without_internal_ids(self):
+        event = self.payload["experiences"][-1]
+        event["content"].update(user_id=7, session_id=13, request_id="request-1")
+        self.payload["supplemental_evidence"] = [
+            {"source_id": "background", "owner": "customer:7", "kind": "historical_segment",
+             "content": {"owner_id": 7, "records": [{"session_id": 21, "query": "旧查询"}]}}
+        ]
+        visible, schema, refs = prepare(self.payload)
+        self.assertEqual(visible["profile"], {})
+        self.assertEqual(visible["evidence"][-1]["content"], {"records": [{"query": "旧查询"}]})
+        self.assertNotIn("owner", visible["evidence"][-1])
+        self.assertEqual(visible["evidence"][0]["content"]["purchased_items"], [{"item_id": 4, "seller_id": 14}])
+        self.assertNotIn("session_id", visible["evidence"][0]["content"])
+        self.assertNotIn("request_id", visible["evidence"][0]["content"])
+        self.assertNotIn("user_id", visible["evidence"][0]["content"])
+        self.assertEqual(event["content"]["session_id"], 13)
+        result = decode('{"action":"add","evidence_refs":["E1"],"content":"A prior purchase."}', schema, refs)
+        self.assertEqual(result["source_ids"], ["s4"])
+
     def allowed(self, value):
         import torch
         from lmformatenforcer import JsonSchemaParser, CharacterLevelParserConfig
