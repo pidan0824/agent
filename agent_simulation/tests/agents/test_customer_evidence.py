@@ -21,7 +21,7 @@ class CustomerEvidenceTests(unittest.TestCase):
     def test_projection_preserves_order_and_does_not_mutate_source(self):
         original = state()
         simulated = {
-            "request_id": "sim-3", "settled_step": 3, "query": "同一搜索",
+            "user_id": 7, "request_id": "sim-3", "settled_step": 3, "query": "同一搜索",
             "clicked_items": [], "purchased_items": [],
         }
         original["retrieved_context"]["history"]["segments"].append({
@@ -45,7 +45,9 @@ class CustomerEvidenceTests(unittest.TestCase):
         self.assertEqual(observed["clock"], "observed_time_index")
         self.assertEqual(observed["records"], [{**recent[0], "time_index": 2}])
         self.assertEqual(simulated_segment["clock"], "simulation_settled_step")
-        self.assertEqual(simulated_segment["records"], [simulated])
+        self.assertEqual(simulated_segment["records"], [{
+            "settled_step": 3, "query": "同一搜索", "clicked_items": [], "purchased_items": [],
+        }])
         for segment in history["segments"]:
             self.assertNotIn("start_inclusive", segment)
             self.assertNotIn("end_inclusive", segment)

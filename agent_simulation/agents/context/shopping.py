@@ -69,10 +69,7 @@ def displayed_details(displayed, item_ids):
     by_id = {product["item_id"]: product for product in displayed}
     if not requested <= by_id.keys():
         raise PermissionError("Product is outside the current displayed candidate batch")
-    allowed = (*PRODUCT_FIELDS, "price_status")
-    return {
-        "products": [{key: by_id[item][key] for key in allowed if key in by_id[item]} for item in item_ids]
-    }
+    return {"products": [model_product(by_id[item]) for item in item_ids]}
 
 
 def project_customer(state):
@@ -91,7 +88,8 @@ def project_customer(state):
             if "user_id" in event:
                 require(event["user_id"] == owner, "Foreign Customer event")
             visible_event = dict(event)
-            visible_event.pop("session_id", None)
+            for key in ("user_id", "session_id", "request_id"):
+                visible_event.pop(key, None)
             result.append(visible_event)
         return result
 
