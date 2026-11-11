@@ -26,7 +26,7 @@ class VLLMTests(unittest.TestCase):
                                       {'role':'user','content':'保温杯'}], [], self.tokenizer)
         request.update(action_output=action_output(stage, allow_control_actions=True, displayed_ids=[1, 3],
                                                   price_ids=[1], allow_unknown_prices=True),
-                       agent_role='seller' if stage == 'seller' else 'customer')
+                       agent_role='seller' if stage == 'seller' else 'customer', decision_stage=stage)
         return request
 
     def client(self, handler, **kwargs):
@@ -112,6 +112,8 @@ class VLLMTests(unittest.TestCase):
 
         answers = {
             'qwen': {'action': 'no_update'},
+            'query-base': {'query': '杯子'},
+            'response-sft': {'clicked_item_ids': [1], 'purchased_item_ids': []},
             'seller-sft': {'prices': [{'item_id': 1, 'price_raw': 100}]},
             'customer-sft': {'query': '杯子'},
         }
@@ -132,6 +134,8 @@ class VLLMTests(unittest.TestCase):
                 '--catalog', 'unused', '--model', str(PROJECT_ROOT/'models/Qwen2.5-3B-Instruct'),
                 '--output', output, '--customers', '1', '--inference-backend', 'vllm',
                 '--customer-served-model', 'customer-sft', '--seller-served-model', 'seller-sft',
+                '--customer-query-served-model', 'query-base',
+                '--customer-response-served-model', 'response-sft',
             ])
             http = httpx.Client(base_url='http://vllm.test/v1/', transport=httpx.MockTransport(handler))
             with patch('agent_simulation.inference.vllm.httpx.Client', return_value=http), \
@@ -141,6 +145,7 @@ class VLLMTests(unittest.TestCase):
                     self.assertEqual(report['model'], 'qwen')
                     client.complete(self.request('seller'), call_id='seller')
                     client.complete(self.request('query'), call_id='customer')
+                    client.complete(self.request('response'), call_id='response')
                     reflection = self.request('query')
                     reflection.pop('agent_role')
                     reflection.pop('action_output')
@@ -148,4 +153,4 @@ class VLLMTests(unittest.TestCase):
                                       memory_generation_method='fixture')
                     client.complete(reflection, call_id='reflection')
             self.assertTrue(http.is_closed)
-            self.assertEqual(sent, ['seller-sft', 'customer-sft', 'qwen'])
+            self.assertEqual(sent, ['seller-sft', 'query-base', 'response-sft', 'qwen'])

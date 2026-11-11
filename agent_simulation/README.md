@@ -104,6 +104,8 @@ vllm serve /path/to/Qwen2.5-3B-Instruct --served-model-name qwen \
 
 在现有仿真命令上增加 `--inference-backend vllm --vllm-url http://127.0.0.1:8000/v1 --served-model qwen --customer-served-model customer-sft --seller-served-model seller-sft`。两个角色用各自的 SFT 模型决策。`--served-model` 指定反思和未单独配置角色时使用的默认模型。所有名称都以服务的 `/v1/models` 为准。`--model` 指向与服务器相同 revision 的本地 tokenizer 目录，行为评估使用其已有 `--tokenizer`。需要认证时设置 `VLLM_API_KEY`，不写入模型日志。
 
+Customer 可以按阶段指定服务模型。只训练 Response 时，用 `--customer-query-served-model qwen --customer-response-served-model customer-response`。如果有 Query adapter，把 `qwen` 换成服务注册的 Query adapter 名。阶段参数覆盖 `--customer-served-model` 的角色默认值。
+
 本地测试覆盖 HTTP 协议、prompt token 保持、JSON Schema、角色路由和失败处理。真实 vLLM 服务上的生成和吞吐量需另行实测。服务模型列表核对不等于远端权重哈希核验，运行报告明确记录此区别。API 依据：[vLLM structured outputs](https://docs.vllm.ai/en/latest/features/structured_outputs/)。
 
 `simulation/run.py` 的 `run(args, load_model=...)` 支持注入其他模型。加载器返回 `(client, 模型信息)`，client 提供 `complete()`、Tokenizer 和生成预算，Tokenizer 与上下文预算需匹配所用模型。程序自动准备上下文后调用模型，查询后端和模型动作权限见[工具说明](README.md#tools)。
@@ -145,6 +147,8 @@ Seller 默认使用 `--seller-price-batch-size 1`，每次明确要求一个目�
 ```
 
 每次运行只启动一个本机推理子进程，持有一份 Qwen 权重。它在短收集窗口内合并已经就绪的请求，每行保留自己的输出约束。Customer 和记忆总结也使用该服务。Seller 全部完成后才提交价格；报价超时或失败会使 Tick 失败，迟到的结果不能写回市场。
+
+重复运行同一批主体时，Episode 可指定 `--initial-memory /path/to/initial-memory.json`。首次在决策前生成并保存历史反思，后续匹配初始事实、模型、提示词、检索和编码器设置后复用。文件只保存决策前记忆、处理进度和引用证据。运行内新增反馈仍按原流程触发反思。服务模型权重更换时请使用新模型名或新的记忆文件。
 
 将 `EPISODE_DIR` 设为实际运行目录，即可打开像素市场、Tick 指标和决策时间线。本地服务可按需展开 Context、Prompt 和模型输出。离线导出包含同一套回放界面和已结算事件，`--animation` 是 `--html` 的别名。购买金额沿用原始价格单位，CTR 和购买率都以曝光为分母。
 

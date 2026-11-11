@@ -3,6 +3,7 @@
 import argparse
 from collections import defaultdict
 from contextlib import ExitStack, closing, contextmanager
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -108,12 +109,59 @@ def _finish_run(output, report, started, model_resources, runtime, catalog, inje
         print(json.dumps(report, ensure_ascii=False), flush=True)
 
 
+def warm_initial_memory(path, runtime, seller, customer, initial, args):
+    """Prepare or restore memory for this frozen market before its first decision."""
+    from agent_simulation.agents.context import context_settings
+    from agent_simulation.agents.memory.prompts import EVIDENCE_ORDER, SUMMARY_INSTRUCTION, SUMMARY_PROMPTS
+
+    memory = runtime.long_term_memory
+    memory.ensure_encoder()
+    identity = hashlib.sha256(json.dumps({
+        "facts": {k: v for k, v in initial.items() if k not in {"top_k", "search_config"}},
+        "model": seller.summary_models["model_id"],
+        "revision": args.revision,
+        "encoder": memory.encoder_id,
+        "retrieval": args.history_retrieval,
+        "context": context_settings(),
+        "prompt": [SUMMARY_PROMPTS, EVIDENCE_ORDER, SUMMARY_INSTRUCTION],
+        "format": "initial-memory-v1",
+        **({"server": args.vllm_url} if getattr(args, "inference_backend", None) == "vllm" else {}),
+    }, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    if path.exists():
+        snapshot = json.loads(path.read_text())
+        require(snapshot["identity"] == identity, "Initial memory belongs to different facts or settings")
+        with runtime.store.transaction():
+            state = runtime.snapshot()
+            for field in ("long_term", "memory_processed"):
+                state[field] = snapshot["memory"][field]
+            runtime.db.executemany("INSERT INTO memory_evidence VALUES (?,?,?,?,?)", snapshot["evidence"])
+            runtime.store.write(state)
+        return {"status": "reused"}
+
+    updates = {"memory_updates": []}
+    sellers = {p["seller_id"] for p in initial["products"].values()}
+    seller._update_long_term_memory(updates, [("seller", i) for i in sellers])
+    customer._update_long_term_memory(updates, [("customer", int(i)) for i in initial["customers"]])
+    if any(u["result"]["status"] == "failed" for u in updates["memory_updates"]):
+        return {"status": "not_saved", "updates": updates["memory_updates"]}
+    state = runtime.snapshot()
+    write_report(path, {
+        "identity": identity,
+        "memory": {k: state[k] for k in ("long_term", "memory_processed")},
+        "evidence": list(runtime.db.execute("SELECT * FROM memory_evidence ORDER BY source_id")),
+    })
+    return {"status": "saved", "updates": updates["memory_updates"]}
+
+
 def run(args, *, load_model=None):
     """Load (client, checkpoint report); Agent workflows use only the client interface."""
     if load_model is None and getattr(args, "inference_backend", "transformers") != "vllm":
         require(all(getattr(args, name, None) is None
-                    for name in ("served_model", "customer_served_model", "seller_served_model")),
+                    for name in ("served_model", "customer_served_model", "seller_served_model",
+                                 "customer_query_served_model", "customer_response_served_model")),
                 "Served model names require --inference-backend vllm")
+    require(getattr(args, "initial_memory", None) is None or args.mode == "episode",
+            "Initial memory is only used in Episode mode")
     require(args.max_concurrent_requests > 0, "Expected positive max concurrent requests")
     require(math.isfinite(args.request_timeout) and args.request_timeout > 0,
             "Expected a finite positive request timeout")
@@ -235,6 +283,10 @@ def run(args, *, load_model=None):
                 max_concurrent_requests=args.max_concurrent_requests,
                 fixed_horizon=getattr(args, "fixed_horizon", False),
             )
+            if (path := getattr(args, "initial_memory", None)) is not None:
+                warm_started = time.monotonic()
+                report["initial_memory"] = warm_initial_memory(path, runtime, seller, customer, initial, args)
+                report["initial_memory"]["seconds"] = time.monotonic() - warm_started
             episode.run(progress=lambda tick, status: print("Tick", tick, status, flush=True))
         else:
             # Isolate Customer integration at initialized prices, without scripted Seller actions.
@@ -275,6 +327,7 @@ def parser():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--revision", default=DEFAULT_REVISION)
     p.add_argument("--verify", action="store_true", help="Verify local model file hashes before loading")
+    p.add_argument("--initial-memory", type=Path, help="Save or reuse pre-Tick reflection for this frozen Episode")
     p.add_argument("--mode", choices=["episode", "customer"], default="episode")
     p.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto")
     p.add_argument("--dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto")

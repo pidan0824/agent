@@ -48,6 +48,7 @@ def predict(sample, model):
         calls.append(call)
         request["action_output"] = output
         request["agent_role"] = "seller" if stage == "seller" else "customer"
+        request["decision_stage"] = stage
         try:
             response = await complete_once(
                 model, request, call_id=f'{sample["sample_id"]}:{len(calls)}'

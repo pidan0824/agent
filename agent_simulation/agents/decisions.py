@@ -71,6 +71,7 @@ def decision_request(messages, tools, tokenizer, *, role, stage, max_output_toke
                      allow_wait=False, displayed_ids=None, price_ids=None):
     request, count = prepare_request(messages, tools, tokenizer, max_output_tokens=max_output_tokens)
     request['agent_role'] = role
+    request['decision_stage'] = stage
     request['action_output'] = action_output(stage, allow_control_actions=allow_wait,
                                             displayed_ids=displayed_ids, price_ids=price_ids,
                                             allow_unknown_prices=stage == "seller")
