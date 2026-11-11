@@ -25,6 +25,7 @@ class TargetPricingTests(MarketFixture, unittest.TestCase):
 
     def test_target_view_preserves_shop_period_and_does_not_mutate_snapshot(self):
         full, _ = self.runtime.inputs.seller(10, retrieve=False, observe=False, include_market=False)
+        full["market_semantics"] = {"scope": ["public observations before cutoff"]}
         before = deepcopy(full)
         snapshot = PricingSnapshot(full)
         a, b = snapshot.view([1]), snapshot.view([3])
@@ -32,6 +33,9 @@ class TargetPricingTests(MarketFixture, unittest.TestCase):
         self.assertEqual([p['item_id'] for p in a['owned_products']], [1])
         self.assertNotIn('shop_summary', a)
         self.assertEqual(a['shop_scope'], b['shop_scope'])
+        self.assertEqual(a['market_semantics'], full['market_semantics'])
+        a['market_semantics']['scope'].append('changed')
+        self.assertEqual(b['market_semantics'], full['market_semantics'])
         self.assertEqual(set(a['simulation_state']['active_prices']), {'1'})
         self.assertTrue(all(r['item_id']==1 for e in a['short_term_memory'] for r in e['content']))
         a['owned_products'][0]['last_observed_price_raw'] = 900

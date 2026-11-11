@@ -35,7 +35,11 @@ def build_pricing_context(
     valid_references=None,
     price_histories=None,
 ):
-    """Build shop facts from one seller's observed and settled rows."""
+    """Build shop facts from one seller's observed and settled rows.
+
+    Incremental callers provide price histories for every retained product;
+    valid_references contains only products with an earlier valid quote.
+    """
     grouped = group_business_history(
         observed, owner_id=owner_id, cutoff=cutoff,
         simulated=simulated, simulation_cutoff=simulation_cutoff,
@@ -95,6 +99,7 @@ def build_pricing_context(
     memory, coverage = recent_business_history(grouped, observations_per_item)
     public_pages = list(public_pages)
     for page in public_pages:
+        require(page["item_id"] in grouped, "Public page must identify an owned product")
         require(page["history_cutoff_exclusive"] == cutoff, "Public page cutoff mismatch")
         for r in page["candidates"]:
             require(set(r) == set(PUBLIC_FIELDS), "Nonpublic competitor fields")
@@ -170,7 +175,14 @@ def overview_context(full, detail_item_ids):
             retained.update(content=rows, source_ids=sources)
             memory.append(retained)
 
-    result = {k: memory if k == "short_term_memory" else deepcopy(v) for k, v in full.items()}
+    result = {k: deepcopy(v) for k, v in full.items()
+              if k not in ("short_term_memory", "owned_products", "product_details")}
+    result["short_term_memory"] = memory
+    detail_fields = set(PROFILE_FIELDS) - {"item_id", "item_title"}
+    result["owned_products"] = [
+        {k: deepcopy(v) for k, v in p.items() if k not in detail_fields}
+        for p in full["owned_products"]
+    ]
     simulated = any(value["simulation"] for value in records.values())
     for product in result["owned_products"]:
         for clock in ("observed", "simulation"):
@@ -187,14 +199,10 @@ def overview_context(full, detail_item_ids):
 
     # Store-wide statistics remain visible; full attributes are available on demand.
     result["product_details"] = [
-        {k: p[k] for k in PROFILE_FIELDS}
-        for p in result["owned_products"]
+        {k: deepcopy(p[k]) for k in PROFILE_FIELDS}
+        for p in full["owned_products"]
         if p["item_id"] in selected
     ]
-    for product in result["owned_products"]:
-        for field in PROFILE_FIELDS:
-            if field not in ("item_id", "item_title"):
-                product.pop(field)
 
     result["history_presentation"] = {
         "overview": SHOP_OVERVIEW_NOTE,
@@ -206,7 +214,7 @@ def overview_context(full, detail_item_ids):
 
 SHARED_FIELDS = frozenset((
     "profile", "history_cutoff_exclusive", "report_window", "observed_price_history_semantics",
-    "simulation_cutoff_exclusive", "decision_time", "price_scope",
+    "simulation_cutoff_exclusive", "decision_time", "price_scope", "market_semantics",
     "shop_scope", "observed_shop_period", "business_report", "retrieved_context", "long_term_memory",
 ))
 
@@ -242,7 +250,7 @@ class PricingSnapshot:
         if "public_product_pages" in self.overview:
             result["public_product_pages"] = [
                 deepcopy(page) for page in self.overview["public_product_pages"]
-                if page.get("item_id") in requested
+                if page["item_id"] in requested
             ]
         result["owned_products"] = [deepcopy(self.products[item]) for item in ids]
         references = {segment["item_id"] for segment in

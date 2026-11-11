@@ -49,6 +49,18 @@ class OverviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Simulation cutoff is required"):
             build_pricing_context(observed, simulated=[feedback], **params)
 
+    def test_public_page_is_bound_to_an_owned_product(self):
+        params = dict(owner_id=10, cutoff=9, observations_per_item=2,
+                      requested_item_ids=[1])
+        page = {"item_id": 1, "history_cutoff_exclusive": 9, "candidates": []}
+        context, _ = build_pricing_context([event(1, 1, 100)], public_pages=[page], **params)
+        self.assertEqual(context["public_product_pages"], [page])
+        with self.assertRaisesRegex(ValueError, "Public page must identify an owned product"):
+            build_pricing_context([event(1, 1, 100)], public_pages=[dict(page, item_id=2)], **params)
+        del page["item_id"]
+        with self.assertRaises(KeyError):
+            build_pricing_context([event(1, 1, 100)], public_pages=[page], **params)
+
     def test_builder_consumes_observations_once_and_keeps_exact_cutoffs(self):
         observed = [event(1, 1, 100), event(1, 7, None, "invalid_price"), event(1, 9, 999)]
         feedback = {**event(1, 0, 90), "request_id": 1, "search_step": 1, "settled_step": 2}
@@ -84,6 +96,8 @@ class OverviewTests(unittest.TestCase):
         self.assertEqual(projected["owned_products"][0]["last_observed_price_raw"], 120)
         self.assertNotIn("observed_estimated_units_sold", a)
         projected["short_term_memory"][-1]["content"][0]["price_raw"] = 999
+        projected["owned_products"][0]["business_summary"]["statistics_30d"]["orders"] = 999
+        projected["product_details"][0]["item_title"] = "Changed title"
         self.assertEqual(original, before)
 
     def test_sft_and_runtime_share_overview_and_retrievable_details(self):
