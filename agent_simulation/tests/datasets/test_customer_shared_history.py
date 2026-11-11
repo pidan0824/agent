@@ -243,7 +243,7 @@ class ContextSummaryTests(unittest.TestCase):
         with patch("agent_simulation.agents.context.context_model", return_value=model):
             shown = decode_input(messages(state)[1]["content"])
         self.assertEqual(client.requests, [])
-        self.assertEqual(shown, before)
+        self.assertEqual(shown, {**before, "profile": {}})
         self.assertEqual(state, before)
 
     def test_background_title_sharing_avoids_unnecessary_summary(self):
@@ -289,7 +289,7 @@ class ContextSummaryTests(unittest.TestCase):
         with patch("agent_simulation.agents.context.context_model", return_value=None):
             result = messages(state, response=True)
         self.assertIn('"title_ref"', result[1]["content"])
-        self.assertEqual(decode_input(result[1]["content"]), before)
+        self.assertEqual(decode_input(result[1]["content"]), {**before, "profile": {}})
         self.assertEqual(state, before)
 
     def test_short_history_skips_generation_and_preserves_prompt(self):

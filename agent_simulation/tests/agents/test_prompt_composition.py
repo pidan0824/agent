@@ -27,7 +27,7 @@ class PromptCompositionTests(unittest.TestCase):
         response = customer_decision_messages({**state, 'query': '保温杯', 'displayed_items': []}, response=True)
         self.assertNotIn('"action":"exit"', response[0]['content'])
         self.assertEqual(response[0]['content'].count('"clicked_item_ids"'), 1)
-        self.assertEqual(decode_input(training[1]['content']), state)
+        self.assertEqual(decode_input(training[1]['content']), {**state, 'profile': {}})
         self.assertEqual(json.loads(training[-1]['content']), {'query': '保温杯'})
         self.assertEqual(state, original)
         for request in (training, runtime, response):

@@ -49,7 +49,7 @@ class IntegratedTests(CatalogFixture, unittest.TestCase):
         self.assertEqual(q["input"]["short_term_memory"], r["input"]["short_term_memory"])
         self.assertNotIn("query", q["input"])
         self.assertNotIn("is_clicked", json.dumps(r["input"]["displayed_items"]))
-        self.assertEqual(decode_customer(q["messages"][1]["content"]), project_customer(q["input"]))
+        self.assertEqual(decode_customer(q["messages"][1]["content"]), project_customer(q["input"], query=True))
         self.assertEqual(r["messages"], messages(r["input"], r["target"], response=True))
 
     def test_background_is_prior_frozen_and_not_an_event(self):

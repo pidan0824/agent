@@ -38,9 +38,12 @@ class SFTRegressionTests(unittest.TestCase):
     def test_reviewed_lite_sample_outputs(self):
         directory = PROJECT_ROOT / "data/kuaisearch/lite/sft"
         tokenizer = PROJECT_ROOT / "models/Qwen2.5-3B-Instruct"
-        manifest = json.loads((directory / "manifest.json").read_text())
+        manifest_path = directory / "manifest.json"
+        if not manifest_path.is_file() or not (tokenizer / "tokenizer.json").is_file():
+            self.skipTest("The fixed Lite catalog and tokenizer are required")
+        manifest = json.loads(manifest_path.read_text())
         catalog = Path(manifest["catalog"])
-        if not (catalog / "catalog.duckdb").is_file() or not (tokenizer / "tokenizer.json").is_file():
+        if not (catalog / "catalog.duckdb").is_file():
             self.skipTest("The fixed Lite catalog and tokenizer are required")
 
         with closing(SFTDataset(directory, tokenizer)) as data:

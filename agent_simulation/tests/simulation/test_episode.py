@@ -168,18 +168,20 @@ class EpisodeTests(MarketFixture, unittest.TestCase):
             case = EpisodeTests()
             case.setUp()
             try:
-                prompts = {}
                 def decide(request, call_id):
                     ctx = decode_input(request["messages"][1]["content"])
                     response = "displayed_items" in ctx
-                    prompts[(ctx["profile"]["user_id"], response)] = request["messages"]
                     if not response:
                         return answer({"query": "水杯"})
                     return answer({"clicked_item_ids": [ctx["displayed_items"][0]["item_id"]],
                                    "purchased_item_ids": []})
                 episode = case.make_episode([keep] * 3, [decide] * 4, ticks=1)
                 episode.concurrency = limit
-                episode.step()
+                tick = episode.step()
+                prompts = {
+                    (run["actor"], call["stage"]): call["request"]["messages"]
+                    for run in tick["customers"] for call in run["model_calls"]
+                }
                 state = case.runtime.snapshot()
                 return prompts, state["customers"], state["feedback"]
             finally:

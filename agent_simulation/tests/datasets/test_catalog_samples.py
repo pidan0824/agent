@@ -64,7 +64,7 @@ class CatalogSampleTests(CatalogFixture, unittest.TestCase):
         self.assertNotIn("query", query["input"])
         self.assertEqual(response["input"]["query"], query["target"]["query"])
         self.assertEqual(query["input"]["long_term_memory"], [])
-        self.assertEqual(decode_customer(query["messages"][1]["content"]), project_customer(query["input"]))
+        self.assertEqual(decode_customer(query["messages"][1]["content"]), project_customer(query["input"], query=True))
 
     def test_catalog_sft_has_one_price_label_and_shop_context(self):
         from agent_simulation.datasets.samples.seller import seller_sample

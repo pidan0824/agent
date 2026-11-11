@@ -31,6 +31,7 @@ class CustomerEvidenceTests(unittest.TestCase):
         })
         before = deepcopy(original)
         visible = project_customer(original)
+        self.assertNotIn("user_id", visible["profile"])
         self.assertEqual(original, before)
         recent = visible["short_term_memory"]["search_history"]
         self.assertEqual(

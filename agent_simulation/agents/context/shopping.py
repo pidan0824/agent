@@ -94,6 +94,8 @@ def project_customer(state, *, query=False):
         return result
 
     visible = dict(state)
+    if "profile" in state:
+        visible["profile"] = {key: value for key, value in profile.items() if key != "user_id"}
     if "candidate_batch" in state:
         # Batch numbers are bookkeeping and must not change the model's input size.
         visible["candidate_batch"] = {"request_item_count": state["candidate_batch"]["request_item_count"]}

@@ -92,7 +92,7 @@ class RepresentationTests(unittest.TestCase):
         snapshot = deepcopy(state)
         target = {'clicked_item_ids': [2, 4], 'purchased_item_ids': [4, 8]}
         result = messages(state, target, response=True)
-        self.assertEqual(decode_input(result[1]['content']), snapshot)
+        self.assertEqual(decode_input(result[1]['content']), {**snapshot, 'profile': {}})
         self.assertEqual(state, snapshot)
         self.assertEqual(json.loads(result[-1]['content']), target)
         table = json.loads(result[1]['content'])['displayed_items']['$table']

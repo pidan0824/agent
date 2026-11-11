@@ -33,11 +33,25 @@ class FrameworkBoundaryTests(MarketFixture, unittest.TestCase):
         self.assertEqual(self.runtime.snapshot()['active_prices']['1']['price_raw'], 130)
 
     def test_native_provider_wait_exit_and_invalid_output_are_single_calls(self):
+        from agent_simulation.agents.prompts.seller import decode_input
+
         stages = []
+        customer_actions = iter(["no_action", "no_action", "exit", "exit", "exit"])
+        quotes = {1: 120, 2: 80, 3: 200, 4: 60}
+
         def respond(messages, info):
             stages.append([t.name for t in info.function_tools])
-            action = "no_action" if len(stages) <= 3 else "exit"
-            return ModelResponse(parts=[TextPart(answer({"action": action})["content"])])
+            text = messages[-1].parts[-1].content
+            if text == "Summarize.":
+                action = {"action": next(customer_actions)}
+            else:
+                view = strict_json(text)
+                if "decision" in view:
+                    items = decode_input(text)["decision"]["requested_item_ids"]
+                    action = {"prices": [{"item_id": item, "price_raw": quotes[item]} for item in items]}
+                else:
+                    action = {"action": next(customer_actions)}
+            return ModelResponse(parts=[TextPart(answer(action)["content"])])
         client = FrameworkClient(FunctionModel(respond), TokenizerFixture(), 2048)
         self.runtime.catalog = ProfileCatalogFixture(self.runtime)
         self.runtime.catalog.connection = None
@@ -45,13 +59,13 @@ class FrameworkBoundaryTests(MarketFixture, unittest.TestCase):
         customer = CustomerAgent(self.runtime, client, client.tokenizer)
         Episode(self.runtime, seller, customer, tick_size=1, max_ticks=2).run()
         self.assertEqual(self.runtime.snapshot()['clock']['termination_reason'], 'all_customers_exited')
-        self.assertEqual(stages, [[]] * 5)
+        self.assertEqual(stages, [[]] * 10)
         # The same text is invalid under the declared memory-summary schema.
         with self.assertRaises(ModelOutputError):
             client.complete({'messages':[{'role':'user','content':'Summarize.'}], 'tools':[],
                              'json_schema':{'type':'object','required':['content','source_ids']}},
                             call_id='invalid-summary')
-        self.assertEqual(len(stages), 6)
+        self.assertEqual(len(stages), 11)
 
     def test_local_provider_keeps_the_original_tokenizer_request(self):
         backend = ScriptedModel([answer({'prices':[{'item_id':1,'price_raw':120},{'item_id':3,'price_raw':200}]})])
