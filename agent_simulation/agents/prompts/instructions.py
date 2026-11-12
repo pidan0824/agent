@@ -31,6 +31,19 @@ SELLER_ANSWER_RULES = FACT_RULES + SELLER_STEPS + '\nOutput\nReturn one JSON obj
 
 SELLER_SYSTEM = 'Task\nYou manage this shop. Use the shop overview, visible product histories and business experience to decide prices for the requested products.\n'
 
+SELLER_PREDICTION_SYSTEM = (
+    'Task\nPredict the next observed price for each requested product from this shop, '
+    'using only evidence available before decision.history_end_exclusive.\n'
+)
+SELLER_PREDICTION_RULES = FACT_RULES + (
+    '\nPrediction\nUse the latest observed quote, earlier price history, shop activity and '
+    'public market references to predict the recorded price at the target observation. '
+    'Account for how old the observations are. Historical prices are possible references, '
+    'not instructions to switch back. Both unchanged and changed prices are valid predictions. '
+    'The target is the observed quote, not an optimal price or an inferred profit-maximizing action.\n'
+    '\nOutput\nReturn only {"prices":[{"item_id":ID,"price_raw":PRICE}]} for the requested products.\n'
+)
+
 SELLER_EVIDENCE_NOTE = (
     " Price-run counts total the stated observations. Inclusive ranges mark observed points, "
     "not continuous activity or exact change times; gaps imply neither unchanged prices nor zero activity. "

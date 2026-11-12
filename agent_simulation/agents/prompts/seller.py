@@ -10,6 +10,7 @@ from agent_simulation.agents.prompts.context_format import answer_message, compa
 from agent_simulation.agents.prompts.instructions import (
     FACT_RULES, SELLER_STEPS, SELLER_EVIDENCE_NOTE, SELLER_SUPERVISED_SCOPE, SELLER_SYSTEM, SELLER_ANSWER_RULES,
     SHOP_BATCH_NOTE, TABLE_NOTE, VALUE_NOTE, MEMORY_NOTE,
+    SELLER_PREDICTION_SYSTEM, SELLER_PREDICTION_RULES,
 )
 
 
@@ -68,7 +69,9 @@ def seller_messages(state, target=None, *, system=SELLER_SYSTEM, rules=SELLER_AN
 
 
 def pricing_messages(context, target=None, audit_sink=None, *, prepared_evidence=None):
-    result = seller_messages(context, target, audit_sink=audit_sink, prepared_evidence=prepared_evidence)
+    result = seller_messages(context, target, system=SELLER_PREDICTION_SYSTEM,
+                             rules=SELLER_PREDICTION_RULES, audit_sink=audit_sink,
+                             prepared_evidence=prepared_evidence)
     result[0]["content"] += SELLER_SUPERVISED_SCOPE
     if "product_batch" in context:
         result[0]["content"] += SHOP_BATCH_NOTE

@@ -22,6 +22,18 @@ class RepresentationTests(unittest.TestCase):
         self.assertNotIn("999.5", messages[1]["content"])
         self.assertEqual(messages[:2], seller_messages(state))
 
+    def test_forecast_and_runtime_keep_same_facts_but_different_tasks(self):
+        from agent_simulation.agents.prompts.seller import pricing_messages, seller_decision_messages
+        state = seller_state()
+        forecast = pricing_messages(state)
+        runtime = seller_decision_messages(state)
+        self.assertEqual(forecast[1], runtime[1])
+        self.assertIn("Predict the next observed price", forecast[0]["content"])
+        self.assertNotIn("The environment activates prices", forecast[0]["content"])
+        self.assertIn("You manage this shop", runtime[0]["content"])
+        target = {"prices": [{"item_id": 1, "price_raw": 999.5}]}
+        self.assertEqual(pricing_messages(state, target)[:2], forecast)
+
     def test_roundtrip_preserves_types_unicode_and_row_order(self):
         rows = [
             {"id": 1, "x": None, "v": False, "zero": 0.0, "s": '中文\\"'},

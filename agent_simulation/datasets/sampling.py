@@ -404,6 +404,64 @@ def select_seller_training(dataset, candidates, output, *, keep_ratio=4):
     return result
 
 
+
+def broaden_seller_quote_gaps(connection, labels, previous, output, *, gap_limit=5000, seed=42):
+    """Keep half of each direction's recent targets; replace half with older-quote targets.
+
+    Only Train labels are candidates. Original history and held-out files are untouched.
+    Each item appears once; the previous direction counts remain unchanged.
+    """
+    c = connection
+    c.execute(f"""CREATE TEMP TABLE seller_gap_pool AS
+        WITH targets AS (SELECT * FROM read_parquet({literal(labels)})), earlier AS (
+            SELECT h.seller_id,h.item_id,h.time_index,h.price_raw FROM seller_history h
+            SEMI JOIN targets t USING(seller_id,item_id)
+            WHERE h.price_status='observed' AND isfinite(h.price_raw) AND h.price_raw>0
+        )
+        SELECT t.sample_id AS record_id,t.seller_id AS actor_id,t.seller_id,t.item_id,
+               t.history_cutoff_exclusive,t.history_cutoff_exclusive-h.time_index AS quote_gap,
+               CASE WHEN t.target_price_raw>h.price_raw THEN 'up'
+                    WHEN t.target_price_raw<h.price_raw THEN 'down' ELSE 'keep' END AS direction
+        FROM targets t ASOF JOIN earlier h ON t.seller_id=h.seller_id AND t.item_id=h.item_id
+                                          AND t.history_cutoff_exclusive>h.time_index
+    """)
+    c.execute(f"""CREATE TEMP TABLE previous_seller_targets AS
+        SELECT p.* FROM seller_gap_pool p
+        SEMI JOIN read_parquet({literal(previous)}) old USING(record_id)
+    """)
+    quotas = dict(c.execute('SELECT direction,count(*) FROM previous_seller_targets GROUP BY 1').fetchall())
+    require(quotas and all(n % 2 == 0 for n in quotas.values()), 'Need even per-direction counts for a half-replacement comparison')
+    require(c.execute('SELECT max(quote_gap) FROM previous_seller_targets').fetchone()[0] <= gap_limit,
+            'Previous comparison must contain only recent-quote targets')
+    c.execute('CREATE TEMP TABLE seller_gap_selected AS SELECT * FROM seller_gap_pool WHERE false')
+    order = f"sha256(record_id || ':gap:' || {literal(seed)}),record_id"
+    for direction, count in sorted(quotas.items()):
+        c.execute(f"""INSERT INTO seller_gap_selected
+            SELECT * FROM previous_seller_targets WHERE direction=?
+            ORDER BY {order} LIMIT ?""", [direction,count//2])
+    # Sample distinct long-gap items without favoring the shortest observed gap.
+    for direction, count in sorted(quotas.items()):
+        c.execute(f"""INSERT INTO seller_gap_selected
+            WITH distinct_items AS (
+                SELECT p.* FROM seller_gap_pool p
+                ANTI JOIN seller_gap_selected chosen USING(item_id)
+                WHERE direction=? AND quote_gap>?
+                QUALIFY row_number() OVER(PARTITION BY item_id ORDER BY {order})=1
+            ) SELECT * FROM distinct_items ORDER BY {order} LIMIT ?""",
+            [direction,gap_limit,count//2])
+    counts = c.execute('SELECT direction,quote_gap>? AS older,count(*) FROM seller_gap_selected GROUP BY 1,2',
+                       [gap_limit]).fetchall()
+    require({(d,older):n for d,older,n in counts} ==
+            {(d,older):n//2 for d,n in quotas.items() for older in (False,True)},
+            'Insufficient distinct products for the requested gap comparison')
+    c.execute(f"""COPY (SELECT record_id,actor_id,seller_id,item_id,history_cutoff_exclusive
+        FROM seller_gap_selected ORDER BY actor_id,history_cutoff_exclusive,item_id)
+        TO {literal(output)} (FORMAT PARQUET)""")
+    return {'recent_gap_max':gap_limit, 'recent_fraction':0.5, 'direction_counts':quotas,
+            'groups':c.execute('SELECT direction,quote_gap>? AS older,count(*),min(quote_gap),median(quote_gap),max(quote_gap) '
+                               'FROM seller_gap_selected GROUP BY 1,2 ORDER BY 1,2',[gap_limit]).fetchall()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('dataset', 'output'):
