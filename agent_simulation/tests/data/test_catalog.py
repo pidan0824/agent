@@ -2,6 +2,9 @@
 
 import json
 import unittest
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 
 import duckdb
 from agent_simulation.tests.data.fixtures import CatalogFixture
@@ -80,3 +83,27 @@ class CatalogTests(CatalogFixture, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackgroundRebuildTests(unittest.TestCase):
+    def test_rebuild_updates_manifest_to_match_written_background(self):
+        from agent_simulation.data.build.catalog import build_customer_background
+        from agent_simulation.data.common import sha256
+        with tempfile.TemporaryDirectory() as temp, duckdb.connect() as c:
+            root = Path(temp)
+            (root / 'facts').mkdir()
+            manifest = root / 'manifest.json'
+            manifest.write_text(json.dumps({'files': {'customer_background': {'sha256': 'old'}},
+                                            'dataset': 'unchanged'}))
+            c.execute("CREATE TABLE requests AS SELECT 1 session_id,2 user_id,3 time_index,'train' split")
+            c.execute("CREATE TABLE source_rows AS SELECT *,[4] recently_clicked_item_ids,"
+                      "[5] recently_purchased_item_ids,'{}' user_statistical_features FROM requests")
+            for items in ('[4]', '[4,6]'):
+                c.execute('UPDATE source_rows SET recently_clicked_item_ids=' + items)
+                with patch('agent_simulation.data.build.catalog.raw_ranking', return_value='source_rows'):
+                    result = build_customer_background(c, root, root)
+                saved = json.loads(manifest.read_text())
+                self.assertEqual(saved['files']['customer_background'], result)
+                self.assertEqual(saved['dataset'], 'unchanged')
+                self.assertEqual(result['sha256'], sha256(root / 'facts/customer_background.parquet'))
+                self.assertEqual(result['rows'], 1)

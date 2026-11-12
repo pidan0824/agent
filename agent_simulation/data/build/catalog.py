@@ -11,6 +11,7 @@ import duckdb
 from agent_simulation.data.common import Config, copy_parquet, difference, literal, require, save_json, sha256
 from agent_simulation.data.build.splits import validate_sources
 from agent_simulation.data.build.seller_tables import raw_ranking
+from agent_simulation.logs import write_report
 
 RANK_SELECT = """session_id,target_item_id AS item_id,time_index,target_item_price AS price_raw,
     is_clicked,is_purchased,split AS source_split"""
@@ -82,6 +83,8 @@ def convert(c, query, path, order):
 
 def build_customer_background(c, ranking, output):
     """Store one factual snapshot per request, not one copy per exposed item."""
+    manifest_path = Path(output) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
     c.execute(f"""CREATE OR REPLACE TEMP TABLE backgrounds AS
         SELECT DISTINCT user_id,session_id,time_index,split AS source_split,
             recently_clicked_item_ids,recently_purchased_item_ids,user_statistical_features
@@ -98,6 +101,9 @@ def build_customer_background(c, ranking, output):
     try:
         result = convert(c, query, temporary, "user_id,time_index,session_id")
         temporary.replace(path)
+        if manifest is not None:
+            manifest["files"]["customer_background"] = result
+            write_report(manifest_path, manifest)
     finally:
         temporary.unlink(missing_ok=True)
         c.execute("DROP TABLE backgrounds")

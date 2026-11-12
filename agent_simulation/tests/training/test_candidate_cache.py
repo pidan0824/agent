@@ -172,6 +172,24 @@ class CandidateCacheTests(unittest.TestCase):
                     view=c.execute("SELECT sql FROM duckdb_views() WHERE view_name='seller_history' AND temporary").fetchone()[0]
                     self.assertEqual('seller_market_cache.by_seller' in view,cached)
 
+    def test_resume_retries_unfinished_failure_but_rejects_corrupt_complete_lines(self):
+        from agent_simulation.datasets.tokens import RecordWriter
+        with tempfile.TemporaryDirectory() as temp:
+            args = SimpleNamespace(output=Path(temp), reserve_gib=0)
+            writer = RecordWriter(args, 'customer', 'train', 0, expected=2)
+            writer.reject('1', ContextCapacityError('too long'))
+            with writer.failures.open('ab') as log:
+                log.write(b'{"record_id":"2","detail":"\xe6')
+            restored = RecordWriter(args, 'customer', 'train', 0, expected=2)
+            self.assertEqual(restored.restored, {'1'})
+            self.assertEqual(restored.seen, 1)
+            restored.reject('2', ContextCapacityError('too long'))
+            self.assertEqual(RecordWriter(args, 'customer', 'train', 0).restored, {'1', '2'})
+            with writer.failures.open('ab') as log:
+                log.write(b'not json\n')
+            with self.assertRaises(json.JSONDecodeError):
+                RecordWriter(args, 'customer', 'train', 0)
+
     def test_capacity_rejection_is_whole_record_and_other_errors_fail(self):
         for failure in (ContextCapacityError('too long'),ValueError('corrupt label')):
             with self.subTest(failure=type(failure)),tempfile.TemporaryDirectory() as temp:

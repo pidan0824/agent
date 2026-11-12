@@ -270,10 +270,9 @@ class CategorySnapshots:
         self.categories.move_to_end(category)
         while len(self.categories) > 8 or (len(self.categories)>1 and
                 sum(len(value[1]) for value in self.categories.values())>100000):
-            key,_ = self.categories.popitem(last=False)
-            self.derived.pop(key,None)
+            self.categories.popitem(last=False)
         if len(products)>100000:
-            self.categories.pop(category,None); self.derived.pop(category,None)
+            self.categories.pop(category,None)
         return view
 
 

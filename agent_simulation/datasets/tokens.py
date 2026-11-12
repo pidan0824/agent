@@ -58,6 +58,8 @@ def validate_release(root, directory, seed, *, role=None, tokenizer_path=None):
     expected = selected_identity(directory, selection, selection_hash, seed, spec['buckets'],
                                  tokenizer_digest=digest)
     require(selection['dataset_manifest_sha256'] == expected['dataset'], 'Selected cache source differs')
+    # Finished tokens retain their build-time context settings. preflight +
+    # bind_release compare current inputs when building or resuming shards.
     for key in ('background_sha256', 'compact_customer_background', 'customer_response_batching', 'context_processing'):
         if key in spec:
             expected[key] = spec[key]
@@ -132,7 +134,13 @@ class RecordWriter:
                 if getattr(args, 'verify', False):
                     require(sha256(path) == entry['sha256'], 'Committed shard changed')
         if self.failures.exists():
-            self.excluded = [json.loads(line) for line in self.failures.read_text().splitlines()]
+            with self.failures.open('r+b') as log:
+                payload = log.read()
+                end = payload.rfind(b'\n') + 1
+                # A crash may leave the last record unfinished; retry that record.
+                if end < len(payload):
+                    log.truncate(end)
+                self.excluded = [json.loads(line) for line in payload[:end].splitlines()]
         self.seen = len(self.accepted) + len(self.excluded)
         self.restored = set(self.accepted) | {f['record_id'] for f in self.excluded}
 
