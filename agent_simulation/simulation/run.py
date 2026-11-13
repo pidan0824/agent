@@ -158,7 +158,9 @@ def run(args, *, load_model=None):
     if load_model is None and getattr(args, "inference_backend", "transformers") != "vllm":
         require(all(getattr(args, name, None) is None
                     for name in ("served_model", "customer_served_model", "seller_served_model",
-                                 "customer_query_served_model", "customer_response_served_model")),
+                                 "customer_query_served_model", "customer_response_served_model",
+                                 "customer_click_ranker_served_model", "customer_click_threshold",
+                                 "customer_purchase_ranker_served_model", "customer_purchase_threshold")),
                 "Served model names require --inference-backend vllm")
     require(getattr(args, "initial_memory", None) is None or args.mode == "episode",
             "Initial memory is only used in Episode mode")
@@ -319,6 +321,10 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     from agent_simulation.inference.vllm import add_server_arguments
     add_server_arguments(p)
+    p.add_argument("--customer-click-ranker-served-model", help="Optional vLLM LoRA for Customer click scoring")
+    p.add_argument("--customer-click-threshold", type=float, help="Calibrated click score cutoff for the ranker")
+    p.add_argument("--customer-purchase-ranker-served-model", help="Optional vLLM LoRA for Customer purchase scoring")
+    p.add_argument("--customer-purchase-threshold", type=float, help="Calibrated purchase score cutoff for the ranker")
     p.add_argument("--catalog", type=Path, required=True)
     p.add_argument("--model", type=Path, required=True,
                    help="Local Qwen checkpoint; with vLLM, the matching local tokenizer directory")

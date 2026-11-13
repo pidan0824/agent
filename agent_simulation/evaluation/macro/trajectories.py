@@ -72,17 +72,15 @@ def price_dynamics(values, *, initial_price=None):
 
 
 def align_prices(observations, tick_times):
-    """Align time-ordered quotes in the completed window to the nearest ticks."""
+    """Keep the first observed quote in each tick's half-open interval."""
     matched = {}
-    tick_size = tick_times.step
+    end = tick_times.start + len(tick_times) * tick_times.step
     for observation in observations:
         time = observation["time_index"]
-        tick, offset = divmod(time - tick_times.start, tick_size)
-        tick = min(tick + (2 * offset > tick_size), len(tick_times) - 1)
-        tick_time = tick_times[tick]
-        distance = abs(time - tick_time)
-        if tick not in matched or distance < abs(matched[tick]["time_index"] - tick_time):
-            matched[tick] = dict(observation, tick=tick, logical_time=tick_time)
+        if tick_times.start <= time < end:
+            tick = (time - tick_times.start) // tick_times.step
+            if tick not in matched:
+                matched[tick] = dict(observation, tick=tick, logical_time=tick_times[tick])
     return list(matched.values())
 
 
@@ -113,14 +111,19 @@ def compare(directory, catalog_path, output):
                 price["status"] = "missing_initial_price" if start_price is None else "no_completed_ticks"
                 continue
             generated = []
+            changed_ticks = set()
             current = start_price
             for tick, time in enumerate(tick_times):
-                current = quotes.get((item_id, time), current)
+                updated = quotes.get((item_id, time), current)
+                if updated != current:
+                    changed_ticks.add(tick)
+                current = updated
                 generated.append({"tick": tick, "logical_time": time, "price_raw": current})
             observed = rows(
                 catalog.connection,
                 """SELECT time_index,price_raw FROM seller_history
                 WHERE item_id=? AND time_index>=? AND time_index<? AND price_status='observed'
+                      AND isfinite(price_raw) AND price_raw>0
                 ORDER BY time_index""",
                 [item_id, cutoff, completed_before],
             )
@@ -132,6 +135,9 @@ def compare(directory, catalog_path, output):
                 ),
                 reference_observations=len(observed),
                 matched_future_points=0,
+                matched_tick_share=0.0,
+                price_change_ticks=len(changed_ticks),
+                price_change_ticks_with_reference=0,
             )
             if not observed:
                 price["status"] = "no_future_reference"
@@ -145,6 +151,14 @@ def compare(directory, catalog_path, output):
                 status="aligned",
                 observed=observed,
                 matched_future_points=len(x),
+                matched_tick_share=len(x) / completed,
+                price_change_ticks_with_reference=sum(e["tick"] in changed_ticks for e in observed),
+                keep_initial_price_baseline={
+                    "price_mae_raw": statistics.mean(abs(actual - start_price) for actual in x),
+                    "mean_relative_absolute_error": statistics.mean(
+                        abs(actual - start_price) / actual for actual in x
+                    ),
+                },
                 price_mae_raw=statistics.mean(abs(actual - simulated) for actual, simulated in zip(x, y)),
                 mean_relative_absolute_error=statistics.mean(
                     abs(actual - simulated) / actual for actual, simulated in zip(x, y)
@@ -206,7 +220,7 @@ def compare(directory, catalog_path, output):
             "completed_ticks": completed,
             "reference_window": {"start_inclusive": cutoff, "end_exclusive": completed_before},
             "tick_size": tick_size,
-            "price_alignment": "Nearest completed tick, then closest quote per tick, with earlier ties. Prices are compared after the tick's decisions.",
+            "price_alignment": "Use the first valid quote in each completed tick interval and compare it with the simulated price effective in that interval.",
             "limits": [
                 "The shared clock measures source index steps. Differences can reflect platform policy as well as agent behavior.",
                 "DTW is an exploratory shape metric and permits position shifts.",

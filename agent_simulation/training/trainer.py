@@ -78,6 +78,7 @@ class BehaviorTrainer(Trainer):
         self._evaluating = False
         self.schedule_epochs = None
         self.activation_offload_tokens = None
+        self.click_decision_weight = 0.0
 
     def training_step(self, model, inputs, num_items_in_batch=None):
         limit = self.activation_offload_tokens
@@ -227,9 +228,15 @@ class BehaviorTrainer(Trainer):
         token_weights = inputs.get("token_weights")
         if token_weights is not None:
             token_weights = token_weights[:, positions + 1]
-        if self._loss_totals is not None:
+        train_click_decisions = self.click_decision_weight and not self._evaluating
+        if self._loss_totals is not None or train_click_decisions:
             losses, tokens = answer_losses(outputs.logits, targets, token_weights=token_weights, return_tokens=True)
-            self._record_loss_parts(inputs, targets, tokens, positions, weights, token_weights)
+            if self._loss_totals is not None:
+                self._record_loss_parts(inputs, targets, tokens, positions, weights, token_weights)
+            if train_click_decisions:
+                decisions = inputs["click_decisions"][:, positions + 1] & targets.ne(-100)
+                decision_loss = (tokens * decisions).sum(-1) / decisions.sum(-1).clamp_min(1)
+                losses = losses + self.click_decision_weight * decision_loss
         else:
             losses = answer_losses(outputs.logits, targets, token_weights=token_weights)
         denominator = num_items_in_batch if num_items_in_batch is not None else labels.shape[0]
@@ -296,6 +303,7 @@ def make_trainer(model, tokenizer, args, train_data, eval_data, *, evaluate_each
         processing_class=tokenizer,
         data_collator=TensorCollator(tokenizer, loss_breakdown=getattr(args, "loss_breakdown", False),
                                      action_weights=action_weights,
+                                     click_decisions=bool(getattr(args, "click_decision_weight", 0.0)),
                                      response_format_weight=(
                                          getattr(args, "response_format_weight", RESPONSE_FORMAT_WEIGHT)
                                          if getattr(args, "role", None) == "customer"
@@ -304,4 +312,5 @@ def make_trainer(model, tokenizer, args, train_data, eval_data, *, evaluate_each
     )
     trainer.schedule_epochs = getattr(args, "lr_schedule_epochs", None)
     trainer.activation_offload_tokens = getattr(args, "activation_offload_tokens", None)
+    trainer.click_decision_weight = getattr(args, "click_decision_weight", 0.0)
     return trainer

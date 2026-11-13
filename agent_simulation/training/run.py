@@ -155,7 +155,7 @@ def training_identity(args, data_check, eval_split):
                          ("keep_checkpoints", 2), ("lr_schedule_epochs", None),
                          ("activation_offload_tokens", None), ("click_weight", 1.0),
                          ("purchase_weight", 1.0), ("price_change_weight", 1.0),
-                         ("response_format_weight", 1.0)):
+                         ("response_format_weight", 1.0), ("click_decision_weight", 0.0)):
         if value.get(key) == default:
             value.pop(key, None)
     if args.role != "customer" or getattr(args, "stage", None) == "query":
@@ -242,6 +242,11 @@ def train(args):
         raise ValueError("Positive Response training requires --role customer --stage response and a finished token cache")
     if not 0 < getattr(args, "response_format_weight", RESPONSE_FORMAT_WEIGHT) <= 1:
         raise ValueError("Response format weight must be in (0, 1]")
+    click_decision_weight = getattr(args, "click_decision_weight", 0.0)
+    if not math.isfinite(click_decision_weight) or click_decision_weight < 0:
+        raise ValueError("Click decision loss weight must be finite and nonnegative")
+    if click_decision_weight and (args.role != "customer" or args.stage == "query"):
+        raise ValueError("Click decision loss requires Customer Response training")
     multipliers = {key: getattr(args, key, default) for key, default in ACTION_WEIGHTS.items()}
     if any(not math.isfinite(value) or value < 1 for value in multipliers.values()):
         raise ValueError("Action weights must be finite and at least 1")
@@ -356,6 +361,9 @@ def train(args):
                 "input_check": data_check,
                 "packages": packages,
                 "loss": "mean_over_examples(request_weight * action_multiplier * sum(token_weight * CE) / sum(token_weight))",
+                **({"train_loss_addition": "click_decision_weight * mean_over_examples(request_weight * "
+                                           "action_multiplier * mean(click_boundary_CE))"}
+                   if click_decision_weight else {}),
                 "action_weighted_rows_across_splits": len(action_weights),
                 "checkpoint_selection": f"lowest {eval_split} answer loss",
                 "evaluation_split": eval_split,
@@ -475,6 +483,8 @@ def parser():
         q.add_argument("--price-change-weight", type=float, default=ACTION_WEIGHTS["price_change_weight"], help="Train and evaluation loss multiplier for Seller quote changes (default: 2)")
         q.add_argument("--response-format-weight", type=float, default=RESPONSE_FORMAT_WEIGHT,
                        help="Customer Response fixed-format token weight in train/eval; decisions stay 1 (default: 0.25)")
+        q.add_argument("--click-decision-weight", type=float, default=0.0,
+                       help="Add mean click list start/continue/stop CE per Response during training")
         q.add_argument("--rank", type=int, default=64)
         q.add_argument("--loss-breakdown", action="store_true", help="Report stage and Response token-group evaluation losses")
         q.add_argument("--keep-checkpoints", type=int, default=2, help="Retained complete checkpoints; 0 keeps all")

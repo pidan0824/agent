@@ -79,15 +79,39 @@ class CustomerAgent(BaseAgent):
             actor, state=state, expected_request_id=pending["request_id"])
         selected = {"clicked_item_ids": set(), "purchased_item_ids": set()}
         run["response_batches"] = []
+        rankers = getattr(self.model, "customer_rankers", {})
 
         async def respond(batch):
             state, prompt = batch
             # Episode supplies a shared limit; map_decisions already bounds this Customer.
             async with (request_slots if request_slots is not None else nullcontext()):
-                return await self._stage(run, "response", state=state, prompt=prompt)
+                if "click" in rankers and "purchase" in rankers:
+                    args = {}
+                else:
+                    args = await self._stage(run, "response", state=state, prompt=prompt)
+                scores = {}
+                if rankers:
+                    ids = [p["item_id"] for p in state["displayed_items"]]
+                    revision = self.runtime.revision
+                    suffix = ids[0] if ids else "empty"
+                    for action in rankers:
+                        values = await self.model.score_customer_items(
+                            prompt, ids, action, call_id=f'{run["id"]}:{action}:{suffix}')
+                        require(self.runtime.revision == revision, "State changed during Customer scoring")
+                        require(values.keys() == set(ids), "Customer scores do not match the displayed batch")
+                        scores[action] = values
+                return args, scores
 
         responses = await map_decisions(batches, respond, concurrency=min(self.response_concurrency, len(batches)))
-        for (batch, _), args in zip(batches, responses, strict=True):
+        for action, (served, threshold) in rankers.items():
+            scores = {item: value for _, batch_scores in responses for item, value in batch_scores[action].items()}
+            ranked = sorted(scores, key=lambda item: (-scores[item], item))
+            chosen = {item for item in ranked[:3] if scores[item] >= threshold}
+            run[f"{action}_ranking"] = {"model": served, "threshold": threshold, "scores": scores}
+            field = "clicked_item_ids" if action == "click" else "purchased_item_ids"
+            for args, batch_scores in responses:
+                args[field] = [item for item in batch_scores[action] if item in chosen]
+        for (batch, _), (args, _) in zip(batches, responses, strict=True):
             run["response_batches"].append({
                 "item_ids": [p["item_id"] for p in batch["displayed_items"]],
                 "response": deepcopy(args),

@@ -72,6 +72,66 @@ class CustomerParallelTests(MarketFixture, unittest.TestCase):
         self.assertEqual(len(after['customers']['7']['simulation_history']), 1)
         self.assertEqual(after['simulation_step'], initial['simulation_step'] + 1)
 
+    def test_click_ranker_uses_request_top_three_and_preserves_purchases(self):
+        ids = self.ids
+        class Model(AsyncModel):
+            customer_rankers = {"click": ("click-ranker", 0.5)}
+
+            async def acomplete(inner, request, *, call_id):
+                context = decode_input(request['messages'][1]['content'])
+                item = context['displayed_items'][0]['item_id']
+                return answer({'clicked_item_ids': [item],
+                               'purchased_item_ids': [item] if item == ids[0] else []})
+
+            async def score_customer_items(inner, messages, item_ids, action, *, call_id):
+                self.assertEqual(action, "click")
+                return {i: 0.6 if i == ids[0] else 0.9 for i in item_ids}
+
+        run = CustomerAgent(self.runtime, Model(), DisplayBudgetTokenizer(1)).run(7)
+        selected = set(sorted(ids[1:])[:3])
+        self.assertEqual(run['result']['clicked_item_ids'], [i for i in ids if i in selected])
+        self.assertEqual(run['result']['purchased_item_ids'], [ids[0]])
+        self.assertEqual(run['response_batches'][0]['response']['clicked_item_ids'], [])
+        self.assertEqual(run['click_ranking']['model'], 'click-ranker')
+
+    def test_purchase_ranker_uses_request_top_three_and_preserves_clicks(self):
+        ids = self.ids
+
+        class Model(AsyncModel):
+            customer_rankers = {"purchase": ("purchase-ranker", 0.5)}
+
+            async def acomplete(inner, request, *, call_id):
+                item = decode_input(request["messages"][1]["content"])["displayed_items"][0]["item_id"]
+                return answer({"clicked_item_ids": [item] if item == ids[0] else [],
+                               "purchased_item_ids": [item]})
+
+            async def score_customer_items(inner, messages, item_ids, action, *, call_id):
+                self.assertEqual(action, "purchase")
+                return {item: 0.4 if item == ids[0] else 0.9 for item in item_ids}
+
+        run = CustomerAgent(self.runtime, Model(), DisplayBudgetTokenizer(1)).run(7)
+        expected = set(sorted(ids[1:])[:3])
+        self.assertEqual(run["result"]["purchased_item_ids"], [item for item in ids if item in expected])
+        self.assertEqual(run["result"]["clicked_item_ids"], [ids[0]])
+        self.assertEqual(run["purchase_ranking"]["model"], "purchase-ranker")
+
+    def test_both_rankers_settle_without_a_response_generation(self):
+        click, purchase = self.ids[:2]
+
+        class Model(AsyncModel):
+            customer_rankers = {"click": ("click-ranker", 0.5), "purchase": ("purchase-ranker", 0.5)}
+
+            async def score_customer_items(inner, messages, item_ids, action, *, call_id):
+                chosen = click if action == "click" else purchase
+                return {item: float(item == chosen) for item in item_ids}
+
+        run = CustomerAgent(self.runtime, Model(), DisplayBudgetTokenizer(1)).run(7)
+        self.assertEqual(run["result"]["clicked_item_ids"], [click])
+        self.assertEqual(run["result"]["purchased_item_ids"], [purchase])
+        self.assertEqual(run["model_calls"], [])
+        feedback = self.runtime.snapshot()["feedback"]
+        self.assertEqual([row["item_id"] for row in feedback if row["purchase_records"]], [purchase])
+
     def test_failed_batch_cancels_pending_sibling_and_keeps_search_unsettled(self):
         initial = self.runtime.snapshot()
         started, cancelled = asyncio.Event(), []

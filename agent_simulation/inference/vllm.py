@@ -2,14 +2,16 @@
 
 import asyncio
 from copy import deepcopy
+import math
 import os
 import time
 
 import httpx
 
+from agent_simulation.agents.prompts.instructions import RESPONSE_OUTPUT
 from agent_simulation.data.common import require
 from agent_simulation.inference.client import finish_reply, output_schema
-from agent_simulation.inference.requests import prepare_request, read_tokens
+from agent_simulation.inference.requests import prepare_request, prompt_tokens, read_tokens
 from agent_simulation.logs import ModelLog
 
 
@@ -59,20 +61,41 @@ def structured_output(request):
     return {"json": _generation_schema(schema)}
 
 
+CUSTOMER_CANDIDATE_OUTPUT = (
+    'Return exactly one letter for the specified candidate and this request. '
+    'A: neither click nor purchase. B: click only. C: purchase only. D: both click and purchase. '
+    'Use the complete displayed list for comparison. The candidate is identified in the next user message.'
+)
+
+
 class VLLMClient:
     """One shared connection pool; async callers release their event loop during HTTP I/O."""
 
     def __init__(self, url, model, tokenizer, *, max_new_tokens=2048, timeout=120,
-                 role_models=None, customer_stage_models=None, log_path=None):
+                 role_models=None, customer_stage_models=None, log_path=None,
+                 customer_click_model=None, customer_click_threshold=None,
+                 customer_purchase_model=None, customer_purchase_threshold=None):
         require(bool(model) and max_new_tokens > 0 and timeout > 0, 'Invalid vLLM settings')
         self.model, self.tokenizer, self.max_new_tokens = model, tokenizer, max_new_tokens
         self.role_models = dict(role_models or {})
         require(set(self.role_models) <= {'customer', 'seller'}, 'Unknown inference role')
         self.customer_stage_models = dict(customer_stage_models or {})
         require(set(self.customer_stage_models) <= {'query', 'response'}, 'Unknown Customer stage')
+        self.customer_rankers = {}
+        for action, served, threshold in (
+            ('click', customer_click_model, customer_click_threshold),
+            ('purchase', customer_purchase_model, customer_purchase_threshold),
+        ):
+            require((served is None) == (threshold is None),
+                    f'Supply both a Customer {action} model and threshold')
+            if served is not None:
+                require(bool(served) and 0 <= threshold <= 1, f'Invalid Customer {action} scoring configuration')
+                self.customer_rankers[action] = (served, threshold)
         self.generator_id = f'vllm:{model}:greedy:max_new_tokens={max_new_tokens}:roles={self.role_models}'
         if self.customer_stage_models:
             self.generator_id += f':customer_stages={self.customer_stage_models}'
+        for action, (served, threshold) in self.customer_rankers.items():
+            self.generator_id += f':customer_{action}={served}@{threshold}'
         self.log = ModelLog(log_path) if log_path is not None else None
         key = os.environ.get('VLLM_API_KEY')
         self.http = httpx.Client(base_url=url.rstrip('/') + '/', timeout=timeout,
@@ -83,10 +106,14 @@ class VLLMClient:
         response = self.http.get('models')
         response.raise_for_status()
         available = {entry['id'] for entry in response.json()['data']}
-        require({self.model, *self.role_models.values(), *self.customer_stage_models.values()} <= available,
-                'vLLM model is not served')
+        required = {self.model, *self.role_models.values(), *self.customer_stage_models.values()}
+        required.update(served for served, _ in self.customer_rankers.values())
+        require(required <= available, 'vLLM model is not served')
         return {'backend': 'vllm', 'model': self.model, 'role_models': self.role_models,
-                'customer_stage_models': self.customer_stage_models, 'remote_weights_verified': False}
+                'customer_stage_models': self.customer_stage_models, 'remote_weights_verified': False,
+                **{f'customer_{action}_{field}': value
+                   for action, (served, threshold) in self.customer_rankers.items()
+                   for field, value in (('model', served), ('threshold', threshold))}}
 
     def complete(self, request, *, call_id):
         started = time.monotonic()
@@ -117,6 +144,46 @@ class VLLMClient:
     async def acomplete(self, request, *, call_id):
         return await asyncio.to_thread(self.complete, request, call_id=call_id)
 
+    def _score_customer_items(self, messages, item_ids, action, *, call_id):
+        """Read the four constrained action scores in one request per response batch."""
+        if not item_ids:
+            return {}
+        served, _ = self.customer_rankers[action]
+        started = time.monotonic()
+        system = messages[0]["content"]
+        require(system.count(RESPONSE_OUTPUT) == 1, 'Unexpected Customer Response prompt')
+        messages = [{**messages[0], 'content': system.replace(RESPONSE_OUTPUT, CUSTOMER_CANDIDATE_OUTPUT)},
+                    *messages[1:]]
+        labels = [self.tokenizer.encode(x, add_special_tokens=False) for x in 'ABCD']
+        require(all(len(x) == 1 for x in labels), 'Expected single-token Customer candidate labels')
+        labels = [x[0] for x in labels]
+        prompts = [prompt_tokens([*messages, {'role': 'user', 'content': f'Candidate item ID: {item}'}],
+                                 [], self.tokenizer) for item in item_ids]
+        response = self.http.post('completions', json=dict(model=served,
+            prompt=prompts, max_tokens=1, temperature=0, n=1, add_special_tokens=False,
+            logprobs=4, allowed_token_ids=labels, return_tokens_as_token_ids=True))
+        response.raise_for_status()
+        data = response.json()
+        choices = sorted(data['choices'], key=lambda c: c['index'])
+        require([c['index'] for c in choices] == list(range(len(item_ids))), 'Incomplete Customer candidate scores')
+        scores = {}
+        for item, choice in zip(item_ids, choices, strict=True):
+            top, = choice['logprobs']['top_logprobs']
+            keys = [f'token_id:{label}' for label in labels]
+            require(all(k in top for k in keys), 'Serve candidate scoring with --logprobs-mode processed_logprobs')
+            a, b, c, d = (math.exp(top[k]) for k in keys)
+            require(abs(a + b + c + d - 1.) < 1e-4, 'Expected normalized Customer candidate scores')
+            scores[item] = (b if action == "click" else c) + d
+        if self.log is not None:
+            self.log.append(dict(call_id=call_id, model=self.generator_id, served_model=served,
+                decision_stage=f'response_{action}s', item_scores=scores,
+                input_tokens=data['usage']['prompt_tokens'], output_tokens=data['usage']['completion_tokens'],
+                seconds=time.monotonic() - started))
+        return scores
+
+    async def score_customer_items(self, messages, item_ids, action, *, call_id):
+        return await asyncio.to_thread(self._score_customer_items, messages, item_ids, action, call_id=call_id)
+
     def close(self):
         self.http.close()
 
@@ -139,7 +206,11 @@ def server_client(args, tokenizer):
                      if (name := getattr(args, role + '_served_model'))},
         customer_stage_models={stage: name for stage in ('query', 'response')
                                if (name := getattr(args, 'customer_' + stage + '_served_model', None))},
-        log_path=args.output / 'model_calls.jsonl')
+        log_path=args.output / 'model_calls.jsonl',
+        customer_click_model=getattr(args, 'customer_click_ranker_served_model', None),
+        customer_click_threshold=getattr(args, 'customer_click_threshold', None),
+        customer_purchase_model=getattr(args, 'customer_purchase_ranker_served_model', None),
+        customer_purchase_threshold=getattr(args, 'customer_purchase_threshold', None))
 
 
 if __name__ == '__main__':

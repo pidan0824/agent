@@ -205,6 +205,7 @@ class BehaviorTests(unittest.TestCase):
                     {"item_id": 1, "logical_time": 100, "price_raw": 105},
                     {"item_id": 1, "logical_time": 100, "price_raw": 110},
                     {"item_id": 1, "logical_time": 110, "price_raw": 80},
+                    {"item_id": 1, "logical_time": 120, "price_raw": 70},
                     {"item_id": 1, "logical_time": 130, "price_raw": 85},
                     {"item_id": 1, "logical_time": 140, "price_raw": 999},
                 ],
@@ -244,7 +245,8 @@ class BehaviorTests(unittest.TestCase):
             connection.execute(
                 """CREATE TABLE seller_history AS SELECT 1 AS item_id, time_index, price_raw, price_status
                 FROM (VALUES (99, 200, 'observed'), (105, 110, 'observed'), (110, 75, 'missing'),
-                             (118, 100, 'observed'), (122, 900, 'observed'), (138, 90, 'observed'),
+                             (118, 100, 'observed'), (122, 900, 'observed'), (126, 800, 'observed'),
+                             (130, -1, 'observed'), (138, 90, 'observed'),
                              (140, 200, 'observed')) AS quotes(time_index, price_raw, price_status)"""
             )
             connection.execute(
@@ -261,18 +263,22 @@ class BehaviorTests(unittest.TestCase):
             self.assertEqual(result["seller"][1]["status"], "missing_initial_price")
             price = result["seller"][0]
             self.assertEqual(price["initial_price"]["time_index"], 95)
-            self.assertEqual([p["price_raw"] for p in price["simulated"]], [110, 80, 80, 85])
+            self.assertEqual([p["price_raw"] for p in price["simulated"]], [110, 80, 70, 85])
             self.assertEqual(
                 [(p["time_index"], p["logical_time"]) for p in price["observed"]],
-                [(105, 100), (118, 120), (138, 130)],
+                [(105, 100), (118, 110), (122, 120), (138, 130)],
             )
-            self.assertEqual(price["reference_observations"], 4)
-            self.assertEqual(price["matched_future_points"], 3)
-            self.assertAlmostEqual(price["price_mae_raw"], 25 / 3)
-            self.assertAlmostEqual(price["mean_relative_absolute_error"], (20 / 100 + 5 / 90) / 3)
-            self.assertEqual(price["direction_agreement"], 0.5)
+            self.assertEqual(price["reference_observations"], 5)
+            self.assertEqual(price["matched_future_points"], 4)
+            self.assertEqual(price["matched_tick_share"], 1)
+            self.assertEqual(price["price_change_ticks"], 4)
+            self.assertEqual(price["price_change_ticks_with_reference"], 4)
+            self.assertAlmostEqual(price["price_mae_raw"], 855 / 4)
+            self.assertAlmostEqual(price["mean_relative_absolute_error"], (20 / 100 + 830 / 900 + 5 / 90) / 4)
+            self.assertAlmostEqual(price["direction_agreement"], 1 / 3)
+            self.assertEqual(price["keep_initial_price_baseline"]["price_mae_raw"], 205)
             full = price["simulated_full_dynamics"]
-            self.assertEqual(full["same_price_runs_observations"], [1, 2, 1])
+            self.assertEqual(full["same_price_runs_observations"], [1, 1, 1, 1])
             self.assertEqual(full["relative_changes"][0], 0.1)
             customer, exited = result["customer"]
             self.assertEqual(customer["simulated_distribution"]["requests"], 2)

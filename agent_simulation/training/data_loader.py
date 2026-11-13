@@ -237,35 +237,46 @@ class EvaluationStream(torch.utils.data.IterableDataset):
                     yield sample
 
 
-def response_token_parts(tokenizer, tokens):
+def response_token_parts(tokenizer, tokens, *, click_decisions=False):
     """0: fixed format, 1: click ID, 2: purchase ID, 3: list decisions and end tokens."""
     text = tokenizer.decode(tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False)
     encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
     if encoded["input_ids"] != list(tokens):
         raise ValueError("Cannot align answer tokens for loss breakdown")
-    spans, lists = [], []
+    spans, lists, boundaries = [], [], []
     for field in re.finditer(r'"(clicked_item_ids|purchased_item_ids)"\s*:\s*\[([^]]*)\]', text):
         lists.append((field.start(2) - 1, field.end(2) + 1))
         part = 1 if field[1] == "clicked_item_ids" else 2
+        if click_decisions and part == 1:
+            boundaries.append(field.start(2) - 1)
+            if field[2].strip():
+                boundaries.extend(field.start(2) + m.start() for m in re.finditer(",", field[2]))
+                boundaries.append(field.end(2))
         spans.extend((field.start(2) + m.start(), field.start(2) + m.end(), part)
                      for m in re.finditer(r"\d+", field[2]))
     if len(lists) != 2:
         raise ValueError("Response answer must contain both action lists")
     special = set(tokenizer.all_special_ids)
-    return [
+    parts = [
         next((part for left, right, part in spans if start < right and end > left),
              3 if token in special or any(start < right and end > left for left, right in lists) else 0)
         for token, (start, end) in zip(tokens, encoded["offset_mapping"], strict=True)
     ]
+    if click_decisions:
+        return parts, [any(start <= boundary < end for boundary in boundaries)
+                       for start, end in encoded["offset_mapping"]]
+    return parts
 
 
 class TensorCollator:
     """Keep IDs and provenance outside model kwargs; preserve request weights."""
 
-    def __init__(self, tokenizer, *, loss_breakdown=False, action_weights=None, response_format_weight=1.0):
+    def __init__(self, tokenizer, *, loss_breakdown=False, action_weights=None,
+                 response_format_weight=1.0, click_decisions=False):
         if not 0 < response_format_weight <= 1:
             raise ValueError("Response format weight must be in (0, 1]")
         self.response_format_weight = response_format_weight
+        self.click_decisions = click_decisions
         self.tokenizer = tokenizer
         self.loss_breakdown = loss_breakdown
         self.action_weights = action_weights or {}
@@ -296,14 +307,23 @@ class TensorCollator:
             result["action_multipliers"] = torch.tensor([
                 self.action_weights.get(sample.sample_id, 1.0) for sample in samples
             ], dtype=torch.float32)
-        if self.loss_breakdown or self.response_format_weight != 1:
+        if self.loss_breakdown or self.response_format_weight != 1 or self.click_decisions:
             stages = [s.sample_id.split(":", 1)[0] for s in samples]
             parts = torch.full_like(ids, -1)
+            decisions = torch.zeros_like(ids, dtype=torch.bool) if self.click_decisions else None
             for i, sample in enumerate(samples):
                 start, n = sample.answer_start, len(sample.tokens)
-                values = (response_token_parts(self.tokenizer, sample.tokens[start:])
-                          if stages[i] == "response" else [0] * (n - start))
+                if stages[i] != "response":
+                    parts[i, start:n] = 0
+                    continue
+                values = response_token_parts(self.tokenizer, sample.tokens[start:],
+                                              click_decisions=self.click_decisions)
+                if decisions is not None:
+                    values, positions = values
+                    decisions[i, start:n] = torch.tensor(positions)
                 parts[i, start:n] = torch.tensor(values)
+            if decisions is not None:
+                result["click_decisions"] = decisions
             stage_ids = torch.tensor([("query", "response", "seller").index(s) for s in stages])
             if self.response_format_weight != 1:
                 fixed = parts.eq(0) & stage_ids.eq(1).unsqueeze(1)

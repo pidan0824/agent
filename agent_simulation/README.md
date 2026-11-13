@@ -116,6 +116,10 @@ vllm serve /path/to/Qwen3.5-9B --served-model-name qwen --language-model-only \
 
 Customer 可以按阶段指定服务模型。只训练 Response 时，用 `--customer-query-served-model qwen --customer-response-served-model customer-response`。如果有 Query adapter，把 `qwen` 换成服务注册的 Query adapter 名。阶段参数覆盖 `--customer-served-model` 的角色默认值。
 
+点击评分可作为仿真对照启用。将逐商品 A/B/C/D 评分 adapter 注册为 `customer-click`，vLLM 服务增加 `--logprobs-mode processed_logprobs`，仿真增加 `--customer-click-ranker-served-model customer-click --customer-click-threshold 0.2509831265`。这个阈值来自 Qwen3.5-9B 排序损失实验的校准集。仿真对每条请求合并各批候选分数，在分数过阈值的商品中最多选三件点击，只启用点击评分时，购买仍由 Response 生成。其他评分模型应使用自己的校准阈值。
+
+购买评分可独立启用。将购买专项 adapter 注册为 `customer-purchase`，用 `--customer-purchase-ranker-served-model customer-purchase --customer-purchase-threshold 0.008164389371381513`。此阈值来自 Qwen3.5-9B 购买专项实验的校准集。每条请求在分数过阈值的商品中最多选三件购买，点击由其自身配置决定。两个评分器同时启用时，直接用两组分数生成点击和购买集合。
+
 本地测试覆盖 HTTP 协议、prompt token 保持、JSON Schema、角色路由和失败处理。真实 vLLM 服务上的生成和吞吐量需另行实测。服务模型列表核对不等于远端权重哈希核验，运行报告明确记录此区别。API 依据：[vLLM structured outputs](https://docs.vllm.ai/en/latest/features/structured_outputs/)。
 
 `simulation/run.py` 的 `run(args, load_model=...)` 支持注入其他模型。加载器返回 `(client, 模型信息)`，client 提供 `complete()`、Tokenizer 和生成预算，Tokenizer 与上下文预算需匹配所用模型。程序自动准备上下文后调用模型，查询后端和模型动作权限见[工具说明](README.md#tools)。
@@ -640,7 +644,7 @@ loss 为每条答案 Token 的平均交叉熵乘以样本权重，再对当前�
 |---|---|---|
 | `micro/behavior_prediction.py` | 微观行为预测 | 读取 SFT `test`，用真实 Query、曝光列表内的点击／购买集合、Seller 商品时点的观测价格打分 |
 | 单步评估加 `--price-response` | 微观价格干预及分布汇总 | 真实展示价下有购买标签，改价后的购买结果来自模型 |
-| `macro/trajectories.py` | 宏观轨迹对照 | 在已完成 Tick 覆盖的历史索引窗口内比较搜索活动、点击／购买率和价格曲线 |
+| `macro/trajectories.py` | 宏观轨迹对照 | 在已完成 Tick 的索引窗口内比较搜索和购买活动。报价比较使用各 Tick 内首条有效观测，另报覆盖率和保持初始价基线 |
 | `micro/relevance.py` | 微观搜索相关性 | 官方 `rank.test.jsonl` 提供 Query–商品二元相关性标签 |
 
 单步评估用本地中文 BGE 比较生成 Query 与真实 Query，报告截到 0–1 的平均余弦相似度及逐条分数。端到端均值将无效输出记 0，完全文本匹配率留作参考。相似度是连续分数，品牌、型号和规格是否一致仍可结合逐条 Query 检查。单步评估合并 Customer 分批结果后计算集合一致性和价格误差。轨迹对照使用从 cutoff 到首个未完成 Tick 的左闭右开窗口。Seller 真实报价映射到最近的已完成 Tick，同一 Tick 只取最近一条，距离相同取较早的一边。保留真实报价的原始索引，对照该 Tick 决策后的模拟价，只在有真实报价的 Tick 计算价格误差、方向一致率和探索性 DTW。初始价单列，用于计算仿真首轮的调价幅度。Customer 比较同一窗口内的完整搜索次数、间隔和搜索后的行为分布，仿真侧另报行动机会、等待和退出。
