@@ -45,7 +45,8 @@ class PromptCompositionTests(unittest.TestCase):
         self.assertEqual(json.loads(sft[-1]['content']), target)
         for system in (sft[0]["content"], first, later):
             self.assertEqual(system.count(FACT_RULES), 1)
-        self.assertIn('Return only the JSON object.', sft[0]['content'])
+        self.assertIn('Predict the next observed price', sft[0]['content'])
+        self.assertIn('Return only {"prices":', sft[0]['content'])
         self.assertIn('An empty prices list is invalid', sft[0]['content'])
         self.assertEqual(first, later)
         for system in (first, later):

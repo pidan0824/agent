@@ -1,5 +1,13 @@
 """Shared decision instructions, price convention and supervised outputs."""
 
+from pathlib import Path
+
+
+def _skill(name):
+    path = Path(__file__).with_name("skills") / (name + ".md")
+    return "\n" + path.read_text(encoding="utf-8").strip() + "\n"
+
+
 PRICE_UNIT_NOTE = 'The sandbox interprets price and estimated amount fields in RMB fen. This is a modeling convention; the original source unit is unconfirmed. Preserve stored numbers and submit prices on this same scale. Do not label these numbers as yuan or convert them.'
 
 VALUE_NOTE = 'Values are preserved; null means unknown.'
@@ -21,9 +29,9 @@ MEMORY_NOTE = (
 TITLE_NOTE = "An item_title object {title_ref:i} copies item_title from behavioral_summary.item_details[i] (zero-based)."
 
 
-SELLER_STEPS = "\nDecision\nUse the shop overview and each requested product's price, exposure, click and purchase history. Compare available market distributions and public reference prices within their stated coverage. Consider differences between your products and relevant experience. Any inferred platform exposure rule is a hypothesis. Observed prices do not establish actual backend price-change actions. Purchase counts count records; estimated units assume one unit per purchase record. The environment activates prices and settles outcomes.\n"
+SELLER_STEPS = _skill("seller-pricing")
 
-CUSTOMER_STEPS = '\nDecision\nUse the profile, recent history and retrieved experiences to assess shopping preferences. Other search topics may also inform consumption habits. Use recent behavior lists and 30-day snapshots as background, not action quotas. Repeated IDs in those lists are not quantities or independently confirmed events. Logged exposure does not prove attention; absence of a click is not explicit dislike. Past clicks and purchases belong to history, separate from the currently displayed products.\n'
+CUSTOMER_STEPS = _skill("customer-shopping")
 
 HISTORY_NOTE = 'In recent and retrieved history, clicked_item_refs and purchased_item_refs index short_term_memory.item_attributes. Its sellers_ref, brands_ref and categories_ref index short_term_memory.attribute_sets (zero-based). Historical snapshots keep their original prices.'
 
@@ -35,12 +43,7 @@ SELLER_PREDICTION_SYSTEM = (
     'Task\nPredict the next observed price for each requested product from this shop, '
     'using only evidence available before decision.history_end_exclusive.\n'
 )
-SELLER_PREDICTION_RULES = FACT_RULES + (
-    '\nPrediction\nUse the latest observed quote, earlier price history, shop activity and '
-    'public market references to predict the recorded price at the target observation. '
-    'Account for how old the observations are. Historical prices are possible references, '
-    'not instructions to switch back. Both unchanged and changed prices are valid predictions. '
-    'The target is the observed quote, not an optimal price or an inferred profit-maximizing action.\n'
+SELLER_PREDICTION_RULES = FACT_RULES + _skill("seller-next-quote") + (
     '\nOutput\nReturn only {"prices":[{"item_id":ID,"price_raw":PRICE}]} for the requested products.\n'
 )
 

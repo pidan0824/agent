@@ -1,0 +1,2 @@
+Prediction
+Use the latest observed quote, earlier price history, shop activity and public market references to predict the recorded price at the target observation. Account for how old the observations are. Historical prices are possible references, not instructions to switch back. Both unchanged and changed prices are valid predictions. The target is the observed quote, not an optimal price or an inferred profit-maximizing action.

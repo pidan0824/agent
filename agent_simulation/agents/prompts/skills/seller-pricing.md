@@ -1,0 +1,2 @@
+Decision
+Use the shop overview and each requested product's price, exposure, click and purchase history. Compare available market distributions and public reference prices within their stated coverage. Consider differences between your products and relevant experience. Any inferred platform exposure rule is a hypothesis. Observed prices do not establish actual backend price-change actions. Purchase counts count records; estimated units assume one unit per purchase record. The environment activates prices and settles outcomes.

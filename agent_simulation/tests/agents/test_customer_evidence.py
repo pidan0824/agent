@@ -2,7 +2,7 @@
 from copy import deepcopy
 import json
 import unittest
-from agent_simulation.agents.context.shopping import project_customer
+from agent_simulation.agents.context.shopping import context, project_customer
 from agent_simulation.agents.prompts.customer import decode_input, encode_input, messages, prepare_history
 from agent_simulation.agents.prompts.customer import customer_decision_messages
 
@@ -18,6 +18,25 @@ def state():
 
 
 class CustomerEvidenceTests(unittest.TestCase):
+    def test_request_means_use_recent_completed_searches_on_each_clock(self):
+        item = {"item_id": 1}
+        def search(time, clicked, purchased):
+            return dict(time_index=time, query="茶", clicked_items=clicked, purchased_items=purchased)
+
+        past = [search(1, [item], []), search(2, [], []), search(3, [item], [item])]
+        settled = [dict(settled_step=1, query="茶", clicked_items=[], purchased_items=[])]
+        state = context({}, past, settled, cutoff=4, limit=3, simulation_before=2,
+                        history_embedder=None)
+        for response in (False, True):
+            user = messages(state, response=response)[1]["content"]
+            stats = decode_input(user)["short_term_memory"]["recent_search_statistics"]
+            observed = stats["observed"]
+            self.assertEqual(observed["requests_with_recorded_outcomes"], 2)
+            self.assertEqual(observed["mean_clicked_items_per_request"], 0.5)
+            self.assertEqual(observed["mean_purchased_items_per_request"], 0.5)
+            self.assertEqual(observed["requests_without_click_or_purchase"], 1)
+            self.assertEqual(stats["settled"]["mean_clicked_items_per_request"], 0)
+
     def test_projection_preserves_order_and_does_not_mutate_source(self):
         original = state()
         simulated = {

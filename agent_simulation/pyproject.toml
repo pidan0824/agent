@@ -30,6 +30,7 @@ namespaces = false
 [tool.setuptools.package-data]
 agent_simulation = [
     "datasets/*.json",
+    "agents/prompts/skills/*.md",
     "inference/*.json",
     "platform/*.json",
     "simulation/templates/*.html",

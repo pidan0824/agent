@@ -1,0 +1,2 @@
+Decision
+Use the profile, recent history and retrieved experiences to assess shopping preferences. Other search topics may also inform consumption habits. Use recent behavior lists and 30-day snapshots as background, not action quotas. Repeated IDs in those lists are not quantities or independently confirmed events. Logged exposure does not prove attention; absence of a click is not explicit dislike. Past clicks and purchases belong to history, separate from the currently displayed products.
