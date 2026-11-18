@@ -154,7 +154,10 @@ def project_seller(state, *, include_audit=True):
             ref=f'P{n+1}:{source}'
             recent = next((r for r in own['recent'] if r['source']==source), None)
             kept_runs = historical_runs(h, recent['price_runs'] if recent else [], bound)
+            valid_pairs = max(0, h['all_observations']['observations'] - h['unknown_price_observations'] - 1)
             summaries.append(dict(evidence_ref=ref,source=source,item_id=item,
+               valid_quote_pairs=valid_pairs,
+               valid_quote_change_rate=round(h['valid_quote_changes'] / valid_pairs, 4) if valid_pairs else None,
                observation_range=[h['all_observations']['first_index'],h['all_observations']['last_index']],
                observations=h['all_observations']['observations'],distinct_prices=h['distinct_valid_prices'],
                observed_quote_changes=h['valid_quote_changes'],unknown_price_observations=h['unknown_price_observations'],

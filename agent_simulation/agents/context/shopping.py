@@ -11,6 +11,33 @@ from agent_simulation.agents.retrieval.history import DEFAULT_HISTORY_ENCODER, p
 PRODUCT_FIELDS = (*PROFILE_FIELDS, "price_raw")
 
 
+def recent_search_statistics(history):
+    """Summarize completed searches in the retained window, separately for each clock."""
+    by_source = {}
+    for event in history:
+        clicks = event.get("clicked_items")
+        purchases = event.get("purchased_items")
+        if clicks is None or purchases is None:
+            continue
+        source = "settled" if "settled_step" in event else "observed"
+        by_source.setdefault(source, []).append((len(clicks), len(purchases)))
+
+    result = {}
+    for source, counts in by_source.items():
+        requests = len(counts)
+        clicked = sum(c > 0 for c, _ in counts)
+        bought = sum(p > 0 for _, p in counts)
+        result[source] = {
+            "requests_with_recorded_outcomes": requests,
+            "mean_clicked_items_per_request": round(sum(c for c, _ in counts) / requests, 4),
+            "mean_purchased_items_per_request": round(sum(p for _, p in counts) / requests, 4),
+            "requests_with_clicks": clicked,
+            "requests_with_purchases": bought,
+            "requests_without_click_or_purchase": sum(c == p == 0 for c, p in counts),
+        }
+    return result
+
+
 def context(
     profile,
     observed,
@@ -33,11 +60,15 @@ def context(
     )
     if behavioral_summary is not None:
         require(behavioral_summary["observed_time_index"] < cutoff, "Future Customer background")
+    history = pool.recent_history()
+    memory = {"search_history": history}
+    if stats := recent_search_statistics(history):
+        memory["recent_search_statistics"] = stats
     return {
         "profile": deepcopy(profile),
         "behavioral_summary": deepcopy(behavioral_summary),
         "history_cutoff_exclusive": cutoff,
-        "short_term_memory": {"search_history": pool.recent_history()},
+        "short_term_memory": memory,
         "long_term_memory": deepcopy(list(long_term)),
         "retrieved_context": {"history": pool.retrieve(
             history_query, embedder=history_embedder, diagnostics=False)},
