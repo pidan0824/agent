@@ -1,0 +1,7 @@
+PolicySim
+Source: https://github.com/renH2/PolicySim
+Commit: 045446b7dd5120437233e75da0e997d68d7c267a
+Adapted memory retrieval: agent_simulation/agents/retrieval/similarity.py.
+Upstream sources: src/memory/twitter_memory.py and src/agent/base_agent.py.
+The README files display an MIT license badge at this commit.
+The snapshot contains no standalone license text.

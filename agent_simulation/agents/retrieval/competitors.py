@@ -1,4 +1,4 @@
-"""Small, diverse public product examples; reuse the factual-history encoder."""
+"""Select and rank public competitor products."""
 
 from collections import Counter, defaultdict
 from functools import lru_cache
@@ -16,12 +16,12 @@ from agent_simulation.agents.retrieval.similarity import cosine_scores
 COMPETITOR_POLICY = {"shortlist": 64,
                      "shortlist_per_shop": 4,
                      "quote_scope": "recent_market_window",
-                     "ranking": "public_candidate_shortlist_v5"}
+                     "ranking": "public_candidate_shortlist"}
 
 
 @lru_cache(maxsize=131072)
 def title_terms(title):
-    """Text-only features; visibility and price signals are never cached here."""
+    """Cache the tokens in a product title."""
     return frozenset(tokens(title))
 
 
@@ -149,7 +149,7 @@ class CoarseFeatures:
 
         select_group(slots, lexical)
         if len(selected) < COMPETITOR_POLICY['shortlist']:
-            # Only fill remaining capacity with zero-overlap products.
+            # Fill open slots with eligible products that share no title tokens.
             eligible[slots] = False
             zero = np.flatnonzero(eligible)
             self.last_work['zero_fallback_candidates'] = len(zero)
@@ -187,7 +187,7 @@ def coarse_candidates(focal, peers, *, features=None):
 
 
 def rank_competitors(focal, candidates, cutoff, *, embedder=DEFAULT_HISTORY_ENCODER, qualified=False, features=None, snapshot=None):
-    """Preselect bounded public candidates before encoding, never private shop facts."""
+    """Shortlist public products before scoring their semantic similarity."""
     category = tuple(focal[k] for k in CATEGORY_FIELDS)
     peers = candidates if qualified else [p for p in candidates if p["seller_id"] != focal["seller_id"]
              and complete_category(p) and tuple(p[k] for k in CATEGORY_FIELDS) == category
@@ -236,7 +236,6 @@ def competitor_examples(data, seller, item, cutoff, start, *, connection=None,
     from agent_simulation.agents.context import context_model
 
     focal = data.product(item, cutoff)
-    # Each index covers just one bounded quote window, never an accumulating past pool.
     key=(cutoff,*(focal[k] for k in CATEGORY_FIELDS))
     cache=data.competitor_features
     if key not in cache:cache[key]=CoarseFeatures()

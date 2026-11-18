@@ -10,7 +10,7 @@ FRESHNESS_POLICY = {
 
 
 def average_ranks(values):
-    """Descending midranks; an unknown signal casts no vote."""
+    """Rank higher values first and give tied values their average rank."""
     positions = defaultdict(list)
     for position, value in enumerate(sorted((v for v in values if v is not None), reverse=True), 1):
         positions[value].append(position)
@@ -25,7 +25,7 @@ def reciprocal_rank_scores(signals, constant=60):
 
 
 def freshness_factor(index, before, clock="observed_time_index"):
-    """Clock indices are not elapsed days; never decay generated memories here."""
+    """Discount older evidence using the units of the selected clock."""
     if before is None:
         return 1.0
     age = max(0, before - 1 - index)

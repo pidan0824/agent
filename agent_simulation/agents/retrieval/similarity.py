@@ -1,5 +1,6 @@
-"""Exact authorized cosine scoring without rebuilding a vector database per query."""
+"""Compute cosine scores for embeddings that match the metadata filters."""
 
+from copy import deepcopy
 import operator
 import numpy as np
 
@@ -8,7 +9,7 @@ _OPERATORS = {"==": operator.eq, "!=": operator.ne, "<": operator.lt,
 
 
 class PreparedVector:
-    """One validated immutable document vector and its exact float64 norm."""
+    """A read-only vector and its precomputed norm."""
     __slots__ = ("values", "norm")
 
     def __init__(self, values):
@@ -20,7 +21,7 @@ class PreparedVector:
 
 
 def cosine_scores(query, embeddings, *, metadata=None, predicates=()):
-    """Filter by metadata before validating documents and computing cosine scores."""
+    """Return scores by input index for embeddings that match the filters."""
     q = np.asarray(query, dtype=float)
     if q.ndim != 1 or not q.size or not np.isfinite(q).all():
         raise ValueError("Invalid query embedding")
@@ -46,12 +47,11 @@ def cosine_scores(query, embeddings, *, metadata=None, predicates=()):
                         embedding if prepared else None))
     if not vectors:
         return {}
-    # Match the previous scalar cosine arithmetic, including exact score ties.
-    # Reusing already encoded vectors avoids TextNode/index/retriever creation.
+    # Keep scalar arithmetic to preserve score ties.
     norm = np.linalg.norm(q)
     result, shared = {}, {}
     for i, (vector, other, prepared) in zip(ids, vectors):
-        # Identical text can occur at many dates. Reuse its score, not its facts.
+        # Score shared vectors once while keeping a result for each record.
         if prepared is not None and prepared in shared:
             result[i] = shared[prepared]
         else:
@@ -61,16 +61,10 @@ def cosine_scores(query, embeddings, *, metadata=None, predicates=()):
     return result
 
 
-# Adapted from PolicySim commit 045446b7dd5120437233e75da0e997d68d7c267a.
-# Original sources: src/agents/memory/twitter_memory.py and src/agent/base_agent.py.
-# License declaration: docs/third-party-notices.txt.
-from copy import deepcopy
-
-
 def related_memories(
     query, contents, embeddings, times, cnt, *, metadata=None, predicates=(), limit=5
 ):
-    """Keep older relevant evidence; event age is not a calibrated forgetting rate."""
+    """Rank memories by similarity, using recency to break ties."""
     if not (len(contents) == len(embeddings) == len(times)):
         raise ValueError("Memory content/vector/time alignment differs")
     if any(t > cnt for t in times):

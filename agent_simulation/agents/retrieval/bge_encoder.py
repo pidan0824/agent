@@ -64,9 +64,15 @@ class LocalBGE:
 
     @lru_cache(maxsize=1)
     def model(self):
-        from transformers import AutoModel
+        from transformers import BertModel
 
-        model = AutoModel.from_pretrained(str(self.path), local_files_only=True).to(self.device)
+        class BGEBertModel(BertModel):
+            _keys_to_ignore_on_load_unexpected = [
+                *(BertModel._keys_to_ignore_on_load_unexpected or []),
+                r"^embeddings\.position_ids$",
+            ]
+
+        model = BGEBertModel.from_pretrained(str(self.path), local_files_only=True).to(self.device)
         model.eval()
         model.requires_grad_(False)
         return model
@@ -103,7 +109,7 @@ class LocalBGE:
         return parts
 
     def encode_many(self, texts, *, query=False):
-        """Batch missing text chunks; cache vectors only, never authorization or ranking."""
+        """Encode uncached texts in batches and reuse stored vectors."""
         import torch
         import numpy as np
 
@@ -139,7 +145,6 @@ class LocalBGE:
         if self.disk_cache is not None:
             self.disk_cache.write({key: result[key] for key in missing})
         for key in keys:
-            # Float32 is the encoder's original output, not a precision reduction.
             value = np.asarray(result[key], dtype=np.float32)
             value.setflags(write=False)
             result[key] = self._vectors[key] = value
