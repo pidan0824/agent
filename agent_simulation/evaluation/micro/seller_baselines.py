@@ -142,8 +142,9 @@ class FittedBaselines:
         self.classifier = None if self.change_constant is not None else LogisticRegression(
             max_iter=500, random_state=seed).fit(z, changed)
         self.delta = Ridge(alpha=1.0).fit(z[changed], y[changed]) if changed.any() else None
+        # Reuse train-fitted imputation, including columns entirely missing in train.
         self.gbdt = HistGradientBoostingRegressor(random_state=seed, max_iter=100,
-                                                  max_leaf_nodes=15).fit(x, y)
+                                                  max_leaf_nodes=15).fit(z, y)
         return self
 
     def predict(self, records):
@@ -157,7 +158,7 @@ class FittedBaselines:
         previous = np.asarray([r["previous_price_raw"] for r in records])
         # The bound protects exp from overflow; it is not a learned pricing rule.
         return {"two_stage_linear": previous * np.exp(np.clip(delta, -20, 20)),
-                "gbdt": previous * np.exp(np.clip(self.gbdt.predict(x), -20, 20))}
+                "gbdt": previous * np.exp(np.clip(self.gbdt.predict(z), -20, 20))}
 
 
 def prediction_rows(records, name, values):

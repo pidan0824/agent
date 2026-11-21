@@ -50,10 +50,10 @@ Seller 报告补充了三方向混淆矩阵/macro-F1、变价召回、持平误�
 | `result/lite-5pct-quality-3k-20261112/release` | 1k/500 等实验复用的发布数据；保留 |
 | `result/lite-5pct-quality-1k-20261112` | 旧 SFT 训练、基线、示例依赖；保留 |
 | `result/reflection-budget-worktree` | 已登记的独立 Git worktree；不按普通结果目录移动或删除 |
-| `simulation`、`vllm-env`、`python` | 运行环境与解释器；保留 |
+| `environments/` | 正式 train/vllm 环境、解释器与工具；旧环境路径已移除 |
 | `references` | 参考项目与 KuaiSearch 源数据；保留 |
-| `runs-kernel-bench/customer-9b/site-packages` | 历史训练脚本仍引用的运行依赖；保留 |
-| `cache` | 包缓存、编译缓存和补充依赖混合；不能整体删除 |
+| 原 `runs-kernel-bench` | 2026-11-21 依赖迁入正式 train 环境，历史启动脚本已更新；性能测试记录移至 result |
+| `cache` | 补充依赖已迁出，仅保留可再生缓存 |
 | `env.sh`、`state`、`.github-ssh` | 环境配置、状态与认证；认证不入 Git。2026-11-21 恢复原 GitHub 密钥并验证 fetch，清除未授权的替换密钥 |
 
 前一轮清理了失败温度实验、重复安装包和一次性脚本。2026-11-21 按用户要求删除了清理归档和两次源码部署备份；这些备份目前已不存在。随后清理四个可再生缓存和两份临时测试副本，实际释放约 9.8GiB。正式模型、数据、检查点、检索缓存和实验结果保留。后续服务器操作限定在 `llm_simulation` 内。

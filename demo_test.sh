@@ -6,7 +6,7 @@ source ../env.sh
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
-exec ../simulation/bin/python - "$@" <<'PY'
+exec ../environments/train/bin/python - "$@" <<'PY'
 import argparse
 from collections import defaultdict
 from datetime import datetime

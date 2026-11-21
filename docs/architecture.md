@@ -55,7 +55,7 @@ Qwen3-32B 的模型目录为 `models/Qwen3-32B`。本机 vLLM 0.20.2 的服务�
 
 ```bash
 source ../env.sh
-CUDA_VISIBLE_DEVICES=1 ../vllm-env/bin/python -m vllm.entrypoints.openai.api_server \
+CUDA_VISIBLE_DEVICES=1 ../environments/vllm/bin/python -m vllm.entrypoints.openai.api_server \
   --model models/Qwen3-32B --served-model-name Qwen3-32B \
   --host 127.0.0.1 --port 8001 --max-model-len 32768 \
   --max-num-seqs 4 --gpu-memory-utilization 0.86 \

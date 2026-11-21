@@ -89,7 +89,7 @@ Seller 自身价格段与原始统计保留结构化数值，只有较长的检�
 
 ## 模型接口与依赖
 
-项目命令统一使用 `agent_simulation/python.sh`。它选择 `.venv-memory` 的 Python 并配置包路径；可用 `SANDBOX_PYTHON` 指定其他解释器。`agent_simulation/__init__.py` 是 Python 包入口，提供 `PACKAGE_ROOT` 和 `PROJECT_ROOT` 两个稳定路径常量。
+项目命令统一使用 `agent_simulation/python.sh`。默认选择同级 `environments/train` 并配置包路径，不回退旧环境；可用 `SANDBOX_PYTHON` 指定其他解释器。`agent_simulation/__init__.py` 是 Python 包入口，提供 `PACKAGE_ROOT` 和 `PROJECT_ROOT` 两个稳定路径常量。
 
 [client.py](inference/client.py) 定义模型调用接口及 PydanticAI 适配，[requests.py](inference/requests.py) 处理官方模板和请求容量，[Qwen 后端](inference/local/qwen.py) 提供本地 Transformers 执行。
 

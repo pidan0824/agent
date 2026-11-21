@@ -19,7 +19,7 @@
 
 发布数据包含标签、候选 Parquet 及其清单和校验值；实际路径以各实验配置为准。完整训练输入由标签和事实表按需构造。数据清单中的绝对路径绑定当前机器上的事实目录。重新构造样本还需要本机的 KuaiSearch 源事实、模型和 Tokenizer。原始数据、模型权重和虚拟环境使用本地依赖，训练和评估产物放在 `result/`，构造数据和可重建缓存放在 `runs/`。迁移到其他机器时需准备相同的依赖，并按新路径重建数据清单。
 
-服务器工作目录为 `/root/autodl-tmp/zhz/llm_simulation/ecommerce-agent-simulation`，Python 环境为同级 `../simulation`，vLLM 服务环境为 `../vllm-env`。`agent_simulation/python.sh` 可自动选择服务器环境，也支持 `SANDBOX_PYTHON` 覆盖。
+服务器工作目录为 `/root/autodl-tmp/zhz/llm_simulation/ecommerce-agent-simulation`，Python 环境为同级 `../environments/train`，vLLM 服务环境为 `../environments/vllm`。旧环境入口已移除，完整说明见[环境与目录](docs/environment.md)。`agent_simulation/python.sh` 可自动选择服务器环境，也支持 `SANDBOX_PYTHON` 覆盖。
 
 上表是构建后的标准发布路径；当前服务器的训练用发布数据实际保存在 `result/lite-5pct-quality-3k-20261112/release/sft`，候选和检查点由各实验配置记录。根目录 `data/kuaisearch/lite/` 目前只保留配置和源数据链接，运行时须传入已有发布路径。
 
