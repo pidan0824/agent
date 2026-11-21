@@ -2,7 +2,7 @@
 
 使用 KuaiSearch Lite 构造 Customer 与 Seller Agent，通过共享市场环境运行搜索、定价、点击与购买。Full 和 Lite 共用数据处理脚本，本地使用 Lite 核验。
 
-数据划分直接沿用官方 train/test：Customer 保留原始 `split`，Seller 保留经营记录的 `source_split`。不额外切验证集，也不需要恢复划分。
+数据划分直接沿用官方 train/test：Customer 保留原始 `split`，Seller 保留经营记录的 `source_split`。发布标签保留官方 train/test；训练期预留的诊断候选另行记录，不能把已经用于选模的 test 称为独立盲测。
 
 ## 当前代码与数据
 
@@ -11,21 +11,23 @@
 | 交付项 | 路径 |
 |---|---|
 | Customer、Seller 和仿真代码 | `agent_simulation/` |
-| SFT 标签池和示例 | [sft](data/kuaisearch/lite/sft) |
+| SFT 标签池和示例 | [当前服务器发布数据](result/lite-5pct-quality-3k-20261112/release/sft) |
 | 模型默认参数与近期历史窗口 | [model_policy.json](agent_simulation/inference/model_policy.json) |
 | KuaiSearch 数据源配置 | [Lite](data/kuaisearch/lite/config.json) · [Full](data/kuaisearch/full/config.json) |
 | 2% 抽样配置 | [lite_2pct_sampling.json](agent_simulation/datasets/lite_2pct_sampling.json) |
-| seed=42 的 2% 候选，按展示商品配对 Customer 与 Seller | [candidates](data/kuaisearch/lite/candidates) |
+| seed=42 的 2% 候选，按展示商品配对 Customer 与 Seller | `data/kuaisearch/lite/candidates`（标准构建输出，服务器候选见实验配置） |
 
-Git 包含四个标签 Parquet、四个候选 Parquet，以及各自的清单和校验值。完整训练输入由标签和事实表按需构造。数据清单中的绝对路径绑定当前机器上的事实目录。重新构造样本还需要本机的 KuaiSearch 源事实、模型和 Tokenizer。原始数据、模型权重和虚拟环境使用本地依赖，训练和评估产物放在 `result/`，构造数据和可重建缓存放在 `runs/`。迁移到其他机器时需准备相同的依赖，并按新路径重建数据清单。
+发布数据包含标签、候选 Parquet 及其清单和校验值；实际路径以各实验配置为准。完整训练输入由标签和事实表按需构造。数据清单中的绝对路径绑定当前机器上的事实目录。重新构造样本还需要本机的 KuaiSearch 源事实、模型和 Tokenizer。原始数据、模型权重和虚拟环境使用本地依赖，训练和评估产物放在 `result/`，构造数据和可重建缓存放在 `runs/`。迁移到其他机器时需准备相同的依赖，并按新路径重建数据清单。
 
-本机的 `models`、`.venv-memory` 和 `.runtime` 复用旧沙箱的模型、Python 环境与 DuckDB。`data/kuaisearch/lite/source/` 集中放置本机链接。`catalog` 和 `splits` 指向同级 `work` 中官方划分对应的事实目录，`raw` 和 `seller_tables` 指向旧沙箱的原始数据与经营表。
+服务器工作目录为 `/root/autodl-tmp/zhz/llm_simulation/ecommerce-agent-simulation`，Python 环境为同级 `../simulation`，vLLM 服务环境为 `../vllm-env`。`agent_simulation/python.sh` 可自动选择服务器环境，也支持 `SANDBOX_PYTHON` 覆盖。
 
-已保存的样本可直接阅读。现有机器可从项目根目录通过 `./agent_simulation/python.sh` 运行构造和测试入口。
+上表是构建后的标准发布路径；当前服务器的训练用发布数据实际保存在 `result/lite-5pct-quality-3k-20261112/release/sft`，候选和检查点由各实验配置记录。根目录 `data/kuaisearch/lite/` 目前只保留配置和源数据链接，运行时须传入已有发布路径。
 
 ## 阅读入口
 
-建议先按[真实数据端到端调试指南](docs/debugging.md)打开 [VS Code 工作区](ecommerce-agent-simulation.code-workspace)，用断点看一轮 Seller → Customer，再沿模块深入。
+Customer 与 Seller 已增加可开关的 Qwen3-32B 自主查询模式。理论轨迹生成、筛选、SFT→DPO 和传统 Seller 基线的代码入口见[轨迹训练](docs/trajectory-training.md)；原 SFT 默认路径保留。
+
+先读[目录与实现审计](docs/directory-review.md)，再沿 `simulation/run.py → simulation/episode.py → agents/` 检查一轮 Seller → Customer。
 
 [架构设计](docs/architecture.md)说明两个角色各自能看见什么、哪些动作有 SFT 监督，以及一个 Tick 如何结算。
 
@@ -36,7 +38,7 @@ Git 包含四个标签 Parquet、四个候选 Parquet，以及各自的清单和
 | 原始表、经营事实、数据划分和重建 | [市场数据代码](agent_simulation/data) |
 | SFT 标签、完整输入、Token 和样本导出 | [SFT 样本准备](agent_simulation/README.md#sft-data) |
 | 模型调用、后端与约束解码 | [Inference](agent_simulation/README.md#inference) |
-| LoRA、test 选模和恢复训练 | [SFT 训练](agent_simulation/README.md#training) |
+| LoRA、评估协议和恢复训练 | [SFT 训练](agent_simulation/README.md#training) |
 | 查询接口、动作与权限 | [工具说明](agent_simulation/README.md#tools) |
 | Memory、检索及共用代码 | [共用能力](agent_simulation/README.md#agent-core) |
 | 商品怎么找、怎么排序 | [商品搜索与排序](agent_simulation/README.md#platform) |
@@ -45,9 +47,9 @@ Git 包含四个标签 Parquet、四个候选 Parquet，以及各自的清单和
 ## 当前可查看的结果
 
 - [从一次 Episode 的运行库生成时间轴和动画](agent_simulation/README.md#仿真运行与时间线)。
-- 本轮核验日志和报告位于同级 `../audit/`；旧图文报告反映各自生成时的版本。
+- 本次目录检查与测试证据位于 `result/directory-review-20261119/`；旧实验结果反映各自生成时的版本。
 
-Lite 的完整监督标签池已整理，模型输入按需展开。当前联调用随机抽取或 BM25 标题匹配来找商品。商品搜索与排序模型已接入，负责找候选并打分，实际运行还需要训练后的权重。自定义重排接口已接入，Bandit 尚未实现。由程序准备检索上下文，模型输出最终动作。长期记忆的读写链路已接通，基础 3B 的总结事实质量仍需验证。
+Lite 的完整监督标签池已整理，模型输入按需展开。搜索支持随机抽取、BM25 和 KuaiSearch 召回排序；后者需要显式传入已有训练资产清单。自定义重排接口已接入，Bandit 尚未实现。默认 SFT 路径由程序准备检索上下文，模型输出最终动作；Customer 自主模式由同一个 Qwen3-32B 选择查询并决策。长期记忆的读写链路已接通，基础 3B 的总结事实质量仍需验证。
 
 ## 项目目录
 

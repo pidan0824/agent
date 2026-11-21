@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 from dataclasses import dataclass, asdict
+from uuid import uuid4
 import duckdb
 
 
@@ -107,6 +108,19 @@ def save_json(path, payload):
     with path.open("x", encoding="utf-8") as stream:
         json.dump(payload, stream, ensure_ascii=False, indent=2)
         stream.write("\n")
+
+
+def write_json_atomic(path, value):
+    """Publish a complete JSON file, replacing an earlier version atomically."""
+    payload = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.pending")
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def rows(c, sql, parameters=None):

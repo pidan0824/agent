@@ -74,6 +74,29 @@ class CandidateCacheTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Candidate file changed'):
                     preflight(args)
 
+    def test_price_semantics_change_preserves_finished_cache_but_rejects_mixed_rebuild(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            dataset, _ = self.selected_fixture(root)
+            manifest = root / 'candidate_manifest.json'
+            selection = json.loads(manifest.read_text())
+            selection['roles'].pop('seller')
+            manifest.write_text(json.dumps(selection))
+            args = SimpleNamespace(dataset=dataset, tokenizer=root, candidates=manifest, output=root,
+                                   market_cache=None, seed=42, buckets=1, workers=1)
+            with patch('agent_simulation.datasets.tokens.cache_tokenizer_digest', return_value='digest'):
+                current, _ = preflight(args)
+            self.assertEqual(current['context_processing']['raw_price_scale_semantics'], 1)
+            previous = {**current, 'context_processing': {
+                key: value for key, value in current['context_processing'].items()
+                if key != 'raw_price_scale_semantics'}}
+            for name in ('identity', 'complete'):
+                (root / f'{name}.json').write_text(json.dumps(previous))
+            self.assertEqual(validate_release(root, dataset, 42), previous)
+            with self.assertRaisesRegex(ValueError, 'Different selected cache release'):
+                bind_release(args, current)
+            self.assertEqual(json.loads((root / 'identity.json').read_text()), previous)
+
     def test_cache_rejects_a_changed_chat_template(self):
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel

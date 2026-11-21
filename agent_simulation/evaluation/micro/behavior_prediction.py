@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from collections import Counter, defaultdict
 from contextlib import ExitStack, closing
+import hashlib
 import json
 import math
 import os
@@ -32,13 +33,42 @@ from agent_simulation.inference.client import complete_once, ModelOutputError
 from agent_simulation.inference.local.checkpoints import attach_adapter, verify_checkpoint
 
 
+def decision_output(sample):
+    stage = sample["sample_id"].split(":")[0]
+    displayed = [p["item_id"] for p in sample["input"]["displayed_items"]] if stage == "response" else None
+    return action_output(stage, displayed_ids=displayed,
+                         price_ids=sample["input"]["requested_price_item_ids"] if stage == "seller" else None)
+
+
+def decision_fingerprint(sample):
+    visible = [sample["messages"][:-1], sample["tools"], decision_output(sample)]
+    return hashlib.sha256(json.dumps(visible, ensure_ascii=False, sort_keys=True,
+                                     allow_nan=False).encode()).hexdigest()
+
+
+def validate_saved_result(sample, result):
+    """A filename alone cannot establish that a resumed decision is comparable."""
+    stage = sample["sample_id"].split(":")[0]
+    require(result.get("sample_id") == sample["sample_id"] and result.get("stage") == stage,
+            "Saved evaluation identity differs")
+    require(result.get("target") == sample["target"], "Saved evaluation target differs")
+    require(result.get("input_sha256") == decision_fingerprint(sample),
+            "Saved evaluation prompt/schema differs or has no fingerprint; use a new evaluation directory")
+    require(result.get("status") in ("ok", "invalid"), "Incomplete saved evaluation")
+    if result["status"] == "ok":
+        validate_arguments(result["prediction"], decision_output(sample)["final_schemas"][0])
+    if stage == "seller":
+        (product,) = sample["input"]["owned_products"]
+        reference = product.get("last_valid_reference")
+        previous = reference["price_raw"] if reference else product["last_observed_price_raw"]
+        require(result.get("previous_price_raw") == previous, "Saved previous Seller price differs")
+
+
 def predict(sample, model):
     stage = sample["sample_id"].split(":")[0]
     require(not sample["tools"], "Expected a JSON decision sample")
     calls = []
-    displayed = [p["item_id"] for p in sample["input"]["displayed_items"]] if stage == "response" else None
-    output = action_output(stage, displayed_ids=displayed,
-                           price_ids=sample["input"]["requested_price_item_ids"] if stage == "seller" else None)
+    output = decision_output(sample)
 
     async def complete(messages, schemas):
         request, count = prepare_request(
@@ -70,6 +100,7 @@ def predict(sample, model):
         "sample_id": sample["sample_id"],
         "stage": stage,
         "target": sample["target"],
+        "input_sha256": decision_fingerprint(sample),
         "status": "running",
         "calls": calls,
         "tools": [],
@@ -143,9 +174,11 @@ def prices(pairs):
 
 def price_changes(pairs, previous_prices):
     by_direction = {direction: [] for direction in ("increase", "decrease", "keep")}
+    confusion = {actual: Counter() for actual in by_direction}
     for (predicted, target), previous in zip(pairs, previous_prices, strict=True):
         actual_direction = price_direction(target - previous)
         predicted_direction = price_direction(predicted - previous)
+        confusion[actual_direction][predicted_direction] += 1
         by_direction[actual_direction].append((
             predicted_direction == actual_direction,
             abs(predicted - target) / previous,
@@ -160,10 +193,27 @@ def price_changes(pairs, previous_prices):
         }
 
     all_changes = [change for group in by_direction.values() for change in group]
+    changed = by_direction["increase"] + by_direction["decrease"]
+    f1s = []
+    for direction in by_direction:
+        actual_count = len(by_direction[direction])
+        predicted_count = sum(row[direction] for row in confusion.values())
+        denominator = actual_count + predicted_count
+        f1s.append(2 * confusion[direction][direction] / denominator if denominator else 0.0)
     return {
         **score(all_changes),
         "by_actual_direction": {direction: score(group) for direction, group in by_direction.items()},
+        "direction_confusion": {actual: {predicted: row[predicted] for predicted in by_direction}
+                                for actual, row in confusion.items()},
+        "direction_macro_f1": average(f1s) if all_changes else None,
+        "direction_macro_f1_labels": list(by_direction),
+        "change_recall": (1 - (confusion["increase"]["keep"] + confusion["decrease"]["keep"])
+                          / len(changed)) if changed else None,
+        "false_adjustment_rate": (1 - confusion["keep"]["keep"] / len(by_direction["keep"]))
+                                 if by_direction["keep"] else None,
+        "changed_relative_change_mae": average([error for _, error, _ in changed]),
         "keep_previous_price_baseline": {
+            **prices([(previous, target) for (_, target), previous in zip(pairs, previous_prices, strict=True)]),
             "direction_accuracy": len(by_direction["keep"]) / len(all_changes) if all_changes else None,
             "relative_change_mae": average([baseline_error for _, _, baseline_error in all_changes]),
         },
@@ -266,10 +316,14 @@ def summarize(records):
             out.update(prices(pairs))
             out["price_changes"] = price_changes(pairs, [r["previous_price_raw"] for r in valid])
             grouped = defaultdict(list)
+            sellers = defaultdict(list)
             for record, pair in zip(valid, pairs):
                 _, seller, item, _ = record["sample_id"].split(":")
                 grouped[f"{seller}:{item}"].append(pair)
+                sellers[seller].append(pair)
             out["per_product"] = {key: prices(values) for key, values in grouped.items()}
+            out["per_seller"] = {key: prices(values) for key, values in sellers.items()}
+            out["seller_macro_mae"] = average([score["mae"] for score in out["per_seller"].values()])
         result[stage] = out
     result["score_scope"] = (
         "Errors and F1 use valid complete outputs. Invalid outputs remain in coverage and end-to-end "
@@ -331,6 +385,7 @@ def evaluate_records(output, data, model, selection, candidates, study, *, resum
                 path = output / (sample["sample_id"].replace(":", "_") + ".json")
                 if resume and path.is_file():
                     result = json.loads(path.read_text())
+                    validate_saved_result(sample, result)
                 else:
                     print("Evaluating", sample["sample_id"], flush=True)
                     result = predict(sample, model)

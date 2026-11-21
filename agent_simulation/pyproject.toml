@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 training = ["peft==0.18.1", "accelerate==1.10.1"]
+baselines = ["scikit-learn>=1.4,<2"]
 dev = ["black==24.10.0", "ruff==0.14.3"]
 
 [tool.setuptools.packages.find]
@@ -31,6 +32,8 @@ namespaces = false
 agent_simulation = [
     "datasets/*.json",
     "agents/prompts/skills/*.md",
+    "agents/prompts/skills/*/SKILL.md",
+    "agents/prompts/skills/*/references/*.md",
     "inference/*.json",
     "platform/*.json",
     "simulation/templates/*.html",

@@ -4,7 +4,6 @@ import json
 import unittest
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import duckdb
 from agent_simulation.tests.data.fixtures import CatalogFixture
@@ -86,24 +85,35 @@ if __name__ == "__main__":
 
 
 class BackgroundRebuildTests(unittest.TestCase):
-    def test_rebuild_updates_manifest_to_match_written_background(self):
+    def test_rebuild_accepts_identical_source_copy_and_rejects_changed_features(self):
         from agent_simulation.data.build.catalog import build_customer_background
         from agent_simulation.data.common import sha256
         with tempfile.TemporaryDirectory() as temp, duckdb.connect() as c:
             root = Path(temp)
             (root / 'facts').mkdir()
+            source = root / 'ranking.jsonl'
+            row = dict(session_id=1, user_id=2, time_index=3, split='train',
+                       target_item_id=4, target_item_price=100, is_clicked=0, is_purchased=0,
+                       recently_clicked_item_ids=[4], recently_purchased_item_ids=[5],
+                       user_statistical_features={})
+            source.write_text(json.dumps(row) + '\n')
             manifest = root / 'manifest.json'
             manifest.write_text(json.dumps({'files': {'customer_background': {'sha256': 'old'}},
+                                            'sources': {'ranking': {'path': str(source), 'sha256': sha256(source)}},
                                             'dataset': 'unchanged'}))
             c.execute("CREATE TABLE requests AS SELECT 1 session_id,2 user_id,3 time_index,'train' split")
-            c.execute("CREATE TABLE source_rows AS SELECT *,[4] recently_clicked_item_ids,"
-                      "[5] recently_purchased_item_ids,'{}' user_statistical_features FROM requests")
-            for items in ('[4]', '[4,6]'):
-                c.execute('UPDATE source_rows SET recently_clicked_item_ids=' + items)
-                with patch('agent_simulation.data.build.catalog.raw_ranking', return_value='source_rows'):
-                    result = build_customer_background(c, root, root)
+            copy = root / 'identical-ranking.jsonl'
+            copy.write_bytes(source.read_bytes())
+            for ranking in (source, copy):
+                result = build_customer_background(c, ranking, root)
                 saved = json.loads(manifest.read_text())
                 self.assertEqual(saved['files']['customer_background'], result)
                 self.assertEqual(saved['dataset'], 'unchanged')
                 self.assertEqual(result['sha256'], sha256(root / 'facts/customer_background.parquet'))
                 self.assertEqual(result['rows'], 1)
+            before = manifest.read_bytes(), (root / 'facts/customer_background.parquet').read_bytes()
+            # Keys and split still match, but these historical facts belong to another release.
+            copy.write_text(json.dumps({**row, 'recently_clicked_item_ids': [4, 6]}) + '\n')
+            with self.assertRaisesRegex(ValueError, 'source differs from the frozen catalog'):
+                build_customer_background(c, copy, root)
+            self.assertEqual(before, (manifest.read_bytes(), (root / 'facts/customer_background.parquet').read_bytes()))

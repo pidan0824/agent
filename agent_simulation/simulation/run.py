@@ -76,6 +76,14 @@ def _record_model_totals(output, report, injected):
         report["real_model_inference"] = None if injected else report["model_calls"] > 0
     elif injected:
         report["real_model_inference"] = None
+    agentic_path = output / "agentic_model_calls.jsonl"
+    if agentic_path.exists():
+        totals = model_totals(agentic_path)
+        report["agentic_model_totals"] = totals
+        for key, value in totals.items():
+            report[key] = report.get(key, 0) + value
+        if not injected:
+            report["real_model_inference"] = report.get("model_calls", 0) > 0
 
 
 def _finish_run(output, report, started, model_resources, runtime, catalog, injected, primary):
@@ -264,6 +272,20 @@ def run(args, *, load_model=None):
         write_report(args.output / "report.json", report)
         print("Loaded", model.generator_id, flush=True)
         memory = {"generate": SummaryGenerator(model), "model_id": model.generator_id}
+        agentic_model = None
+        customer_options = None
+        if getattr(args, "customer_agentic", False) or getattr(args, "seller_agentic", False):
+            from agent_simulation.inference.agentic import AgenticClient, agentic_options
+            require(not getattr(args, "customer_agentic", False) or not getattr(model, "customer_rankers", {}),
+                    "Agentic Customer decisions cannot be combined with post-hoc rankers")
+            agentic_tokenizer = load_tokenizer(args.agentic_tokenizer, local_files_only=True)
+            agentic_model = model_resources.enter_context(closing(AgenticClient(
+                args.agentic_url, args.agentic_model, agentic_tokenizer,
+                max_new_tokens=args.agentic_max_new_tokens, timeout=args.request_timeout,
+                temperature=args.agentic_temperature, seed=args.seed,
+                log_path=args.output / "agentic_model_calls.jsonl")))
+            report["agentic_model"] = agentic_model.check_models()
+            customer_options = agentic_options(args)
         seller = SellerAgent(
             runtime,
             model,
@@ -271,6 +293,8 @@ def run(args, *, load_model=None):
             summary_models=memory,
             price_batch_size=getattr(args, "seller_price_batch_size", 1),
             price_concurrency=args.max_concurrent_requests,
+            agentic_model=agentic_model if getattr(args, "seller_agentic", False) else None,
+            agentic_options=customer_options,
         )
         customer = CustomerAgent(
             runtime,
@@ -278,6 +302,8 @@ def run(args, *, load_model=None):
             model.tokenizer,
             summary_models=memory,
             response_concurrency=args.max_concurrent_requests,
+            agentic_model=agentic_model if getattr(args, "customer_agentic", False) else None,
+            agentic_options=customer_options,
         )
         if args.mode == "episode":
             episode = Episode(
@@ -320,7 +346,9 @@ def run(args, *, load_model=None):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     from agent_simulation.inference.vllm import add_server_arguments
+    from agent_simulation.inference.agentic import add_agentic_arguments
     add_server_arguments(p)
+    add_agentic_arguments(p)
     p.add_argument("--customer-click-ranker-served-model", help="Optional vLLM LoRA for Customer click scoring")
     p.add_argument("--customer-click-threshold", type=float, help="Calibrated click score cutoff for the ranker")
     p.add_argument("--customer-purchase-ranker-served-model", help="Optional vLLM LoRA for Customer purchase scoring")

@@ -11,15 +11,21 @@ __pycache__/
 /models
 /runs/
 /result/
-/data/kuaisearch/*
-!/data/kuaisearch/lite/
-!/data/kuaisearch/full/
-!/data/kuaisearch/relevance/
-/data/kuaisearch/lite/*
-!/data/kuaisearch/lite/sft/
-!/data/kuaisearch/lite/candidates/
-!/data/kuaisearch/lite/config.json
-/data/kuaisearch/full/*
-!/data/kuaisearch/full/config.json
+# Local assets are never part of implementation commits.
+/data/
+/.github-ssh/
+/cache/
+/tmp/
+/checkpoints/
+*.pem
+*.key
+*.safetensors
+*.pt
+*.parquet
+*.npz
+*.npy
+*.duckdb
+*.sqlite
+*.sqlite3
 
 /agent_simulation/build/

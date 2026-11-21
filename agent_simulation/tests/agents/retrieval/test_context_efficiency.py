@@ -14,9 +14,9 @@ class ContextEfficiencyTests(unittest.TestCase):
     def test_vector_cache_reopens_and_separates_model_text_and_query_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'vectors.sqlite3'
-            a = VectorCache(path, 'encoder-A', persist_queries=True)
+            a = VectorCache(path, 'encoder-A', persist_queries=True, reserve_bytes=0)
             a.write({(False, 'same'): (.25, .5), (True, 'same'): (.5, .25)})
-            b = VectorCache(path, 'encoder-A', persist_queries=True)
+            b = VectorCache(path, 'encoder-A', persist_queries=True, reserve_bytes=0)
             self.assertEqual(b.read([(False, 'same'), (True, 'same'), (False, 'changed')]),
                              {(False, 'same'): (.25, .5), (True, 'same'): (.5, .25)})
             self.assertEqual(VectorCache(path, 'encoder-B').read([(False, 'same')]), {})

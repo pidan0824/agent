@@ -355,6 +355,15 @@ def select_seller_training(dataset, candidates, output, *, keep_ratio=4):
     source = json.loads(candidates.read_text())
     require(source['schema'] == SCHEMA, 'Expected split candidate manifest')
     require(source['dataset_manifest_sha256'] == sha256(dataset/'manifest.json'), 'Candidate dataset differs')
+    require('seller' in source['roles'] and set(source['roles']) <= set(ROLES),
+            'Seller candidate role is missing or invalid')
+    for role, splits in source['roles'].items():
+        ordered_splits(splits)
+        for split, entry in splits.items():
+            require(entry['file'] == f'{role}-{split}-candidates.parquet',
+                    'Unexpected candidate filename')
+            require(sha256(candidates.parent/entry['file']) == entry['sha256'],
+                    'Frozen source candidates changed')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.'+output.name+'-', dir=output.parent) as temp:
         staging = Path(temp)/'release'
@@ -412,6 +421,9 @@ def broaden_seller_quote_gaps(connection, labels, previous, output, *, gap_limit
     Each item appears once; the previous direction counts remain unchanged.
     """
     c = connection
+    require(c.execute('SELECT count(*) FILTER (WHERE split IS DISTINCT FROM \'train\') '
+                      'FROM read_parquet(?)', [str(labels)]).fetchone()[0] == 0,
+            'Quote-gap sampling requires only official Train labels')
     c.execute(f"""CREATE TEMP TABLE seller_gap_pool AS
         WITH targets AS (SELECT * FROM read_parquet({literal(labels)})), earlier AS (
             SELECT h.seller_id,h.item_id,h.time_index,h.price_raw FROM seller_history h
@@ -429,6 +441,13 @@ def broaden_seller_quote_gaps(connection, labels, previous, output, *, gap_limit
         SELECT p.* FROM seller_gap_pool p
         SEMI JOIN read_parquet({literal(previous)}) old USING(record_id)
     """)
+    original_count, original_unique = c.execute(
+        'SELECT count(*),count(DISTINCT record_id) FROM read_parquet(?)', [str(previous)]).fetchone()
+    matched_count, unique_items = c.execute(
+        'SELECT count(*),count(DISTINCT item_id) FROM previous_seller_targets').fetchone()
+    require(original_count == original_unique == matched_count,
+            'Previous quote-gap targets must be unique and belong to the Train pool')
+    require(matched_count == unique_items, 'Previous quote-gap targets repeat a product')
     quotas = dict(c.execute('SELECT direction,count(*) FROM previous_seller_targets GROUP BY 1').fetchall())
     require(quotas and all(n % 2 == 0 for n in quotas.values()), 'Need even per-direction counts for a half-replacement comparison')
     require(c.execute('SELECT max(quote_gap) FROM previous_seller_targets').fetchone()[0] <= gap_limit,

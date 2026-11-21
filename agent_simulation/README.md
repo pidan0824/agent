@@ -1,6 +1,6 @@
 # Agent 代码与运行
 
-Customer、Seller 与环境共用一个市场状态。行为和长期记忆设计见[架构说明](../docs/architecture.md)。
+Customer、Seller 与环境共用一个市场状态。行为和长期记忆设计见[架构说明](../docs/architecture.md)。新增单模型自主查询、理论轨迹生成、SFT→DPO 和传统 Seller 对照见[轨迹训练](../docs/trajectory-training.md)，使用独立入口，不改本文默认行为 SFT。
 
 ## 当前数据入口
 
@@ -14,7 +14,7 @@ Customer 和 Seller 共用近期 10 条观察、较早历史检索与最终输�
 
 ## 代码阅读顺序
 
-可直接使用[真实数据调试指南](../docs/debugging.md)和[现成的 F5 配置](../.vscode/launch.json)，先观察输入、输出和状态提交，再按下面顺序读代码。
+先阅读[目录审计](../docs/directory-review.md)和[自主模式架构](../docs/architecture.md)，再按下面顺序观察输入、输出和状态提交。
 
 1. [simulation/run.py](simulation/run.py) 装配数据、模型客户端、Agent 和 Episode。
 2. [simulation/episode.py](simulation/episode.py) 推进 Tick，协调价格生效与反馈结算。
@@ -58,7 +58,7 @@ Seller 自身价格段与原始统计保留结构化数值，只有较长的检�
 
 决策输入沿 `Agent → context → agents/context、retrieval、memory` 构建；动作沿 `Agent/Episode → market → operations/api → actions/queries/reporting` 执行。`market` 统一授权、动作记录和提交，`store` 提供事务及版本机制。长期记忆的生成算法在 `agents/memory`，环境的 `memory.py` 负责证据存取和提交。
 
-校验按边界保留：初始化检查种子历史的归属、截止时间和重复记录，并保存时间顺序；查询检查本次请求范围；动作检查商品可见性、所有权和当前状态；提交检查版本及原子性。Customer 历史查询直接读取已验证的本用户种子，不再包装身份后重复校验。直接查询 API 保留，但不向当前决策模型开放。
+校验按边界保留：初始化检查种子历史的归属、截止时间和重复记录，并保存时间顺序；查询检查本次请求范围；动作检查商品可见性、所有权和当前状态；提交检查版本及原子性。Customer 历史查询直接读取已验证的本用户种子，不再包装身份后重复校验。默认 SFT 决策不开放查询工具；Customer agentic 模式开放冻结状态上的只读白名单，见架构说明。
 
 `platform/search.py` 根据运行参数决定怎么找商品，可随机抽取、按标题匹配，或调用模型。`platform/pipeline.py` 统一加载模型并串起召回、排序、取 Top-K；`platform/recall.py` 找候选，`platform/ranking/` 给候选打分。搜索结果的相关性评估位于 `evaluation/micro/relevance.py`。
 
@@ -183,7 +183,7 @@ Customer 的搜索／选购和 Seller 报价共用 `agents/actions.py`，训练�
 
 程序读取历史、统计市场和检索 Memory，再调用模型。Seller 的 SFT 和仿真使用相同的报价 JSON。Customer 输出 Query、响应或 Tick 控制动作的 JSON，环境负责执行。
 
-价格参数保持 `price_raw`，Agent 接口明确按分解释，数值不转换；该单位是沙箱约定，原始来源单位尚未确认。
+价格参数保持 `price_raw`，数值不转换；来源货币与单位尚未确认，不按“元”或“分”解释。
 
 ### 模型实际收到的工具
 
@@ -372,13 +372,13 @@ sft/
 
 Customer 每行是一条原始请求，保存真实 Query、曝光集合、点击集合、购买集合及划分。同一请求提供 Query 和 Response 两步监督；超大曝光集合按已有规则生成多个 Response 批次，批次共用原请求划分。当前标签池共 555,553 条 Customer 请求（train 539,012，test 16,541）。Response 行数取决于实际输入长度。直接读取样本训练时，先展开一遍以确定每轮行数；使用 Token 缓存时直接读取已保存的行数。
 
-两步都输入 Profile、近期搜索／点击／购买历史及较早事实检索片段，长期 Memory 当前为空。Query 的检索只依据此前记录；Response 在同一历史上增加本次真实 Query 与曝光商品，并可用该 Query 重新检索。当前 Query 不进入 Query 阶段的输入；当前点击／购买不进入 Response 的输入。当前示例可用 `datasets.labels preview` 按需生成，不在标签目录中维护旧版副本。价格在 Agent 接口统一按分解释，这是沙箱约定，原始数值不转换，来源单位仍未确认。
+两步都输入 Profile、近期搜索／点击／购买历史及较早事实检索片段，长期 Memory 当前为空。Query 的检索只依据此前记录；Response 在同一历史上增加本次真实 Query 与曝光商品，并可用该 Query 重新检索。当前 Query 不进入 Query 阶段的输入；当前点击／购买不进入 Response 的输入。当前示例可用 `datasets.labels preview` 按需生成，不在标签目录中维护旧版副本。价格在 Agent 接口保留原始尺度，来源货币与单位未确认。
 
 Seller 有 12,250,786 条商品价格监督记录。每条都要求同店同商品在当期和严格更早的时点各有有效价，其中包括维持原价的观测。
 
-当前划分和标签数量以 [manifest.json](../data/kuaisearch/lite/sft/manifest.json) 为准；时间边界见下文[时间划分与跨主体来源](#时间划分与跨主体来源)。Seller train 11,874,348 条、test 376,438 条；当前没有 validation 目录。
+当前划分和标签数量以 运行参数 `--dataset` 指向的 `manifest.json` 为准；时间边界见下文[时间划分与跨主体来源](#时间划分与跨主体来源)。Seller train 11,874,348 条、test 376,438 条；当前没有 validation 目录。
 
-`labels.parquet` 保存监督与来源键，不直接进入模型。`SFTDataset` 从冻结 Catalog 读取商品、Profile 和严格截止前的历史，调用现有 SFT 构造器，返回完整 `messages`、`tools` 和答案。短期历史、公开竞品权限和价格单位保持原有含义；Seller 使用下述目标上下文，Customer 使用固定商品数分批规则，不生成额外查询、理由、经验或复查时间标签。
+`labels.parquet` 保存监督与来源键，不直接进入模型。`SFTDataset` 从冻结 Catalog 读取商品、Profile 和严格截止前的历史，调用现有 SFT 构造器，返回完整 `messages`、`tools` 和答案。短期历史、公开竞品权限和价格单位保持原有含义；Seller 使用下述目标上下文，Customer 使用标签无关的输入预算分批规则，不生成额外查询、理由、经验或复查时间标签。
 
 Catalog 的 DuckDB 视图使用绝对路径读取本地事实表、Seller 经营表和冻结划分。外部经营表与划分文件列在 Catalog 清单的 `business_sources` 和 `split_files`。迁移时需要这些文件，并按新路径重建 Catalog 视图和引用它的 SFT 清单。
 
@@ -564,7 +564,7 @@ Token 缓存绑定对应的标签清单和候选清单。小规模合并／分�
 
 全量 SFT 直接使用对应数据版本的 train 标签池。当前 Lite 使用 `--dataset data/kuaisearch/lite/sft`；Full 应从官方 Full train／test 单独建立，不能与 Lite 混用。未使用 token cache 时，以固定 seed 抽取 `--eval-samples` 条完整 test 记录作评估，默认 128；设为 0 使用完整 test。只支持当前官方 train/test 数据。
 
-[rolling.py](datasets/labels.py) 按主体和时间滚动生成样本。Customer 保留最近 10 条请求，从该用户严格更早的其余全部请求中检索最多 5 条。Seller 按商品保留最近 10 个经营观测点，从目标较早片段及同店其他商品全部前序片段中检索最多 5 段。两者均在本时间索引的全部样本构造完成后才更新历史。
+[labels.py](datasets/labels.py) 按主体和时间滚动生成样本。Customer 保留最近 10 条请求，从该用户严格更早的其余全部请求中检索最多 5 条。Seller 按商品保留最近 10 个经营观测点，从目标较早片段及同店其他商品全部前序片段中检索最多 5 段。两者均在本时间索引的全部样本构造完成后才更新历史。
 
 ### 运行入口
 
@@ -624,9 +624,9 @@ loss 为每条答案 Token 的平均交叉熵乘以样本权重，再对当前�
 
 数据按需读取，有限缓冲区打乱训练顺序。当前官方两段协议用 test loss 选 checkpoint；test 保持独立的数据流，只评估，不参与反向传播。固定评估记录随 seed 写入配置，恢复时保持相同记录。该 test 结果参与模型选择，不称为独立盲测。配置、数据和权重身份写入 `run_config.json`，不再对源码文件生成续训指纹。
 
-默认预算为 10 个完整训练轮次，短跑可显式指定 `--max-steps`。Seller 每条标签生成一个训练样本。使用 Token 缓存时，从已完成清单读取接受后的准确行数；按需训练 Customer 时，只扫描标签的曝光数组长度，按 `1 + max(1, ceil(曝光数 / 批大小))` 累加 Query／Response 行数，不执行检索、渲染或分词。每轮数量存入 `run_config.json`，恢复时复用；短跑也沿用这一计数规则。
+默认预算为 5 个完整训练轮次，短跑可显式指定 `--max-steps`。Seller 每条标签生成一个训练样本。使用 Token 缓存时，从已完成清单读取接受后的准确行数；按需训练 Customer Response 时，实际遍历构造后的样本统计每轮行数；动态输入长度决定分批，不能只用曝光条数估算。每轮数量存入 `run_config.json`，恢复时复用；短跑也沿用这一计数规则。
 
-默认训练 5 轮，每轮结束时用 test 评估并保存 checkpoint。保留 test 损失最低和最新的 checkpoint，并将最优 adapter 导出到 `adapter/`。显式使用 `--max-steps` 时可通过 `--save-steps` 调整保存和评估间隔。答案损失用于选模，实际生成的搜索词、点击和购买由行为评估入口统计。
+默认训练 5 轮，每轮结束时用 test 评估并保存 checkpoint，另按 `save_steps` 保存中途恢复点。保留 test 损失最低和最新的 checkpoint，并将最优 adapter 导出到 `adapter/`。显式使用 `--max-steps` 时可通过 `--save-steps` 调整保存和评估间隔。答案损失用于选模，实际生成的搜索词、点击和购买由行为评估入口统计。
 
 训练路径为：`run.py` 选择数据和训练参数 → `data_loader.py` 读取样本并组成 Tensor → `trainer.py` 计算加权 Loss、评估与保存。
 

@@ -33,6 +33,8 @@ class EpochCheckpoint(TrainerCallback):
     """Evaluate and save at epoch boundaries and the final step as well as periodic saves."""
 
     def on_step_end(self, args, state, control, **kwargs):
+        if state.save_steps and state.global_step % state.save_steps == 0:
+            control.should_save = True
         if args.eval_strategy == "epoch":
             return control
         if state.global_step >= state.max_steps or (state.epoch is not None and state.epoch % 1 == 0):

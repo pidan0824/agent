@@ -3,6 +3,8 @@
 import asyncio
 from contextlib import nullcontext
 from copy import deepcopy
+import hashlib
+import json
 from agent_simulation.data.common import require
 from agent_simulation.agents.base import BaseAgent
 from agent_simulation.agents.concurrency import map_decisions
@@ -14,11 +16,18 @@ from agent_simulation.agents.context import customer_decision_messages
 
 
 class CustomerAgent(BaseAgent):
-    def __init__(self, *args, response_concurrency=2, **kwargs):
+    def __init__(self, *args, response_concurrency=2, agentic_model=None, agentic_options=None, **kwargs):
         super().__init__(*args, **kwargs)
         require(type(response_concurrency) is int and response_concurrency > 0,
                 "Expected positive response concurrency")
         self.response_concurrency = response_concurrency
+        self.agentic_model = agentic_model
+        from agent_simulation.agents.agentic import options_from
+        self.agentic_options = options_from(agentic_options)
+
+    @property
+    def engine(self):
+        return "customer-agentic-frozen-v1" if self.agentic_model is not None else super().engine
 
     def _response_inputs(self, actor, *, state=None, expected_request_id=None, observe=True):
         return self.runtime.inputs.customer_responses(
@@ -29,6 +38,18 @@ class CustomerAgent(BaseAgent):
     def prepare_requests(self, actor, *, response=False):
         """Prepare requests, including optional history summaries; do not run decisions or memory reflection."""
         stage = "response" if response else "query"
+        if self.agentic_model is not None:
+            from agent_simulation.agents.agentic import FrozenCustomerTools, initial_agentic_request
+            from agent_simulation.inference.requests import prepare_request
+            state = self.runtime.snapshot()
+            context = self._agentic_context(actor, state, stage)
+            bound = FrozenCustomerTools(self.runtime, actor, state, stage, theory=self.agentic_options.theory)
+            messages, schemas, _ = initial_agentic_request(self._agentic_messages(context, stage),
+                                                         bound.schemas, self.agentic_options)
+            request, _ = prepare_request(messages, schemas,
+                self.agentic_model.tokenizer, max_output_tokens=self.agentic_model.max_new_tokens)
+            yield request
+            return
         if response:
             batches = self._response_inputs(actor, observe=False)
         else:
@@ -60,8 +81,11 @@ class CustomerAgent(BaseAgent):
 
     async def choose_query(self, run, *, state=None):
         actor = run["actor"]
-        context = self.runtime.inputs.customer(actor, state=state, memory_tokenizer=self.tokenizer)
-        choice = await self._stage(run, "query", state=context)
+        if self.agentic_model is not None:
+            choice = await self._agentic_stage(run, "query", state=state)
+        else:
+            context = self.runtime.inputs.customer(actor, state=state, memory_tokenizer=self.tokenizer)
+            choice = await self._stage(run, "query", state=context)
         if "action" in choice:
             run["result"] = choice
         else:
@@ -75,6 +99,14 @@ class CustomerAgent(BaseAgent):
     async def choose_response(self, run, *, request_slots=None, state=None):
         actor = run["actor"]
         pending = run["displayed_list"]
+        if self.agentic_model is not None:
+            async with (request_slots if request_slots is not None else nullcontext()):
+                args = await self._agentic_stage(run, "response", state=state,
+                                                expected_request_id=pending["request_id"])
+            run["response_batches"] = [{"item_ids": [p["item_id"] for p in pending["displayed_items"]],
+                                        "response": deepcopy(args)}]
+            run["result"] = {"status": "staged", "response": args}
+            return
         batches = self._response_inputs(
             actor, state=state, expected_request_id=pending["request_id"])
         selected = {"clicked_item_ids": set(), "purchased_item_ids": set()}
@@ -209,6 +241,117 @@ class CustomerAgent(BaseAgent):
     def reflect_on_feedback(self, run):
         sellers = [("seller", item["seller_id"]) for item in run["displayed_list"]["displayed_items"]]
         self._update_long_term_memory(run, [("customer", run["actor"]), *sellers])
+
+    def _agentic_context(self, actor, state, stage):
+        """Expose descriptive features; the model chooses which underlying facts to read."""
+        from agent_simulation.agents.context.customer_features import customer_behavior_features
+        require(self.runtime.catalog is not None, "Customer agentic input requires a verified catalog")
+        seed = state["customers"][str(actor)]["observed_history"]
+        profile, history, summary = self.runtime.inputs._customer_observed_history(actor, seed)
+        result = {
+            "profile": {key: deepcopy(value) for key, value in profile.items() if key != "user_id"},
+            "history_cutoff_exclusive": self.runtime.data.cutoff,
+            "simulation_before_exclusive": state["simulation_step"] + 1,
+            "behavior_features": customer_behavior_features(
+                history, cutoff=self.runtime.data.cutoff,
+                simulated=state["customers"][str(actor)]["simulation_history"],
+                simulation_before=state["simulation_step"] + 1,
+                behavioral_summary=summary, user_id=actor),
+            "evidence_access": "Read prior facts and private memories with the bound tools. Unknown is not zero.",
+        }
+        if "clock" in state:
+            result["decision_time"] = self.runtime.inputs.decision_time(state, "customer", actor)
+        if stage == "response":
+            pending = state["pending"][str(actor)]
+            result.update(query=pending["query"], displayed_items=[
+                {key: product[key] for key in ("item_id", "item_title", "price_raw", "price_status")
+                 if key in product}
+                for product in pending["displayed_items"]])
+        return result
+
+    def _agentic_messages(self, context, stage, previous=()):
+        from agent_simulation.agents.prompts.customer_agentic import agentic_customer_instructions
+        from agent_simulation.agents.agentic import teacher_output
+        displayed = [p["item_id"] for p in context["displayed_items"]] if stage == "response" else None
+        output = action_output(stage, allow_control_actions=stage == "query" and "decision_time" in context,
+                               displayed_ids=displayed)
+        messages = deepcopy(list(previous)) if previous else [{"role": "system", "content": (
+            agentic_customer_instructions(theory=self.agentic_options.theory)
+            + "\nUse only the tools currently offered. Queries are optional. Return the newest stage's final JSON "
+              "when enough evidence is available. Tools cannot search, settle, edit memory or change prices. "
+              "The caller executes one final Query search before the Response stage. "
+              "Tool and model-call budgets restart for each stage; no budget exhaustion is an implicit action. "
+              "A brief behavior hypothesis may be recorded with record_behavior_hypothesis; it is unverified."
+        )}]
+        messages.append({"role": "user", "content": json.dumps(
+            {"stage": stage, "final_output": teacher_output(output["final_schemas"]), "context": context}, ensure_ascii=False, allow_nan=False)})
+        return messages
+
+    async def _agentic_stage(self, run, stage, *, state=None, expected_request_id=None):
+        from agent_simulation.agents.agentic import FrozenCustomerTools, run_agentic_workflow, validate_teacher_final
+        from uuid import uuid4
+        from agent_simulation.inference.client import complete_once
+        from agent_simulation.inference.requests import prepare_request
+        # Pair the decision facts and revision in one database read. A supplied
+        # phase snapshot must still describe this revision before dispatch.
+        frozen = self.runtime.freeze()
+        require(state is None or state == frozen.state,
+                "Market changed before Customer agentic decision")
+        state, revision = frozen
+        actor = run["actor"]
+        if expected_request_id is not None:
+            require(state["pending"].get(str(actor), {}).get("request_id") == expected_request_id,
+                    "Customer displayed request changed before agentic decision")
+        context = self._agentic_context(actor, state, stage)
+        bound = FrozenCustomerTools(self.runtime, actor, state, stage, theory=self.agentic_options.theory)
+        previous = ()
+        if stage == "response" and run.get("agentic_traces"):
+            queries = [t for t in run["agentic_traces"] if t["stage"] == "query" and t["status"] == "complete"]
+            if queries:
+                previous = queries[-1]["messages"]
+        messages = self._agentic_messages(context, stage, previous)
+        trace = {"stage": stage, "actor": actor, "snapshot_revision": revision,
+                 "snapshot_sha256": hashlib.sha256(json.dumps(state, sort_keys=True, ensure_ascii=False,
+                                                               allow_nan=False).encode()).hexdigest(),
+                 "model": self.agentic_model.generator_id, "budget_scope": "one_stage",
+                 "expected_request_id": expected_request_id}
+        trace.update(role="customer", actor_id=actor, trajectory_id=uuid4().hex,
+                     initial_state_id=trace["snapshot_sha256"])
+        run.setdefault("agentic_traces", []).append(trace)
+        ids = [p["item_id"] for p in context["displayed_items"]] if stage == "response" else None
+        output = action_output(stage, allow_control_actions=stage == "query" and "decision_time" in context,
+                               displayed_ids=ids)["final_schemas"]
+
+        def guard():
+            require(self.runtime.revision == revision, "Market changed during Customer agentic decision")
+
+        async def complete(prompt, tools):
+            request, count = prepare_request(prompt, tools, self.agentic_model.tokenizer,
+                                             max_output_tokens=self.agentic_model.max_new_tokens)
+            request.update(agent_role="customer", decision_stage=stage)
+            call_id = f'{run["id"]}:agentic:{len(run["model_calls"]) + 1}'
+            call = {"call_id": call_id, "stage": stage, "input_tokens": count,
+                    "request": deepcopy(request), "model": self.agentic_model.generator_id}
+            run["model_calls"].append(call)
+            try:
+                response = await complete_once(self.agentic_model, request, call_id=call_id)
+                call["response"] = deepcopy(response)
+                return response
+            except Exception as error:
+                call["error"] = f"{type(error).__name__}: {error}"
+                raise
+
+        def validate(value):
+            return validate_teacher_final(value, output, trace=trace,
+                validate_action=(lambda action: validate_response(action, ids)) if stage == "response" else None)
+
+        try:
+            return await run_agentic_workflow(messages=messages, tools=bound.schemas,
+                complete=complete, execute_tool=bound.execute, validate_final=validate,
+                options=self.agentic_options, trace=trace, guard=guard)
+        finally:
+            run["tools"].extend({**deepcopy(entry), "stage": stage, "read_only": True}
+                                for entry in trace.get("tools", []))
 
     async def _stage(self, run, stage, *, state, prompt=None):
         displayed_ids = [product["item_id"] for product in state["displayed_items"]] if stage == "response" else None

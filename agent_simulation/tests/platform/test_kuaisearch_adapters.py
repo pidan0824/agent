@@ -21,7 +21,7 @@ from agent_simulation.environment.market import MarketEnvironment
 from agent_simulation.platform.pipeline import RecommendationPipeline
 from agent_simulation.platform.search import request_context
 from agent_simulation.tests.fixtures import MarketFixture
-from agent_simulation.platform.pipeline import load_pipeline
+from agent_simulation.platform.pipeline import load_pipeline, normalize_ranking_users
 from agent_simulation.platform.ranking import OfficialRanking, models
 from agent_simulation.platform.ranking.datasets import TrainingDataProcessor
 from agent_simulation.platform.recall import DPRRecall
@@ -65,6 +65,19 @@ def ranking_fixture(model):
 
 
 class OfficialTests(unittest.TestCase):
+    def test_age_bucket_adapter_preserves_official_age_features(self):
+        ranking, processor, _ = ranking_fixture(lambda *args: None)
+        for source in ({"age_bucket": "24-30"}, {"age": "24-30"},
+                       {"age_bucket": "24-30", "age": "18-23"}):
+            users = {21: dict(gender="F", **source)}
+            processor.user_features = normalize_ranking_users(users)
+            _, features, _ = ranking.features(
+                {"user_id": 7, "request_id": 100, "query": "杯子",
+                 "recently_clicked_item_ids": []}, [1]
+            )
+            self.assertEqual(features["age"].tolist(), [3])
+            self.assertEqual(users, {21: dict(gender="F", **source)})
+
     def test_every_vendored_file_matches_pinned_hash_and_models_import_without_training(self):
         spec = json.loads((PLATFORM / "kuaisearch.json").read_text())
         self.assertEqual(set(spec["source_sha256"]), {"ranking/datasets.py", "ranking/models.py"})

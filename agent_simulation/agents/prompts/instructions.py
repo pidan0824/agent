@@ -8,7 +8,7 @@ def _skill(name):
     return "\n" + path.read_text(encoding="utf-8").strip() + "\n"
 
 
-PRICE_UNIT_NOTE = 'The sandbox interprets price and estimated amount fields in RMB fen. This is a modeling convention; the original source unit is unconfirmed. Preserve stored numbers and submit prices on this same scale. Do not label these numbers as yuan or convert them.'
+PRICE_UNIT_NOTE = 'Price and estimated amount fields retain the source raw numerical scale; the source currency and unit are unconfirmed. Preserve stored numbers and submit prices on this same scale. Do not assign a currency unit or convert them.'
 
 VALUE_NOTE = 'Values are preserved; null means unknown.'
 TABLE_NOTE = 'In each $table, columns defines row positions and shared applies to every row. ' + VALUE_NOTE

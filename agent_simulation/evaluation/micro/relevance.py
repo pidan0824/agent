@@ -23,7 +23,7 @@ def auc_metrics(labels, scores):
     """Tie-aware Mann–Whitney ROC-AUC and stepwise average precision."""
     positives = sum(labels)
     negatives = len(labels) - positives
-    if not positives or not negatives:
+    if not positives:
         return None, None
     groups = defaultdict(list)
     for y, s in zip(labels, scores):
@@ -40,7 +40,7 @@ def auc_metrics(labels, scores):
         tp += p
         seen += len(group)
         ap += (p / positives) * (tp / seen)
-    return concordant / (positives * negatives), ap
+    return concordant / (positives * negatives) if negatives else None, ap
 
 
 def evaluate_pairs(reference, predictions, threshold=None):

@@ -8,6 +8,14 @@ import numpy as np
 from agent_simulation.data.common import require
 
 
+def normalize_ranking_users(users):
+    """Adapt catalogue fields without modifying the pinned official collator."""
+    return {
+        user_id: dict(row, age=row.get("age_bucket", row.get("age")))
+        for user_id, row in users.items()
+    }
+
+
 class RecommendationPipeline:
     def __init__(self, recall, ranking, *, identity, rerank=None, reranker_id="identity"):
         require(bool(identity) and bool(reranker_id), "Platform component identities are required")
@@ -114,7 +122,7 @@ def load_pipeline(manifest_path, *, rerank=None, reranker_id="identity"):
             return {row[key]: row for line in stream if line.strip() for row in [json.loads(line)]}
 
     processor.item_corpus = read_jsonl(paths["ranking_items"], "item_id")
-    processor.user_features = read_jsonl(paths["ranking_users"], "user_id")
+    processor.user_features = normalize_ranking_users(read_jsonl(paths["ranking_users"], "user_id"))
     processor.max_history_len = spec["max_history_len"]
     require(
         type(processor.max_history_len) is int and processor.max_history_len > 0,

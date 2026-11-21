@@ -14,12 +14,38 @@ from agent_simulation.evaluation.macro.trajectories import (
     compare, customer_distribution, dtw, price_dynamics,
 )
 from agent_simulation.evaluation.micro.behavior_prediction import (
-    choices, predict, prices, run, summarize,
+    choices, decision_fingerprint, predict, prices, run, summarize, validate_saved_result,
 )
 from agent_simulation.inference.client import ModelOutputError
 
 
 class BehaviorTests(unittest.TestCase):
+
+    def test_resume_rejects_changed_identity_targets_prompts_and_predictions(self):
+        from copy import deepcopy
+        sample = {"sample_id": "response:7", "tools": [],
+                  "input": {"displayed_items": [{"item_id": 1}]},
+                  "messages": [{"role": "user", "content": "original prompt"},
+                               {"role": "assistant", "content": "hidden target"}],
+                  "target": {"clicked_item_ids": [1], "purchased_item_ids": []}}
+        saved = {"sample_id": "response:7", "stage": "response", "status": "ok",
+                 "input_sha256": decision_fingerprint(sample), "target": sample["target"],
+                 "prediction": {"clicked_item_ids": [1], "purchased_item_ids": []}}
+        validate_saved_result(sample, saved)
+        for patch_value in ({"sample_id": "response:8"}, {"stage": "query"},
+                            {"target": {"clicked_item_ids": [], "purchased_item_ids": []}},
+                            {"status": "running"}, {"input_sha256": None},
+                            {"prediction": {"clicked_item_ids": [999], "purchased_item_ids": []}}):
+            with self.subTest(value=patch_value), self.assertRaises(ValueError):
+                validate_saved_result(sample, {**saved, **patch_value})
+        changed = deepcopy(sample)
+        changed["messages"][0]["content"] = "new evidence"
+        with self.assertRaisesRegex(ValueError, "prompt/schema"):
+            validate_saved_result(changed, saved)
+        changed = deepcopy(sample)
+        changed["input"]["displayed_items"].append({"item_id": 2})
+        with self.assertRaisesRegex(ValueError, "prompt/schema"):
+            validate_saved_result(changed, saved)
 
     def test_selected_seller_evaluation_reuses_streaming_history(self):
         from agent_simulation.evaluation.micro.behavior_prediction import test_requests
@@ -371,6 +397,22 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(changes["by_actual_direction"]["increase"]["direction_accuracy"], 1)
         self.assertEqual(changes["by_actual_direction"]["decrease"]["direction_accuracy"], 0)
         self.assertEqual(changes["by_actual_direction"]["keep"]["relative_change_mae"], 0)
+        self.assertEqual(changes["change_recall"], 1)
+        self.assertEqual(changes["false_adjustment_rate"], 0)
+        self.assertAlmostEqual(changes["direction_macro_f1"], (2 / 3 + 0 + 1) / 3)
+        self.assertAlmostEqual(changes["changed_relative_change_mae"], 0.15)
+        self.assertEqual(changes["direction_confusion"]["decrease"]["increase"], 1)
+        self.assertAlmostEqual(changes["keep_previous_price_baseline"]["mae"], 40 / 3)
+        self.assertEqual(summary["seller_macro_mae"], 10)
+
+    def test_seller_missed_changes_and_false_adjustments_have_distinct_denominators(self):
+        from agent_simulation.evaluation.micro.behavior_prediction import price_changes
+        report = price_changes([(100, 120), (90, 80), (110, 100), (100, 100)], [100] * 4)
+        self.assertEqual(report["change_recall"], 0.5)
+        self.assertEqual(report["false_adjustment_rate"], 0.5)
+        self.assertEqual(report["by_actual_direction"]["keep"]["observations"], 2)
+        self.assertAlmostEqual(report["changed_relative_change_mae"], 0.15)
+        self.assertIsNone(price_changes([], [])["direction_macro_f1"])
 
     def test_price_runs_are_observations(self):
         r = price_dynamics([880, 780, 780, 850])

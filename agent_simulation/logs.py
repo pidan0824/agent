@@ -5,18 +5,12 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+from agent_simulation.data.common import write_json_atomic
+
 
 def write_report(path, value):
     """Create parent directories and atomically replace a JSON report."""
-    payload = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.pending")
-    try:
-        temporary.write_text(payload, encoding="utf-8")
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(path, value)
 
 
 def encode(value):

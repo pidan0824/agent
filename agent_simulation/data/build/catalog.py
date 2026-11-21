@@ -11,7 +11,7 @@ import duckdb
 from agent_simulation.data.common import Config, copy_parquet, difference, literal, require, save_json, sha256
 from agent_simulation.data.build.splits import validate_sources
 from agent_simulation.data.build.seller_tables import raw_ranking
-from agent_simulation.logs import write_report
+from agent_simulation.data.common import write_json_atomic
 
 RANK_SELECT = """session_id,target_item_id AS item_id,time_index,target_item_price AS price_raw,
     is_clicked,is_purchased,split AS source_split"""
@@ -85,6 +85,14 @@ def build_customer_background(c, ranking, output):
     """Store one factual snapshot per request, not one copy per exposed item."""
     manifest_path = Path(output) / "manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
+    ranking = Path(ranking)
+    source_stamp = (ranking.stat().st_size, ranking.stat().st_mtime_ns)
+    if manifest is not None:
+        # Rebuilding this projection must not silently replace the frozen source
+        # with another Ranking release whose request keys happen to match.
+        expected = manifest.get("sources", {}).get("ranking", {}).get("sha256")
+        require(expected is not None and sha256(ranking) == expected,
+                "Customer background Ranking source differs from the frozen catalog")
     c.execute(f"""CREATE OR REPLACE TEMP TABLE backgrounds AS
         SELECT DISTINCT user_id,session_id,time_index,split AS source_split,
             recently_clicked_item_ids,recently_purchased_item_ids,user_statistical_features
@@ -100,10 +108,12 @@ def build_customer_background(c, ranking, output):
     temporary = path.with_suffix(".pending.parquet")
     try:
         result = convert(c, query, temporary, "user_id,time_index,session_id")
+        require(source_stamp == (ranking.stat().st_size, ranking.stat().st_mtime_ns),
+                "Ranking source changed during Customer background construction")
         temporary.replace(path)
         if manifest is not None:
             manifest["files"]["customer_background"] = result
-            write_report(manifest_path, manifest)
+            write_json_atomic(manifest_path, manifest)
     finally:
         temporary.unlink(missing_ok=True)
         c.execute("DROP TABLE backgrounds")

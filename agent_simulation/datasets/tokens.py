@@ -366,7 +366,8 @@ def preflight(args):
     from agent_simulation.agents.context import context_settings
     settings = context_settings()
     spec['context_processing'] = settings or {'competitors': 'public_candidate_shortlist_v5'}
-    spec['context_processing'] = {**spec['context_processing'], 'recent_behavior_statistics': 1}
+    spec['context_processing'] = {**spec['context_processing'], 'recent_behavior_statistics': 1,
+                                  'raw_price_scale_semantics': 1}
     if settings and not settings['url'] and args.workers > 1:
         raise ValueError('Local context model requires --workers 1; use a shared model URL for parallel builders')
     spec['compact_customer_background'] = True

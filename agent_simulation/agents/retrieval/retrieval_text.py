@@ -125,7 +125,7 @@ def query_text(role, context, latest=None):
                 if categories:
                     text += "；展示品类：" + "、".join(c for c, _ in categories.most_common(3))
                 if prices:
-                    text += f"；当前展示价（分）最低 {min(prices):g}，中位 {median(prices):g}，最高 {max(prices):g}"
+                    text += f"；当前展示价原始值（单位未知）最低 {min(prices):g}，中位 {median(prices):g}，最高 {max(prices):g}"
             return text
         past = context.get("short_term_memory", {}).get("search_history", [])
         return (

@@ -11,6 +11,7 @@ class RelevanceTests(unittest.TestCase):
         self.assertAlmostEqual(ap, 5 / 6)
         self.assertEqual(auc_metrics([0, 1], [0.5, 0.5]), (0.5, 0.5))
         self.assertEqual(auc_metrics([0, 0], [0.1, 0.2]), (None, None))
+        self.assertEqual(auc_metrics([1, 1], [0.1, 0.2]), (None, 1))
 
     def test_exact_pair_identity_and_duplicate_rows(self):
         refs = [

@@ -12,7 +12,7 @@ METRICS = (
     "click_to_purchase_rate",
     "estimated_sales_amount_raw",
 )
-BUSINESS_NOTE = 'purchase_records counts purchase flags; estimated_units_sold assumes one unit per flag. Prices and estimated amounts retain stored values, interpreted as fen at the Agent interface. Observed time_index and simulation event indices are separate ordering clocks, not elapsed durations.'
+BUSINESS_NOTE = 'purchase_records counts purchase flags; estimated_units_sold assumes one unit per flag. Prices and estimated amounts retain the original raw scale; the currency unit is unconfirmed. Observed time_index and simulation event indices are separate ordering clocks, not elapsed durations.'
 
 
 def price_evidence(records, *, paired=False):
