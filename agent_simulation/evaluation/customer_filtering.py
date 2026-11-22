@@ -108,6 +108,7 @@ def select_sft(records, *, variants=("strong",)):
             or not row.get("reachable", True)):
             continue
         meta = {key: t[key] for key in ("role", "actor_id", "stage", "initial_state_id", "source_split")}
+        meta.update({key: deepcopy(t[key]) for key in ("source_request_id", "scene_id", "source_response_target") if key in t})
         value = {**meta, "trajectory_id": t["trajectory_id"], "tools": deepcopy(t["tools"]),
                  "messages": deepcopy(t["messages"]), "score": quality["metrics"]["score"],
                  "quality": quality,
@@ -164,6 +165,7 @@ def _pair(good, bad, *, protocol, selection_metric, selection_value):
     require(a["messages"][prefix]["role"] == b["messages"][prefix]["role"] == "assistant",
             "Preference continuation must start with assistant")
     meta = {key: a[key] for key in ("role", "actor_id", "stage", "initial_state_id", "source_split")}
+    meta.update({key: deepcopy(a[key]) for key in ("source_request_id", "scene_id", "source_response_target") if key in a})
     return {**meta, "prompt": deepcopy(a["prompt"]), "tools": deepcopy(a["tools"]),
         "chosen": deepcopy(a["messages"][prefix:]), "rejected": deepcopy(b["messages"][prefix:]),
         "chosen_trajectory_id": a["trajectory_id"], "rejected_trajectory_id": b["trajectory_id"],
@@ -335,6 +337,8 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
                    behavior_stratum(t["target"]) if "target" in t else "unknown")
         decisions.append({"trajectory_id": t["trajectory_id"], "dataset": row.get("dataset"),
             "cid": row.get("cid"), "stage": row["stage"], "variant": row["variant"],
+            "source_request_id": t.get("source_request_id"), "scene_id": t.get("scene_id"),
+            "source_stratum": behavior_stratum(t["source_response_target"]) if "source_response_target" in t else stratum,
             "stratum": stratum, "quality": quality, "sft_exclusion_reasons": reasons,
             "probability_available": row.get("prob") is not None,
             "probability_error": row.get("probability_error")})

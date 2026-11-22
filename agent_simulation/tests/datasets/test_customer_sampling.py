@@ -40,13 +40,14 @@ class AuthorCandidateTests(unittest.TestCase):
 
     def test_multi_targets_history_filter_and_original_functions(self):
         original=request();before=deepcopy(original)
-        result=self.builder(min_items=5,max_items=8).build(original)
+        result=self.builder(min_items=5,max_items=8).build(original,target_item_id=10)
         ids=result["candidate"]["candidate_item_ids"]
-        self.assertTrue({10,11}<=set(ids))
+        self.assertIn(10,ids)
+        self.assertNotIn(11,ids)
         self.assertFalse({1,2,3}&set(ids))
         self.assertEqual(len(ids),len(set(ids)))
         self.assertTrue(result["candidate"]["outcome_conditioned"])
-        self.assertEqual(result["request"]["response_target"],original["response_target"])
+        self.assertEqual(result["request"]["response_target"],{"clicked_item_ids":[10],"purchased_item_ids":[]})
         self.assertEqual(result["request"]["query_input"],original["query_input"])
         self.assertEqual(original,before)
         self.assertEqual(json.loads(json.dumps(result,allow_nan=False))["candidate"]["candidate_item_ids"],ids)
@@ -59,14 +60,27 @@ class AuthorCandidateTests(unittest.TestCase):
 
     def test_seed_is_repeatable_and_does_not_change_caller_rng(self):
         builder=self.builder();state=random.getstate()
-        a=builder.build(request());b=builder.build(request())
+        a=builder.build(request(),target_item_id=10);b=builder.build(request(),target_item_id=10)
         self.assertEqual(a["candidate"]["candidate_item_ids"],b["candidate"]["candidate_item_ids"])
         self.assertEqual(random.getstate(),state)
 
-    def test_many_positives_are_preserved_above_maximum(self):
-        result=self.builder(min_items=2,max_items=2).build(request({"clicked_item_ids":[10,11,12],"purchased_item_ids":[13]}))
-        self.assertEqual(set(result["candidate"]["candidate_item_ids"]),{10,11,12,13})
-        self.assertTrue(result["candidate"]["over_max_to_preserve_positives"])
+    def test_many_positives_split_and_never_become_distractors(self):
+        source=request({"clicked_item_ids":[10,11,12],"purchased_item_ids":[12,13]})
+        scenes=self.builder(min_items=5,max_items=5).build_all(source)
+        self.assertEqual(len(scenes),4)
+        self.assertEqual(len({s["candidate"]["scene_id"] for s in scenes}),4)
+        for scene in scenes:
+            meta=scene["candidate"]; item=meta["target_item_id"]
+            self.assertEqual(set(meta["candidate_item_ids"]) & {10,11,12,13},{item})
+            self.assertEqual(meta["positive_count"],1)
+            self.assertEqual(meta["distractor_count"],4)
+            self.assertEqual(scene["request"]["query_input"],source["query_input"])
+        self.assertEqual(scenes[-1]["request"]["response_target"],
+                         {"clicked_item_ids":[],"purchased_item_ids":[13]})
+
+    def test_insufficient_distractors_is_rejected(self):
+        with self.assertRaisesRegex(ValueError,"insufficient_distractors"):
+            self.builder(min_items=40,max_items=40).build(request(),target_item_id=10)
 
     def test_catalog_preparation_uses_shared_pool_and_uniform_prior_prices(self):
         c=duckdb.connect()
@@ -80,15 +94,100 @@ class AuthorCandidateTests(unittest.TestCase):
         scenes,skipped=prepare_scenes(SimpleNamespace(connection=c),[request()],Encoder(),min_items=8,max_items=8)
         self.assertFalse(skipped)
         self.assertEqual(len(scenes),1)
-        self.assertEqual(scenes[0]["candidate"]["pool_size"],40)
-        self.assertTrue(all(p["price_raw"]==50. for p in scenes[0]["request"]["response_input"]["displayed_items"]))
+        self.assertEqual(len(scenes[0]["response_scenes"]),2)
+        self.assertEqual(scenes[0]["response_scenes"][0]["candidate"]["pool_size"],11)
+        self.assertTrue(all(p["price_raw"]==50. for child in scenes[0]["response_scenes"] for p in child["request"]["response_input"]["displayed_items"]))
+        failed, skipped = prepare_scenes(SimpleNamespace(connection=c), [request()], Encoder(), min_history=99)
+        self.assertEqual(len(failed), 1)
+        self.assertTrue(failed[0]["query_enabled"])
+        self.assertEqual(failed[0]["response_scenes"], [])
+        self.assertEqual(len(skipped), 2)
 
     def test_length_filter_uses_generation_messages_without_inference(self):
         from agent_simulation.datasets.customer_scenes import filter_lengths
         from agent_simulation.tests.inference.test_agentic import Tokenizer
-        scene=self.builder().build(request())
+        scene={"request":request(),"query_enabled":True,"response_scenes":self.builder().build_all(request())}
         kept,skipped=filter_lengths([scene],Tokenizer(),100000)
         self.assertEqual((len(kept),len(skipped)),(1,0))
         kept,skipped=filter_lengths([scene],Tokenizer(),1)
-        self.assertEqual((len(kept),len(skipped)),(0,1))
+        self.assertEqual((len(kept),len(skipped)),(0,3))
         self.assertEqual(skipped[0]["reason"],"context_length")
+
+
+    def test_query_once_and_no_click_once_in_generation_jobs(self):
+        from agent_simulation.evaluation.customer_curation import generation_jobs, CurationTools
+        source=request()
+        bundle={"request":source,"query_enabled":True,"response_scenes":self.builder().build_all(source)}
+        jobs=generation_jobs(source,bundle=bundle)
+        self.assertEqual([j[0] for j in jobs],["query","response","response"])
+        self.assertEqual([j[2]["response_target"] for j in jobs[1:]],
+            [{"clicked_item_ids":[10],"purchased_item_ids":[]},
+             {"clicked_item_ids":[11],"purchased_item_ids":[11]}])
+        # Original targets and excluded-positive metadata must never enter model input.
+        for stage,policy,adapted,candidate in jobs:
+            visible=json.dumps(CurationTools(adapted,stage,mode="fixed").initial_context())
+            self.assertNotIn("source_response_target",visible)
+            self.assertNotIn("excluded_positive_ids",visible)
+        bundle["response_scenes"]=[]
+        self.assertEqual(len(generation_jobs(source,bundle=bundle)),1)
+        empty=request({"clicked_item_ids":[],"purchased_item_ids":[]})
+        bundle={"request":empty,"query_enabled":True,"response_scenes":self.builder().build_all(empty)}
+        jobs=generation_jobs(empty,bundle=bundle)
+        self.assertEqual([j[0] for j in jobs],["query","response"])
+        self.assertEqual(jobs[1][2]["response_target"],empty["response_target"])
+
+
+    def test_single_positive_scene_file_roundtrip(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from agent_simulation.data.common import sha256
+        from agent_simulation.datasets.customer_scenes import read_scenes
+        source=request()
+        bundle={"request":source,"query_enabled":True,"response_scenes":self.builder().build_all(source)}
+        with TemporaryDirectory() as temporary:
+            directory=Path(temporary)
+            (directory/"scenes.jsonl").write_text(json.dumps(bundle)+"\n")
+            (directory/"manifest.json").write_text(json.dumps({
+                "schema":"customer-single-positive-scenes-v2","split":"train",
+                "scenes_sha256":sha256(directory/"scenes.jsonl")}))
+            loaded, _ = read_scenes(directory,split="train")
+            self.assertEqual(len(loaded),1)
+            self.assertEqual(len(loaded[100]["response_scenes"]),2)
+            self.assertEqual(loaded[100]["request"]["response_target"],source["response_target"])
+
+
+class ExposurePoolTests(unittest.TestCase):
+    def test_all_routes_keep_exposures_without_query_or_category_gates(self):
+        products, interactions = pool()
+        for p in products:
+            p["category_level3_name"] = "sleepwear"
+        products[12]["category_level3_name"] = "books"
+        products[14].pop("category_level3_name")
+        class MixedEncoder:
+            identity = "mixed-relevance-fixture"
+            def encode_many(self, texts, query=False):
+                if query:
+                    return [np.array([1., 0.])] * len(texts)
+                return [np.array([1., 0.]) if int(re.search(r"\d+", text)[0]) in {10,11,12,13,15,40}
+                        else np.array([0., 1.]) for text in texts]
+        source = request()
+        expected = set(range(10,22)) - {11}
+        for method in ("random", "content", "collaborative"):
+            encoder = MixedEncoder() if method == "content" else None
+            builder = SampledCandidateBuilder(products, interactions, encoder,
+                methods=(method,), min_items=11, max_items=11)
+            child = builder.build(source, target_item_id=10)
+            # Includes off-category, unknown-category and zero-similarity exposures.
+            # Excludes both out-of-exposure items and the other actual positive.
+            self.assertEqual(set(child["candidate"]["candidate_item_ids"]), expected)
+            self.assertFalse(child["candidate"]["scope"]["query_category_filter"])
+            self.assertEqual(child["candidate"]["scope"]["exposure_pool_size"], 12)
+            self.assertEqual(child["request"]["query_input"], source["query_input"])
+
+    def test_no_click_can_keep_all_exposures_without_an_encoder(self):
+        products, interactions = pool()
+        source = request({"clicked_item_ids": [], "purchased_item_ids": []})
+        child = SampledCandidateBuilder(products, interactions, None, methods=("random",),
+            min_items=12, max_items=12).build(source)
+        self.assertEqual(set(child["candidate"]["candidate_item_ids"]), set(range(10,22)))
+        self.assertEqual(child["request"]["response_target"], source["response_target"])

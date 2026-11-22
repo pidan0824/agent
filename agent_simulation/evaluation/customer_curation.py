@@ -45,6 +45,24 @@ class CurationTools(FrozenSampleTools):
         return context
 
 
+def generation_jobs(request, *, bundle=None, policies=("sampled",), limit=10, encoder=None):
+    """One Query per source request; one Response per positive (or empty outcome)."""
+    jobs = []
+    if bundle is None or bundle.get("query_enabled", True):
+        jobs.append(("query", "hidden", deepcopy(request), None))
+    for policy in policies:
+        if policy == "sampled":
+            require(bundle is not None, "Sampled generation requires prepared scenes")
+            jobs.extend(("response", policy, deepcopy(s["request"]), deepcopy(s["candidate"]))
+                        for s in bundle["response_scenes"])
+        else:
+            adapted = deepcopy(request)
+            adapted["response_input"], candidate = construct_candidates(
+                request["response_input"], policy=policy, limit=limit, encoder=encoder)
+            jobs.append(("response", policy, adapted, candidate))
+    return jobs
+
+
 def encoded(value):
     def default(obj):
         if isinstance(obj, np.ndarray):
@@ -79,6 +97,7 @@ def parser():
     p.add_argument("--predictor-model")
     p.add_argument("--predictor-tokenizer", type=Path)
     p.add_argument("--bge-path", type=Path, default=Path("models/bge-small-zh-v1.5"))
+    p.add_argument("--bge-device", default="cuda", help="BGE device for retrieval and Query scoring; honor CUDA_VISIBLE_DEVICES")
     p.add_argument("--temperature", type=float, default=.7)
     p.add_argument("--max-new-tokens", type=int, default=1024)
     p.add_argument("--max-model-calls", type=int, default=6)
@@ -137,7 +156,7 @@ def main(argv=None):
             "Supply predictor URL, model and tokenizer together")
     args.output.mkdir(parents=True)
     require(0 <= args.query_min <= 1 and 0 <= args.response_min <= 1, "Quality thresholds must be in [0,1]")
-    scorer = OutcomeScorer(args.bge_path)
+    scorer = OutcomeScorer(args.bge_path, bge_device=args.bge_device)
     rng = np.random.default_rng(args.seed)
     records, coverage = [], []
     with ExitStack() as resources:
@@ -169,7 +188,7 @@ def main(argv=None):
         encoder = None
         if "retrieved" in args.candidate_policies:
             from agent_simulation.agents.retrieval.bge_encoder import bge_encoder
-            encoder, _ = bge_encoder(args.bge_path, device="cpu")
+            encoder, _ = bge_encoder(args.bge_path, device=args.bge_device)
         manifest = {"schema": "customer-usermirrorer-curation-v1", "args": vars(args), "request_ids": ids,
                     "dataset_manifest_sha256": sha256(args.dataset / "manifest.json"),
                     "scenes_manifest_sha256": sha256(args.scenes / "manifest.json") if prepared else None,
@@ -188,74 +207,70 @@ def main(argv=None):
             for identity in ids:
                 request = (prepared[identity]["request"] if prepared else data.catalog.request(identity, all_prior=True))
                 actor = request["query_input"]["profile"]["user_id"]
-                for stage in ("query", "response"):
-                    policies = ["hidden"] if stage == "query" else args.candidate_policies
-                    for policy in policies:
-                        adapted = deepcopy(request)
-                        candidate = None
-                        if stage == "response" and policy == "sampled":
-                            adapted = deepcopy(prepared[identity]["request"])
-                            candidate = deepcopy(prepared[identity]["candidate"])
-                        elif stage == "response":
-                            raw = data.catalog.request(identity, all_prior=True) if prepared else request
-                            adapted["response_input"], candidate = construct_candidates(
-                                raw["response_input"], policy=policy, limit=args.candidate_count, encoder=encoder)
-                        for mode in args.modes:
-                            binding = CurationTools(adapted, stage, mode=mode, theory=args.theory)
-                            options = AgenticOptions(max_model_calls=1 if mode == "fixed" else args.max_model_calls,
-                                                      max_tool_calls=args.max_tool_calls, theory=args.theory)
-                            async def generate_samples():
-                                semaphore = asyncio.Semaphore(args.sample_concurrency)
-                                async def one(variant, model, index):
-                                    async with semaphore:
-                                        # Immutable per-sample seed; HTTP transport/tokenizer may
-                                        # be shared, but the mutable seed must never be shared.
-                                        sampled_model = copy(model)
-                                        sampled_model.seed = args.seed + index
-                                        trajectory = await generate_trajectory(binding, sampled_model, role="customer",
-                                            actor_id=actor, stage=stage, record_id=identity, source_split=args.split,
-                                            catalog_identity=manifest["dataset_manifest_sha256"], options=options, sample_index=index)
-                                        row = {"stage": stage, "mode": mode, "policy": policy, "variant": variant, "tid": index,
-                                            "cid": digest([identity, mode, policy, args.theory, binding.fingerprint]),
-                                            "dataset": "KuaiSearch/" + (candidate["domain"] if candidate else "Query"),
-                                            "source_split": args.split, "trajectory": trajectory, "prob": None}
-                                        if stage == "response" and trajectory["status"] == "ok":
-                                            try:
-                                                row["raw_item_probabilities"] = await asyncio.to_thread(predictor.score, binding, trajectory)
-                                            except ContextCapacityError as error:
-                                                row["probability_error"] = str(error)
-                                        print(identity, stage, policy, mode, variant, index, trajectory["status"], flush=True)
-                                        return row
-                                return await asyncio.gather(*(one(variant, model, index)
-                                    for variant, model in models.items() for index in range(args.samples)))
-                            pending = asyncio.run(generate_samples())
-                            # Neither generation nor probability scoring below can access targets.
-                            target = request[stage + "_target"]
-                            score_group([r["trajectory"] for r in pending], target, scorer,
-                                        query_min=args.query_min,response_min=args.response_min,
-                                        click_min=args.click_min,purchase_min=args.purchase_min)
-                            if stage == "response":
-                                status = candidate_coverage(candidate, target)
-                                coverage.append({"request_id": identity, "mode": mode, **candidate, **status})
-                            for row in pending:
-                                t = row["trajectory"]
-                                if t["status"] == "ok":
-                                    row["direct_score"] = t["score"]
-                                    if stage == "response":
-                                        row["direct_click_f1"] = t["outcome_metrics"]["clicked_item_ids_f1"]
-                                        row["direct_purchase_f1"] = t["outcome_metrics"]["purchased_item_ids_f1"]
-                                        row["direct_exact_match"] = all(set(t["final_action"][field]) == set(target[field])
-                                            for field in ("clicked_item_ids", "purchased_item_ids"))
+                jobs = generation_jobs(request, bundle=prepared.get(identity),
+                    policies=args.candidate_policies, limit=args.candidate_count, encoder=encoder)
+                for stage, policy, adapted, candidate in jobs:
+                    scene_identity = candidate.get("scene_id", identity) if candidate else identity
+                    for mode in args.modes:
+                        binding = CurationTools(adapted, stage, mode=mode, theory=args.theory)
+                        options = AgenticOptions(max_model_calls=1 if mode == "fixed" else args.max_model_calls,
+                                                  max_tool_calls=args.max_tool_calls, theory=args.theory)
+                        async def generate_samples():
+                            semaphore = asyncio.Semaphore(args.sample_concurrency)
+                            async def one(variant, model, index):
+                                async with semaphore:
+                                    # Immutable per-sample seed; HTTP transport/tokenizer may
+                                    # be shared, but the mutable seed must never be shared.
+                                    sampled_model = copy(model)
+                                    sampled_model.seed = args.seed + index
+                                    trajectory = await generate_trajectory(binding, sampled_model, role="customer",
+                                        actor_id=actor, stage=stage, record_id=scene_identity, source_split=args.split,
+                                        catalog_identity=manifest["dataset_manifest_sha256"], options=options, sample_index=index)
+                                    trajectory["source_request_id"] = identity
+                                    trajectory["scene_id"] = str(scene_identity)
+                                    if candidate and "source_response_target" in candidate:
+                                        trajectory["source_response_target"] = deepcopy(candidate["source_response_target"])
+                                    row = {"stage": stage, "mode": mode, "policy": policy, "variant": variant, "tid": index,
+                                        "cid": digest([scene_identity, mode, policy, args.theory, binding.fingerprint]),
+                                        "dataset": "KuaiSearch/" + (candidate["domain"] if candidate else "Query"),
+                                        "source_split": args.split, "trajectory": trajectory, "prob": None}
+                                    if stage == "response" and trajectory["status"] == "ok":
+                                        try:
+                                            row["raw_item_probabilities"] = await asyncio.to_thread(predictor.score, binding, trajectory)
+                                        except ContextCapacityError as error:
+                                            row["probability_error"] = str(error)
+                                    print(identity, stage, policy, mode, variant, index, trajectory["status"], flush=True)
+                                    return row
+                            return await asyncio.gather(*(one(variant, model, index)
+                                for variant, model in models.items() for index in range(args.samples)))
+                        pending = asyncio.run(generate_samples())
+                        # Neither generation nor probability scoring below can access targets.
+                        target = adapted[stage + "_target"]
+                        score_group([r["trajectory"] for r in pending], target, scorer,
+                                    query_min=args.query_min,response_min=args.response_min,
+                                    click_min=args.click_min,purchase_min=args.purchase_min)
+                        if stage == "response":
+                            status = candidate_coverage(candidate, target)
+                            coverage.append({"request_id": identity, "mode": mode, **candidate, **status})
+                        for row in pending:
+                            t = row["trajectory"]
+                            if t["status"] == "ok":
+                                row["direct_score"] = t["score"]
                                 if stage == "response":
-                                    row.update(reachable=status["reachable"], behavior_group=status["behavior_group"],
-                                               choice_cnt=candidate["candidate_count"])
-                                    if row.get("raw_item_probabilities"):
-                                        values = probability_record(row.pop("raw_item_probabilities"), candidate["candidate_item_ids"], target, rng=rng)
-                                        row.update(values)
-                                        for name in ("argmax", "sampled"):
-                                            row[name+"_score"] = scorer.score(stage, row[name+"_action"], target)["score"]
-                                output.write(encoded(row) + "\n"); output.flush()
-                                records.append(row)
+                                    row["direct_click_f1"] = t["outcome_metrics"]["clicked_item_ids_f1"]
+                                    row["direct_purchase_f1"] = t["outcome_metrics"]["purchased_item_ids_f1"]
+                                    row["direct_exact_match"] = all(set(t["final_action"][field]) == set(target[field])
+                                        for field in ("clicked_item_ids", "purchased_item_ids"))
+                            if stage == "response":
+                                row.update(reachable=status["reachable"], behavior_group=status["behavior_group"],
+                                           choice_cnt=candidate["candidate_count"])
+                                if row.get("raw_item_probabilities"):
+                                    values = probability_record(row.pop("raw_item_probabilities"), candidate["candidate_item_ids"], target, rng=rng)
+                                    row.update(values)
+                                    for name in ("argmax", "sampled"):
+                                        row[name+"_score"] = scorer.score(stage, row[name+"_action"], target)["score"]
+                            output.write(encoded(row) + "\n"); output.flush()
+                            records.append(row)
         exported = export_training(records,args.output,max_pairs=args.max_pairs,filter_column=args.filter_column,
             sampling_column=args.sampling_column,ascending=args.ascending,
             query_min=args.query_min,response_min=args.response_min,click_min=args.click_min,purchase_min=args.purchase_min,

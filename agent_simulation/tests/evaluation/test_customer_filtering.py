@@ -171,3 +171,16 @@ class FilteringTests(unittest.TestCase):
                        {"action_min_gap": 0}, {"logloss_min_gap": -1}):
             with self.assertRaises(ValueError):
                 validate_filter_options(**values)
+
+    def test_split_provenance_survives_sft_and_dpo_without_entering_messages(self):
+        rows=self.pair_rows()
+        original=action([1,2,99],[2])
+        for row in rows:
+            row["trajectory"].update(source_request_id=100,scene_id="100:positive:2",
+                                     source_response_target=original)
+        sft,pairs,_=select_preferences(rows)
+        for item in (sft[0],pairs[0]):
+            self.assertEqual(item["source_request_id"],100)
+            self.assertEqual(item["source_response_target"],original)
+        self.assertNotIn("source_response_target",json.dumps(sft[0]["messages"]))
+        self.assertNotIn("source_response_target",json.dumps(pairs[0]["chosen"]))

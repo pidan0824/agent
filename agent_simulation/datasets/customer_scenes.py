@@ -38,7 +38,7 @@ def prepare_scenes(catalog, requests, encoder, *, min_items=2, max_items=12, see
                    min_history=3, methods=("random", "content", "collaborative")):
     require(bool(requests), "Empty request selection")
     cutoffs = [r["response_input"]["history_cutoff_exclusive"] for r in requests]
-    # A shared catalog pool, rather than only the current request's exposures.
+    # Shared item facts support CF history; candidate eligibility is request-exposure-only.
     # No per-user LLM summaries or hidden current action labels enter features.
     products = rows(catalog.connection, """
         WITH available AS (
@@ -62,14 +62,23 @@ def prepare_scenes(catalog, requests, encoder, *, min_items=2, max_items=12, see
         min_items=min_items,max_items=max_items,seed=seed,min_history=min_history,methods=methods,
         fit_cutoff=min(cutoffs))
     scenes, skipped = [], []
-    expected = {"insufficient_prior_interactions", "empty_available_item_pool", "empty_constructed_list"}
+    expected = {"insufficient_prior_interactions", "empty_available_item_pool",
+                "empty_constructed_list", "insufficient_distractors"}
     for request in requests:
-        try:
-            scenes.append(freeze_prices(catalog, builder.build(request)))
-        except ValueError as error:
-            if str(error) not in expected:
-                raise
-            skipped.append({"session_id": request["session_id"], "reason": str(error)})
+        bundle = {"request": deepcopy(request), "query_enabled": True, "response_scenes": []}
+        target = request["response_target"]
+        positives = sorted(set(target["clicked_item_ids"]) | set(target["purchased_item_ids"]))
+        for item in positives or [None]:
+            try:
+                scene = builder.build(request, target_item_id=item)
+                bundle["response_scenes"].append(freeze_prices(catalog, scene))
+            except ValueError as error:
+                if str(error) not in expected:
+                    raise
+                skipped.append({"session_id": request["session_id"], "stage": "response",
+                                "target_item_id": item, "reason": str(error)})
+        # A Response construction failure never removes its independent Query.
+        scenes.append(bundle)
     return scenes, skipped
 
 
@@ -81,27 +90,41 @@ def filter_lengths(scenes, tokenizer, limit, *, modes=("fixed","autonomous")):
     from agent_simulation.inference.requests import prompt_tokens
     require(limit>0, "Length limit must be positive")
     kept,skipped=[],[]
-    for scene in scenes:
-        counts={}
-        for stage in ("query","response"):
+    for bundle in deepcopy(scenes):
+        def counts_for(request, stage):
+            counts = {}
             for mode in modes:
-                binding=CurationTools(scene["request"],stage,mode=mode)
-                _,messages=trajectory_messages(binding,role="customer",stage=stage,theory=True)
-                options=AgenticOptions(max_model_calls=1 if mode=="fixed" else 3)
-                initial,tools,_=initial_agentic_request(messages,binding.schemas,options)
-                counts[stage+":"+mode]=len(prompt_tokens(initial,tools,tokenizer))
-        if max(counts.values())>limit:
-            skipped.append({"session_id":scene["request"]["session_id"],"reason":"context_length", "input_tokens":counts})
-        else:
-            scene["candidate"]["input_tokens"]=counts
-            kept.append(scene)
+                binding = CurationTools(request, stage, mode=mode)
+                _, messages = trajectory_messages(binding, role="customer", stage=stage, theory=True)
+                options = AgenticOptions(max_model_calls=1 if mode=="fixed" else 3)
+                initial, tools, _ = initial_agentic_request(messages, binding.schemas, options)
+                counts[mode] = len(prompt_tokens(initial, tools, tokenizer))
+            return counts
+        counts = counts_for(bundle["request"], "query")
+        bundle["query_enabled"] = max(counts.values()) <= limit
+        if not bundle["query_enabled"]:
+            skipped.append({"session_id": bundle["request"]["session_id"], "stage": "query",
+                            "reason": "context_length", "input_tokens": counts})
+        children = []
+        for scene in bundle["response_scenes"]:
+            counts = counts_for(scene["request"], "response")
+            if max(counts.values()) > limit:
+                skipped.append({"session_id": bundle["request"]["session_id"], "stage": "response",
+                                "scene_id": scene["candidate"]["scene_id"],
+                                "reason": "context_length", "input_tokens": counts})
+            else:
+                scene["candidate"]["input_tokens"] = counts
+                children.append(scene)
+        bundle["response_scenes"] = children
+        if bundle["query_enabled"] or children:
+            kept.append(bundle)
     return kept,skipped
 
 
 def read_scenes(directory, *, dataset=None, split=None):
     directory=Path(directory)
     manifest=json.loads((directory/"manifest.json").read_text())
-    require(manifest["schema"]=="customer-sampled-scenes-v1", "Unknown Customer scene format")
+    require(manifest["schema"]=="customer-single-positive-scenes-v2", "Prepare scenes again: single-positive v2 required")
     if dataset is not None:
         require(manifest["dataset_manifest_sha256"]==sha256(Path(dataset)/"manifest.json"), "Scene label release differs")
     if split is not None:
@@ -110,6 +133,20 @@ def read_scenes(directory, *, dataset=None, split=None):
     scenes=[json.loads(s) for s in (directory/"scenes.jsonl").read_text().splitlines() if s.strip()]
     result={s["request"]["session_id"]:s for s in scenes}
     require(len(result)==len(scenes), "Duplicate prepared request")
+    scene_ids = [child["candidate"]["scene_id"] for bundle in scenes for child in bundle["response_scenes"]]
+    require(len(scene_ids) == len(set(scene_ids)), "Duplicate split scene IDs")
+    for bundle in scenes:
+        source = bundle["request"]
+        positives = set(source["response_target"]["clicked_item_ids"]) | set(source["response_target"]["purchased_item_ids"])
+        for child in bundle["response_scenes"]:
+            require(child["request"]["session_id"] == source["session_id"], "Mixed source request")
+            chosen = child["candidate"]["target_item_id"]
+            require(chosen in positives if positives else chosen is None, "Invalid split target")
+            selected = set(child["candidate"]["candidate_item_ids"])
+            require(not (selected & (positives - {chosen})), "Other true positives entered a split list")
+            projected = {f: [i for i in source["response_target"][f] if i == chosen]
+                         for f in ("clicked_item_ids", "purchased_item_ids")}
+            require(child["request"]["response_target"] == projected, "Invalid split labels")
     return result,manifest
 
 
@@ -126,6 +163,7 @@ def main(argv=None):
     p.add_argument("--min-history",type=int,default=3)
     p.add_argument("--methods",nargs="+",choices=["random","content","collaborative"],default=["random","content","collaborative"])
     p.add_argument("--bge-path",type=Path,default=Path("models/bge-small-zh-v1.5"))
+    p.add_argument("--bge-device",default="cuda",help="Embedding device, e.g. cuda, cuda:1 or cpu; honor CUDA_VISIBLE_DEVICES")
     p.add_argument("--max-input-tokens",type=int,default=0,help="Optional actual-prompt length filter; 0 disables")
     p.add_argument("--tokenizer",type=Path,default=Path("models/Qwen3-32B"))
     args=p.parse_args(argv)
@@ -142,7 +180,7 @@ def main(argv=None):
         encoder=None
         if "content" in args.methods:
             from agent_simulation.agents.retrieval.bge_encoder import bge_encoder
-            encoder,_=bge_encoder(args.bge_path,device="cpu")
+            encoder,_=bge_encoder(args.bge_path,device=args.bge_device)
         scenes,skipped=prepare_scenes(catalog,requests,encoder,min_items=args.min_items,max_items=args.max_items,
             seed=args.seed,min_history=args.min_history,methods=args.methods)
     if args.max_input_tokens:
@@ -152,12 +190,15 @@ def main(argv=None):
     args.output.mkdir(parents=True)
     (args.output/"scenes.jsonl").write_text("".join(json.dumps(s,ensure_ascii=False,allow_nan=False)+"\n" for s in scenes))
     (args.output/"skipped.jsonl").write_text("".join(json.dumps(s,ensure_ascii=False)+"\n" for s in skipped))
-    manifest={"schema":"customer-sampled-scenes-v1","dataset":str(args.dataset.resolve()),
+    manifest={"schema":"customer-single-positive-scenes-v2","dataset":str(args.dataset.resolve()),
         "dataset_manifest_sha256":sha256(args.dataset/"manifest.json"),"split":args.split,
         "args":{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
         "scenes_sha256":sha256(args.output/"scenes.jsonl"),"prepared":len(scenes),"skipped":len(skipped),
+        "query_scenes":sum(s["query_enabled"] for s in scenes),
+        "response_scenes":sum(len(s["response_scenes"]) for s in scenes),
         "skip_reasons":dict(Counter(s["reason"] for s in skipped)),
-        "protocol":"Author-style outcome-conditioned synthetic choice scenes; separate from observed-market behavior evaluation.",
+        "protocol":"Outcome-conditioned shortlists sampled within recorded exposures, without Query/category gates; not full-exposure evaluation.",
+        "candidate_pool":"request_exposures","query_category_filter":False,
         "query":"Current Query target/exposures remain absent from query_input.",
         "collaborative_fit_cutoff_exclusive":min(r["response_input"]["history_cutoff_exclusive"] for r in requests),
         "author_provenance":json.loads((Path(__file__).parents[1]/"vendor/usermirrorer/PROVENANCE.json").read_text())}

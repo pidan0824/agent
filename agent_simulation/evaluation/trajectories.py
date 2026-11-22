@@ -164,8 +164,9 @@ async def generate_trajectory(binding, model, *, role, actor_id, stage, record_i
 
 
 class OutcomeScorer:
-    def __init__(self, bge_path=None):
+    def __init__(self, bge_path=None, *, bge_device="cpu"):
         self.bge_path, self.encoder, self.encoder_id = bge_path, None, None
+        self.bge_device = bge_device
         self.vectors = {}
 
     def query_similarity(self, prediction, target):
@@ -177,7 +178,7 @@ class OutcomeScorer:
             from agent_simulation import PROJECT_ROOT
             from agent_simulation.agents.retrieval.bge_encoder import bge_encoder
             path = self.bge_path or os.environ.get("MEMORY_BGE_PATH", str(PROJECT_ROOT / "models/bge-small-zh-v1.5"))
-            self.encoder, self.encoder_id = bge_encoder(path, device="cpu")
+            self.encoder, self.encoder_id = bge_encoder(path, device=self.bge_device)
         missing = list(dict.fromkeys(text for text in (prediction, target) if text not in self.vectors))
         if missing:
             self.vectors.update(zip(missing, self.encoder.encode_many(missing)))
@@ -241,6 +242,7 @@ def training_rows(trajectories, *, min_gap=0.05):
     if first["source_split"] != "train":
         return [], [], "held_out_no_training_export"
     metadata = {key: first[key] for key in IDENTITY_FIELDS}
+    metadata.update({key: deepcopy(first[key]) for key in ("source_request_id", "scene_id", "source_response_target") if key in first})
     accepted = [trajectory for trajectory in trajectories if trajectory["status"] == "ok" and trajectory["accepted"]]
     unique = {}
     for trajectory in accepted:
