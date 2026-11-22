@@ -5,3 +5,10 @@ Adapted memory retrieval: agent_simulation/agents/retrieval/similarity.py.
 Upstream sources: src/memory/twitter_memory.py and src/agent/base_agent.py.
 The README files display an MIT license badge at this commit.
 The snapshot contains no standalone license text.
+
+UserMirrorer
+Source: https://github.com/Joinn99/UserMirrorer
+Commit: b6e628cdc6e9a439265d5375cdc44bf5d8a29e80
+Copied EKB template and unmodified probability/entropy/filtering and candidate sampling function bodies.
+License: MIT, copyright (c) 2025 UserMirrorer.
+Full notice and provenance: agent_simulation/vendor/usermirrorer/LICENSE and PROVENANCE.json.

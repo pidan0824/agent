@@ -105,7 +105,7 @@ async def predict_request(request, stage, model, *, options=None, sample_index=0
             "Predict clicks and purchases conditional on this recorded query and unchanged displayed list.")
     messages = [
         {"role": "system", "content": agentic_customer_instructions(theory=options.theory) + "\n" + task +
-         "\nReturn one final JSON envelope matching this schema: " + _json(teacher_output([schema]))},
+         "\nReturn one final JSON envelope matching this schema: " + _json(teacher_output([schema], customer_ekb=options.theory))},
         {"role": "user", "content": _json(binding.initial_context())},
     ]
     trace = {}
@@ -116,11 +116,12 @@ async def predict_request(request, stage, model, *, options=None, sample_index=0
               "status": "running", "trace": trace}
 
     async def complete(conversation, tools):
-        return await model.acomplete({"messages": conversation, "tools": tools},
+        return await model.acomplete({"messages": conversation, "tools": tools,
+                                      "final_schema": teacher_output([schema], customer_ekb=options.theory)},
                                      call_id=f'{identity}:sample:{sample_index}:call:{len(trace["model_calls"])}')
 
     def validate(final):
-        return validate_teacher_final(final, [schema], trace=trace)
+        return validate_teacher_final(final, [schema], trace=trace, customer_ekb=options.theory)
 
     try:
         result["prediction"] = await run_agentic_workflow(
@@ -235,7 +236,7 @@ def main(argv=None):
                     "selection_split": args.split, "stages": stages, "options": asdict(options),
                     "samples_per_decision": args.samples_per_decision, "model": args.model,
                     "temperature": args.temperature, "seed": args.seed,
-                    "theory_application": "EKB hypotheses are included directly when enabled; a brief evidence-grounded rationale is required in both arms.",
+                    "theory_application": "Theory-enabled runs use the upstream detailed EKB structure; theory-disabled runs use the separate hypothesis/evidence contract.",
                     "protocol": "Query prediction and conditional Response on recorded Query/display; no search or settlement.",
                     "selection_policy": "All samples are reported; no outcome-based selection or distillation.",
                     "historical_test_use": "Existing project training may have used test for checkpoint selection; do not call it untouched."}

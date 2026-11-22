@@ -1,6 +1,6 @@
 # Agent 代码与运行
 
-Customer、Seller 与环境共用一个市场状态。行为和长期记忆设计见[架构说明](../docs/architecture.md)。新增单模型自主查询、理论轨迹生成、SFT→DPO 和传统 Seller 对照见[轨迹训练](../docs/trajectory-training.md)，使用独立入口，不改本文默认行为 SFT。
+Customer、Seller 与环境共用一个市场状态。行为和长期记忆设计见[架构说明](../docs/architecture.md)。新增单模型自主查询、理论轨迹生成、SFT→DPO 和传统 Seller 对照见[轨迹训练](../docs/trajectory-training.md)，使用独立入口，不改本文默认行为 SFT。Customer 短列表、结构化 EKB 与复用 UserMirrorer 的强弱解释筛选见 [Customer 数据构造](../docs/customer-curation.md)。
 
 ## 当前数据入口
 

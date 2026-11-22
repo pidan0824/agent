@@ -284,11 +284,11 @@ class CustomerAgent(BaseAgent):
               "A brief behavior hypothesis may be recorded with record_behavior_hypothesis; it is unverified."
         )}]
         messages.append({"role": "user", "content": json.dumps(
-            {"stage": stage, "final_output": teacher_output(output["final_schemas"]), "context": context}, ensure_ascii=False, allow_nan=False)})
+            {"stage": stage, "final_output": teacher_output(output["final_schemas"], customer_ekb=self.agentic_options.theory), "context": context}, ensure_ascii=False, allow_nan=False)})
         return messages
 
     async def _agentic_stage(self, run, stage, *, state=None, expected_request_id=None):
-        from agent_simulation.agents.agentic import FrozenCustomerTools, run_agentic_workflow, validate_teacher_final
+        from agent_simulation.agents.agentic import FrozenCustomerTools, run_agentic_workflow, validate_teacher_final, teacher_output
         from uuid import uuid4
         from agent_simulation.inference.client import complete_once
         from agent_simulation.inference.requests import prepare_request
@@ -328,7 +328,8 @@ class CustomerAgent(BaseAgent):
         async def complete(prompt, tools):
             request, count = prepare_request(prompt, tools, self.agentic_model.tokenizer,
                                              max_output_tokens=self.agentic_model.max_new_tokens)
-            request.update(agent_role="customer", decision_stage=stage)
+            request.update(agent_role="customer", decision_stage=stage,
+                           final_schema=teacher_output(output, customer_ekb=self.agentic_options.theory))
             call_id = f'{run["id"]}:agentic:{len(run["model_calls"]) + 1}'
             call = {"call_id": call_id, "stage": stage, "input_tokens": count,
                     "request": deepcopy(request), "model": self.agentic_model.generator_id}
@@ -342,7 +343,7 @@ class CustomerAgent(BaseAgent):
                 raise
 
         def validate(value):
-            return validate_teacher_final(value, output, trace=trace,
+            return validate_teacher_final(value, output, trace=trace, customer_ekb=self.agentic_options.theory,
                 validate_action=(lambda action: validate_response(action, ids)) if stage == "response" else None)
 
         try:

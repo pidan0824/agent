@@ -1,0 +1,39 @@
+{
+  "repository": "https://github.com/Joinn99/UserMirrorer",
+  "commit": "b6e628cdc6e9a439265d5375cdc44bf5d8a29e80",
+  "license": "MIT",
+  "source_sha256": {
+    "usermirrorer/generator/template.py": "6b2b68f2021525c325b39e21d5e3069230d3aed9c869b5bc7a9e44da0c544e89",
+    "usermirrorer/filter/utils.py": "2de89bf0738ab44bdfa9fe9ed5c4065ea305d53c6e3e556288c3bf418ab02158",
+    "usermirrorer/data_filtering.py": "acd7ccad7fb0a20edbeec89bd0ce8a833644f42be9d7fc928eeb66d1abb333fe",
+    "usermirrorer/sampler/sampler.py": "d0ce6df64c5c8f9a2f8ec76094e43db687d7ff21d6386758606599c9650cc87d"
+  },
+  "extracted_functions": {
+    "utils.py": [
+      "get_entropy",
+      "get_prob",
+      "get_logloss",
+      "calculate_metrics"
+    ],
+    "filtering.py": [
+      "behavior_sampling",
+      "data_filtering"
+    ],
+    "sampler.py": [
+      "get_spectral_info",
+      "content_predict",
+      "collaborative_predict",
+      "random_scoring",
+      "content_based_scoring",
+      "collaborative_scoring",
+      "topk_sampling",
+      "multinomial_sampling",
+      "interaction_filtering",
+      "time_filtering",
+      "gt_position",
+      "add_gt_to_impression",
+      "merge_ranking_list"
+    ]
+  },
+  "changes": "Function bodies and template.py unchanged. Only imports/excerpt packaging changed. Multi-label adaptation lives outside vendor."
+}

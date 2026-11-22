@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from agent_simulation.tests.ekb_fixture import rationale
 from agent_simulation.agents.agentic import AgenticOptions
 from agent_simulation.evaluation.micro.customer_agentic import FrozenSampleTools
 from agent_simulation.evaluation.trajectories import (
@@ -17,8 +18,7 @@ from agent_simulation.tests.evaluation.test_customer_agentic import request
 
 
 def envelope(action):
-    return {"rationale": {"hypothesis": "habitual choice", "evidence": ["past query observed"],
-                          "uncertainty": "limited evidence"}, "action": action}
+    return {"rationale": rationale(), "action": action}
 
 
 def branch(identity, action, evidence, *, split="train"):

@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 training = ["peft==0.18.1", "accelerate==1.10.1"]
+curation = ["pandas>=2.2,<3"]
 baselines = ["scikit-learn>=1.4,<2"]
 dev = ["black==24.10.0", "ruff==0.14.3"]
 
@@ -30,6 +31,8 @@ namespaces = false
 
 [tool.setuptools.package-data]
 agent_simulation = [
+    "vendor/usermirrorer/LICENSE",
+    "vendor/usermirrorer/PROVENANCE.json",
     "datasets/*.json",
     "agents/prompts/skills/*.md",
     "agents/prompts/skills/*/SKILL.md",

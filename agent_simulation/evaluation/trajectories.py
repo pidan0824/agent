@@ -105,25 +105,36 @@ class FrozenSellerSampleTools:
         return execute_seller_auxiliary(name, args, theory=self.theory)
 
 
-async def generate_trajectory(binding, model, *, role, actor_id, stage, record_id,
-                              source_split, catalog_identity, options, sample_index):
-    """No target argument: the generator receives only the frozen input binding."""
+def trajectory_messages(binding, *, role, stage, theory):
+    """Shared label-free initial messages for scene length checks and generation."""
     schemas = action_output(
         stage, displayed_ids=[product["item_id"] for product in binding.displayed] if stage == "response" else None,
         price_ids=binding.context["requested_price_item_ids"] if stage == "seller" else None,
     )["final_schemas"]
-    instructions = (agentic_customer_instructions(theory=options.theory) if role == "customer"
-                    else agentic_seller_instructions(theory=options.theory))
+    instructions = (agentic_customer_instructions(theory=theory) if role == "customer"
+                    else agentic_seller_instructions(theory=theory))
     task = {"query": "Predict the next observed Chinese search query; the current query and exposure are hidden.",
             "response": "Predict clicks/purchases conditional on the recorded query and unchanged displayed list.",
             "seller": "Predict the next observed quote, rather than an unobserved profit-optimal price."}[stage]
+    output_note = ("Return a JSON object containing the detailed EKB explanation and the action. "
+                   if role == "customer" and theory else
+                   "Return a JSON object containing a brief evidence-grounded rationale and the action. ")
     messages = [{"role": "system", "content": instructions + "\n" + task +
-                 "\nReturn a JSON object containing a brief evidence-grounded rationale and the action. "
-                 "The rationale is a generated hypothesis, not an observed thought process. Schema: " + encoded(teacher_output(schemas))},
+                 "\n" + output_note +
+                 "The rationale is a generated hypothesis, not an observed thought process. Schema: " + encoded(teacher_output(schemas, customer_ekb=role == "customer" and theory))},
                 {"role": "user", "content": encoded(binding.initial_context())}]
+    return schemas, messages
+
+
+async def generate_trajectory(binding, model, *, role, actor_id, stage, record_id,
+                              source_split, catalog_identity, options, sample_index):
+    """No target argument: the generator receives only the frozen input binding."""
+    schemas, messages = trajectory_messages(binding, role=role, stage=stage, theory=options.theory)
     initial_state_id = digest([catalog_identity, role, actor_id, stage, record_id, binding.fingerprint])
     trajectory_id = digest([initial_state_id, options.theory, getattr(model, "model", "teacher"),
                             getattr(model, "seed", None), sample_index])
+    # Information modes can share a physical snapshot but have different prompts.
+    trajectory_id = digest([trajectory_id, messages, binding.schemas])
     trace = {}
     record = {"schema": "teacher-trajectory-v1", "role": role, "actor_id": actor_id, "stage": stage,
               "record_id": record_id, "source_split": source_split, "initial_state_id": initial_state_id,
@@ -131,13 +142,14 @@ async def generate_trajectory(binding, model, *, role, actor_id, stage, record_i
               "seed": getattr(model, "seed", None), "theory": options.theory, "status": "running", "trace": trace}
 
     async def complete(conversation, tools):
-        return await model.acomplete({"messages": conversation, "tools": tools},
+        return await model.acomplete({"messages": conversation, "tools": tools,
+                                      "final_schema": teacher_output(schemas, customer_ekb=options.theory) if role == "customer" else None},
                                     call_id=f'{trajectory_id}:{len(trace["model_calls"])}')
 
     try:
         record["final_action"] = await run_agentic_workflow(
             messages=messages, tools=binding.schemas, complete=complete, execute_tool=binding.execute,
-            validate_final=lambda value: validate_teacher_final(value, schemas, trace=trace),
+            validate_final=lambda value: validate_teacher_final(value, schemas, trace=trace, customer_ekb=role == "customer" and options.theory),
             options=options, trace=trace, guard=binding.guard)
         record["status"] = "ok"
         record["rationale"] = deepcopy(trace["rationale"])
@@ -189,7 +201,7 @@ class OutcomeScorer:
         return {"score": -relative_error, "relative_price_error": relative_error}
 
 
-def score_group(trajectories, target, scorer, *, query_min=0.7, response_min=0.8, seller_max_error=0.05):
+def score_group(trajectories, target, scorer, *, query_min=0.7, response_min=0.8, seller_max_error=0.05, click_min=None, purchase_min=None):
     """The complete group's generation has ended before the outcome is attached."""
     for trajectory in trajectories:
         trajectory["target"] = deepcopy(target)
@@ -202,6 +214,16 @@ def score_group(trajectories, target, scorer, *, query_min=0.7, response_min=0.8
         trajectory["score"] = metrics["score"]
         threshold = {"query": query_min, "response": response_min, "seller": -seller_max_error}[trajectory["stage"]]
         trajectory["accepted"] = metrics["score"] >= threshold
+        if trajectory["stage"] == "response":
+            from agent_simulation.evaluation.customer_quality import response_quality
+            quality = response_quality(trajectory["final_action"], target,
+                click_min=response_min if click_min is None else click_min,
+                purchase_min=response_min if purchase_min is None else purchase_min)
+            trajectory["accepted"] = quality["accepted"]
+            trajectory["quality_thresholds"] = quality["thresholds"]
+            trajectory["quality_reasons"] = quality["reasons"]
+        elif trajectory["stage"] == "query":
+            trajectory["quality_thresholds"] = {"query_min": query_min}
 
 
 IDENTITY_FIELDS = ("role", "actor_id", "stage", "initial_state_id", "source_split")
@@ -260,7 +282,7 @@ def summarize_group(trajectories, sft, pairs, reason):
             "accepted_tool_sequences": dict(Counter(
                 " > ".join(call["name"] for call in row["trace"].get("tools", [])) or "(no tools)"
                 for row in trajectories if row["accepted"])),
-            "rationale_hypotheses": dict(Counter(row.get("rationale", {}).get("hypothesis", "(unavailable)")
+            "rationale_hypotheses": dict(Counter(row.get("rationale", {}).get("hypothesis", row.get("rationale", {}).get("evaluation_style", "(unavailable)"))
                                                  for row in trajectories))}
 
 

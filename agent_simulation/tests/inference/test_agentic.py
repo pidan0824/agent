@@ -88,6 +88,18 @@ class AgenticClientTest(unittest.TestCase):
         self.assertEqual(self.requests[0]["tools"], tools)
         self.assertEqual(self.requests[0]["tool_choice"], "none")
 
+    def test_final_schema_is_enforced_only_when_tools_are_disabled(self):
+        from agent_simulation.agents.agentic import AgenticOptions, budget_message
+        schema = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+        tools = [{"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}}]
+        client = self.client({"role": "assistant", "content": "{}"})
+        for enabled in (True, False):
+            client.complete({"messages": [budget_message(AgenticOptions(), available=enabled)],
+                             "tools": tools, "final_schema": schema}, call_id="schema")
+        self.assertNotIn("response_format", self.requests[0])
+        self.assertEqual(self.requests[1]["response_format"]["json_schema"]["schema"], schema)
+        self.assertEqual(self.requests[1]["tool_choice"], "none")
+
     def test_empty_and_invalid_envelopes_fail(self):
         for message, reason in [({"role": "assistant", "content": None}, "stop"),
                                 ({"role": "assistant", "content": "{}"}, "tool_calls"),

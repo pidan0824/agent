@@ -11,20 +11,24 @@ import httpx
 
 from agent_simulation.data.common import require
 from agent_simulation.inference.client import ModelOutputError, response_tool_calls
-from agent_simulation.inference.requests import prepare_request
+from agent_simulation.inference.requests import prepare_request, ContextCapacityError
 from agent_simulation.logs import ModelLog
+from agent_simulation.inference.vllm import _generation_schema
 
 
 class AgenticClient:
     """Keep tool calls intact; the bounded workflow validates tools and final actions."""
 
     def __init__(self, url, model, tokenizer, *, max_new_tokens=2048, timeout=120,
-                 temperature=0, seed=None, log_path=None, transport=None):
+                 temperature=0, seed=None, log_path=None, transport=None, context_limit=None):
         require(bool(model) and type(max_new_tokens) is int and max_new_tokens > 0,
                 "Invalid agentic model or generation budget")
         require(math.isfinite(timeout) and timeout > 0, "Invalid agentic timeout")
         require(math.isfinite(temperature) and 0 <= temperature <= 2,
                 "Invalid agentic temperature")
+        require(context_limit is None or (type(context_limit) is int and context_limit > max_new_tokens),
+                "Invalid served context limit")
+        self.context_limit = context_limit
         self.model, self.tokenizer = model, tokenizer
         self.max_new_tokens, self.temperature, self.seed = max_new_tokens, temperature, seed
         self.log = ModelLog(log_path) if log_path is not None else None
@@ -52,6 +56,8 @@ class AgenticClient:
         # Recount the growing conversation, including tool definitions/results, each turn.
         prepared, count = prepare_request(request["messages"], request.get("tools", []),
                                           self.tokenizer, max_output_tokens=self.max_new_tokens)
+        if self.context_limit is not None and count + self.max_new_tokens > self.context_limit:
+            raise ContextCapacityError("Agentic request exceeds the served model context limit")
         payload = {"model": self.model, "messages": prepared["messages"],
                    "max_tokens": self.max_new_tokens, "temperature": self.temperature,
                    "n": 1, "stream": False,
@@ -64,6 +70,9 @@ class AgenticClient:
                            and message["content"].startswith("Runtime budget for this decision stage: ")), None)
             disabled = budget is not None and json.loads(budget.split(": ", 1)[1])["instruction"].startswith("No further tools")
             payload.update(tools=prepared["tools"], tool_choice="none" if disabled else "auto")
+        if request.get("final_schema") and (not prepared["tools"] or payload.get("tool_choice") == "none"):
+            payload["response_format"] = {"type": "json_schema", "json_schema": {
+                "name": "final_decision", "schema": _generation_schema(request["final_schema"]), "strict": True}}
         record = {"call_id": call_id, "model": self.generator_id,
                   "seed": self.seed, "temperature": self.temperature,
                   "served_model": self.model, "request": deepcopy(request),

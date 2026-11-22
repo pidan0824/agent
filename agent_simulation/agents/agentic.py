@@ -193,9 +193,9 @@ async def run_agentic_workflow(*, messages, tools, complete, execute_tool, valid
         raise
 
 
-def teacher_output(action_schemas):
-    """Same visible rationale contract for theory and no-theory experiments."""
-    return {"type": "object", "properties": {
+def teacher_output(action_schemas, *, customer_ekb=False):
+    """Final action envelope; Customer theory runs use the structured EKB contract."""
+    schema = {"type": "object", "properties": {
         "rationale": {"type": "object", "properties": {
             "hypothesis": {"type": "string", "minLength": 1, "maxLength": 240},
             "evidence": {"type": "array", "minItems": 1, "maxItems": 5,
@@ -204,10 +204,14 @@ def teacher_output(action_schemas):
             "required": ["hypothesis", "evidence", "uncertainty"], "additionalProperties": False},
         "action": action_schemas[0] if len(action_schemas) == 1 else {"anyOf": action_schemas}},
         "required": ["rationale", "action"], "additionalProperties": False}
+    if customer_ekb:
+        from agent_simulation.agents.prompts.customer_ekb import EKB_SCHEMA
+        schema["properties"]["rationale"] = deepcopy(EKB_SCHEMA)
+    return schema
 
 
-def validate_teacher_final(value, action_schemas, *, trace, validate_action=None):
-    validate_arguments(value, teacher_output(action_schemas))
+def validate_teacher_final(value, action_schemas, *, trace, validate_action=None, customer_ekb=False):
+    validate_arguments(value, teacher_output(action_schemas, customer_ekb=customer_ekb))
     action = deepcopy(value["action"])
     if "prices" in action:
         ids = [quote["item_id"] for quote in action["prices"]]

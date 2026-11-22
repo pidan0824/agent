@@ -40,4 +40,6 @@ def agentic_customer_instructions(*, theory=True):
         )
     theory_text = ("\nDecision hypotheses available in this run:\n" + read_skill_reference("decision-types")
                    if theory else "")
-    return body + "\n" + FACT_RULES + "\n" + read_skill_reference("evidence", theory=theory) + theory_text + "\n" + TEACHER_OUTPUT_NOTE
+    from agent_simulation.agents.prompts.customer_ekb import ekb_instructions
+    rationale = ekb_instructions() if theory else TEACHER_OUTPUT_NOTE
+    return body + "\n" + FACT_RULES + "\n" + read_skill_reference("evidence", theory=theory) + theory_text + "\n" + rationale

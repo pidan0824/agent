@@ -1,6 +1,6 @@
 # Agent 实现与单模型自主查询
 
-当前保留原 SFT 路径，并提供可独立开启的 Customer/Seller agentic 路径，默认服务模型为本机 Qwen3-32B。同一模型选择证据、查询和停止，再形成搜索、点击/购买或报价。Customer EKB、Seller 定价候选理论、轨迹筛选、SFT→DPO 与传统 Seller 基线均已提供独立入口，见[实现与命令](trajectory-training.md)。
+当前保留原 SFT 路径，并提供可独立开启的 Customer/Seller agentic 路径，默认服务模型为本机 Qwen3-32B。同一模型选择证据、查询和停止，再形成搜索、点击/购买或报价。Customer EKB、Seller 定价候选理论、轨迹筛选、SFT→DPO 与传统 Seller 基线均已提供独立入口，见[实现与命令](trajectory-training.md)。Customer 的短列表、作者原版结构化 EKB 与强弱解释概率／熵筛选见 [Customer 数据构造](customer-curation.md)。
 
 ## 当前代码如何运行
 

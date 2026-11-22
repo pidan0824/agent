@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 from agent_simulation.evaluation.micro.customer_agentic import (
     FrozenSampleTools, load_baseline, main, planning_usage, predict_request,
 )
+from agent_simulation.tests.ekb_fixture import rationale
 from agent_simulation.inference.client import ModelOutputError
 from agent_simulation.inference.requests import ContextCapacityError
 
@@ -34,8 +35,7 @@ class RecordingModel:
 
     async def acomplete(self, value, *, call_id):
         self.requests.append(deepcopy(value))
-        envelope = {"rationale": {"hypothesis": "fixture behavior", "evidence": ["prior query"],
-                                  "uncertainty": "only a fixture"}, "action": self.response}
+        envelope = {"rationale": rationale(), "action": self.response}
         return {"role": "assistant", "content": json.dumps(envelope), "tool_calls": []}
 
 
@@ -94,7 +94,7 @@ class FrozenCustomerEvaluationTests(unittest.TestCase):
         result = asyncio.run(predict_request(observed, "response", model))
         self.assertEqual(result["status"], "invalid")
         visible = json.loads(next(message["content"] for message in model.requests[0]["messages"]
-                                  if message["role"] == "user"))
+                                  if message["role"] == "user" and not message["content"].startswith("Runtime budget for this decision stage: ")))
         self.assertNotIn("target", visible)
         self.assertEqual(visible["query"], "SECRET TARGET")
 

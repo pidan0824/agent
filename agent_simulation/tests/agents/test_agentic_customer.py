@@ -8,6 +8,7 @@ import unittest
 from agent_simulation.agents.agentic import (
     AgenticBudgetExceeded, AgenticOptions, FrozenCustomerTools, run_agentic_workflow,
 )
+from agent_simulation.tests.ekb_fixture import rationale
 from agent_simulation.agents.customer import CustomerAgent
 from agent_simulation.agents.schemas import function
 from agent_simulation.inference.client import ModelOutputError
@@ -130,9 +131,7 @@ class AgenticCustomerTests(MarketFixture, unittest.TestCase):
             if reply.get("content") and not reply.get("tool_calls"):
                 value = json.loads(reply["content"])
                 if "rationale" not in value:
-                    reply["content"] = json.dumps({"rationale": {
-                        "hypothesis": "routine or unknown", "evidence": ["Prior shopping observations"],
-                        "uncertainty": "Limited observations"}, "action": value})
+                    reply["content"] = json.dumps({"rationale": rationale(), "action": value})
             return reply
 
         model.complete = complete
