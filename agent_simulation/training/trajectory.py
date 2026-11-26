@@ -236,7 +236,9 @@ def train(args):
     tokenizer = load_tokenizer(str(args.model), local_files_only=True)
     require(tokenizer.pad_token_id is not None, 'Model tokenizer has no padding token')
     records = read_training_records(args.input, args.mode, tokenizer,
-                                    max_length=args.max_length, limit=args.limit)
+                                    max_length=args.max_length, limit=args.limit,
+                                    click_weight=getattr(args,"click_weight",1.0),
+                                    purchase_weight=getattr(args,"purchase_weight",1.0))
     init_identity = adapter_digest(args.init_adapter) if args.init_adapter else None
     identity = {'format': FORMAT, 'mode': args.mode, 'role': records[0]['metadata']['role'],
                 'input_sha256': sha256(args.input), 'model': str(args.model.resolve()),
@@ -247,8 +249,8 @@ def train(args):
                 'mask': 'generated assistant content/tool calls/end tokens only; observations excluded',
                 'dpo_logprob': 'sum over all assistant tokens of each complete actual branch',
                 'turn_encoding': 'official template per decision prefix; earlier assistant turns context-only',
-                'sft_loss': 'separately normalized action/rationale/tool/format; request-stage balanced',
-                'request_weighting': 'equal request-stage mass, then equal scene mass, then variant mass; global mean one',
+                'sft_loss': 'separately normalized action/rationale/tool/format; Response values exclude fixed JSON keys',
+                'request_weighting': 'equal base request-stage mass, then scenes and variants; explicit positive action multipliers apply per parent request',
                 'source_split': 'train', 'restart_policy': 'new output required; no optimizer resume'}
     if args.init_adapter:
         from agent_simulation.inference.local.checkpoints import adapter_training_identity
@@ -379,6 +381,10 @@ def parser():
     parser.add_argument('--accumulation', type=int, default=4)
     parser.add_argument('--learning-rate', type=float, default=1e-5)
     parser.add_argument('--beta', type=float, default=0.1)
+    parser.add_argument('--click-weight', type=float, default=1.0,
+                        help='SFT parent-request multiplier for observed Customer clicks')
+    parser.add_argument('--purchase-weight', type=float, default=1.0,
+                        help='SFT parent-request multiplier for observed Customer purchases; max with click weight')
     parser.add_argument('--rationale-weight', type=float, default=1.0)
     parser.add_argument('--tool-weight', type=float, default=1.0)
     parser.add_argument('--format-weight', type=float, default=0.25)

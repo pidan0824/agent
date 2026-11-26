@@ -9,6 +9,7 @@ import argparse
 from copy import deepcopy
 from dataclasses import dataclass
 import json
+import math
 from collections import defaultdict
 from pathlib import Path
 
@@ -134,6 +135,13 @@ def final_components(messages, tools, tokenizer, through, prefix_length):
                    if name in ("action", "rationale")]
     else:
         regions = [(0, len(content), COMPONENTS["action"])]
+    # Response field names are fixed format; the two array values carry the decisions.
+    action_start, action_end = spans.get("action", (0, len(content)))
+    action_spans = json_field_spans(content[action_start:action_end])
+    if set(action_spans) == {"clicked_item_ids", "purchased_item_ids"}:
+        regions = [region for region in regions if region[2] != COMPONENTS["action"]]
+        regions.extend((action_start + begin, action_start + end, COMPONENTS["action"])
+                       for begin, end in action_spans.values())
     rendered = render_chat(messages, tools, tokenizer, tokenize=False, add_generation_prompt=False)
     start = rendered.rfind(content)
     require(start >= 0, "Chat template rewrote final JSON")
@@ -214,10 +222,15 @@ def encode_record(row, mode, tokenizer, *, max_length=32768):
     return encoded
 
 
-def read_training_records(path, mode, tokenizer, *, max_length=32768, limit=0):
+def read_training_records(path, mode, tokenizer, *, max_length=32768, limit=0,
+                          click_weight=1.0, purchase_weight=1.0):
     """Read a bounded training release; corrupt/oversized rows fail explicitly."""
     require(type(limit) is int and limit >= 0, 'Invalid training row cap')
-    records, identities = [], set()
+    require(all(math.isfinite(w) and w >= 1 for w in (click_weight,purchase_weight)),
+            "Positive action weights must be finite and at least one")
+    require(mode == "sft" or (click_weight == purchase_weight == 1),
+            "Positive action weights are only for SFT")
+    records, identities, action_factors = [], set(), {}
     with Path(path).open(encoding='utf-8') as stream:
         for line_number, line in enumerate(stream, 1):
             if not line.strip():
@@ -229,6 +242,13 @@ def read_training_records(path, mode, tokenizer, *, max_length=32768, limit=0):
                     f'Missing trajectory/pair IDs at line {line_number}')
             require(identity not in identities, f'Duplicate training example at line {line_number}')
             identities.add(identity)
+            factor = 1.0
+            if mode == "sft" and row.get("stage") == "response":
+                final = json.loads(row["messages"][-1]["content"])
+                action = row.get("source_response_target", final.get("action", final))
+                factor = max(click_weight if action["clicked_item_ids"] else 1.0,
+                             purchase_weight if action["purchased_item_ids"] else 1.0)
+            action_factors[identity] = factor
             encoded = encode_record(row, mode, tokenizer, max_length=max_length)
             records.append({'encoded': encoded, 'metadata': {
                 key: row[key] for key in ('role', 'actor_id', 'stage', 'initial_state_id', 'trajectory_id',
@@ -250,9 +270,12 @@ def read_training_records(path, mode, tokenizer, *, max_length=32768, limit=0):
         groups[group][scene].append(record)
     scale = len(records) / len(groups)
     for scenes in groups.values():
+        # A positive parent request keeps its factor across all scenes/teacher variants.
+        factor = max(action_factors[record["metadata"]["trajectory_id"]]
+                     for variants in scenes.values() for record in variants) if mode == "sft" else 1.0
         for variants in scenes.values():
             for record in variants:
-                record["weight"] = scale / len(scenes) / len(variants)
+                record["weight"] = scale * factor / len(scenes) / len(variants)
     return records
 
 

@@ -487,7 +487,17 @@ def comparison(args):
         report["seller_price"]["invalid_penalty"]="Invalid output has relative error 1 and incorrect direction; invalid count also reported"
     report["pilot_gate"]={}
     if response:
-        report["pilot_gate"]["customer"]=report["customer_response"]["improvement"]>0
+        response_report=report["customer_response"]
+        checks={"response_mean_improved":response_report["improvement"]>0}
+        for field,name,strict in (("clicked_item_ids","positive_click_f1_not_lower",False),
+                                  ("purchased_item_ids","positive_purchase_f1_improved",True)):
+            positive=response_report["by_head"][field]["observed_positive"]
+            if positive:
+                checks[name]=positive["improvement"]>0 if strict else positive["improvement"]>=0
+        if queries:
+            checks["query_cosine_not_lower"]=report["customer_query_cosine"]["improvement"]>=0
+        report["customer_safeguards"]=checks
+        report["pilot_gate"]["customer"]=all(checks.values())
     if seller:
         report["pilot_gate"]["seller"]=(report["seller_price"]["improvement"]>0 and
              report["seller_price"]["direction_macro_f1"]["sft"]>=report["seller_price"]["direction_macro_f1"]["zero_shot"])

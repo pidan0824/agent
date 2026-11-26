@@ -30,7 +30,9 @@ class SupervisionTests(unittest.TestCase):
         encoded = encode_record(row, "sft", OffsetTokenizer())["trajectory"]
         turn = encoded.turns[-1]
         text = lambda group: "".join(chr(t - 1) for t, c in zip(turn.input_ids, turn.components) if c == group)
-        self.assertEqual(json.loads(text(COMPONENTS["action"])), {"clicked_item_ids": [1], "purchased_item_ids": []})
+        self.assertEqual(text(COMPONENTS["action"]), "[1][]")
+        self.assertIn("clicked_item_ids",text(COMPONENTS["format"]))
+        self.assertNotIn("clicked_item_ids",text(COMPONENTS["action"]))
         self.assertIn("not a field", text(COMPONENTS["rationale"]))
         self.assertTrue(all(c == 0 for c, label in zip(turn.components, turn.labels) if label == IGNORE_INDEX))
         self.assertIn("</turn>", text(COMPONENTS["format"]))
@@ -63,6 +65,19 @@ class SupervisionTests(unittest.TestCase):
         weights = [r["weight"] for r in records]
         self.assertEqual(weights, [.5, .5, 1., 2.])
         self.assertEqual(sum(weights), len(weights))
+
+    def test_positive_request_weights_preserve_sibling_mass_and_keep_negatives(self):
+        rows=[sample(1,"x","a"),sample(1,"x","b"),sample(2,"y","c"),sample(3,"z","d")]
+        rows[2]["messages"][-1]["content"]=json.dumps({"clicked_item_ids":[],"purchased_item_ids":[2]})
+        rows[3]["messages"][-1]["content"]=json.dumps({"clicked_item_ids":[],"purchased_item_ids":[]})
+        with TemporaryDirectory() as d:
+            p=Path(d)/"sft.jsonl"
+            p.write_text("".join(json.dumps(r)+"\n" for r in rows))
+            records=read_training_records(p,"sft",OffsetTokenizer(),click_weight=2,purchase_weight=4)
+        weights=[r["weight"] for r in records]
+        self.assertAlmostEqual(weights[0]+weights[1],8/3)
+        self.assertAlmostEqual(weights[2],16/3)
+        self.assertAlmostEqual(weights[3],4/3)
 
     def test_direct_action_has_no_rationale_loss(self):
         row = sample()
