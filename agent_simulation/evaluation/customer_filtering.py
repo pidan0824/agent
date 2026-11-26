@@ -18,6 +18,8 @@ from agent_simulation.vendor.usermirrorer.utils import get_entropy, get_prob, ge
 from agent_simulation.vendor.usermirrorer.filtering import behavior_sampling, data_filtering
 
 from agent_simulation.evaluation.customer_quality import FIELDS, assess_record, behavior_stratum
+from agent_simulation.evaluation.customer_evidence import check_evidence
+from agent_simulation.evaluation.customer_contract import single_item_actions, validate_request_splits
 
 
 def decode_states(ids, states):
@@ -31,6 +33,29 @@ def true_states(ids, target):
 
 def probability_record(probabilities, ids, target, *, rng):
     require(bool(ids), "Cannot score an empty exposure")
+    if isinstance(probabilities, dict):
+        actions = single_item_actions(ids)
+        require(probabilities.get("actions") == actions, "Mismatched single-item option ordering")
+        probs = np.asarray(probabilities["probabilities"], dtype=float)
+        require(probs.shape == (len(actions),) and np.isfinite(probs).all()
+                and (probs >= 0).all() and probs.sum() > 0, "Invalid joint option probabilities")
+        # Reuse the author's probability floor before entropy (0*log(0) is NaN).
+        probs = get_prob({chr(65+i): float(value) for i, value in enumerate(probs)}, len(actions))
+        matches = [i for i, action in enumerate(actions) if all(
+            set(action[f]) == set(target[f]) for f in FIELDS)]
+        index = matches[0] if matches else None
+        sampled = int(rng.choice(len(actions), p=probs))
+        return {"prob": probs, "option_probabilities": probs.tolist(), "option_actions": actions,
+                "candidate_item_ids": list(ids), "choice_cnt": len(ids),
+                "logloss_unit": "bits_per_decision",
+                "probability_protocol": "joint categorical: no action or one item with click/purchase/both",
+                "entropy": float(get_entropy(probs)), "mean_item_entropy_bits": None,
+                "logloss": float(-math.log2(max(float(probs[index]), 1e-12))) if index is not None else None,
+                "full_target_log_probability": float(math.log(max(float(probs[index]), 1e-12))) if index is not None else None,
+                "behavior": json.dumps(actions[sampled], sort_keys=True),
+                "preference": sampled == index, "sampled_action": deepcopy(actions[sampled]),
+                "argmax_action": deepcopy(actions[int(probs.argmax())])}
+
     require(len(probabilities) == len(ids), "Incomplete item probabilities")
     raw = np.asarray(probabilities, dtype=float)
     require(raw.shape == (len(ids), 4) and np.isfinite(raw).all() and (raw >= 0).all() and (raw.sum(axis=1) > 0).all(), "Invalid four-state probabilities")
@@ -62,7 +87,41 @@ class OptionPredictor:
         require(all(len(x) == 1 for x in labels), "Option labels must each be one token")
         self.labels = [x[0] for x in labels]
 
+    def _single_score(self, binding, trajectory):
+        actions = single_item_actions([p["item_id"] for p in binding.displayed])
+        labels = [str(i) for i in range(len(actions))]
+        token_ids = [self.client.tokenizer.encode(label, add_special_tokens=False) for label in labels]
+        require(all(len(ids) == 1 for ids in token_ids), "Single-item labels must each be one token")
+        allowed = [ids[0] for ids in token_ids]
+        require(len(set(allowed)) == len(allowed), "Duplicate option tokens")
+        evidence = {"context": binding.initial_context(), "rationale": trajectory.get("rationale", {}),
+                    "observations": [{"name": call["name"], "returned_content": call.get("returned_content")}
+                        for call in trajectory["trace"].get("tools", [])],
+                    "options": dict(zip(labels, actions, strict=True))}
+        messages = [{"role": "system", "content": "Predict this user's observed behavior. Output exactly one "
+            "option label. No action is a normal option. Do not infer a purchase from a click. "
+            "The supplied explanation, if any, is a hypothesis, not a fact."},
+            {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)}]
+        prompt = prompt_tokens(messages, [], self.client.tokenizer)
+        if len(prompt) + 1 > self.context_limit:
+            raise ContextCapacityError("Option predictor context overflow")
+        response = self.client.http.post("completions", json={"model": self.client.model, "prompt": [prompt],
+            "max_tokens": 1, "temperature": 0, "top_p": 1, "top_k": -1, "n": 1,
+            "add_special_tokens": False, "logprobs": len(allowed), "allowed_token_ids": allowed,
+            "return_tokens_as_token_ids": True})
+        response.raise_for_status()
+        choices = response.json()["choices"]
+        require(len(choices) == 1, "Incomplete single-item option scores")
+        top, = choices[0]["logprobs"]["top_logprobs"]
+        keys = [f"token_id:{token}" for token in allowed]
+        require(all(key in top for key in keys), "Server must expose all joint option logprobs")
+        values = np.asarray([top[key] for key in keys])
+        values = np.exp(values - values.max())
+        return {"actions": actions, "probabilities": (values / values.sum()).tolist()}
+
     def score(self, binding, trajectory):
+        if binding.context.get("response_action_mode") == "single_item":
+            return self._single_score(binding, trajectory)
         # No generator action and no target enter the predictor context.
         evidence = {"context": binding.initial_context(), "rationale": trajectory["rationale"],
                     "observations": [{"name": call["name"], "returned_content": call.get("returned_content"),
@@ -99,19 +158,20 @@ class OptionPredictor:
 
 def select_sft(records, *, variants=("strong",)):
     """Keep original outcome-accepted transcripts independently of predictor/DPO."""
+    validate_request_splits(records)
     selected = {}
     for row in records:
         t = row["trajectory"]
         quality = assess_record(row)
         if (row["source_split"] != "train" or t["source_split"] != "train"
-            or row["variant"] not in variants or not quality["accepted"]
+            or row["variant"] not in variants or not quality["accepted"] or not check_evidence(t)["accepted"]
             or not row.get("reachable", True)):
             continue
         meta = {key: t[key] for key in ("role", "actor_id", "stage", "initial_state_id", "source_split")}
-        meta.update({key: deepcopy(t[key]) for key in ("source_request_id", "scene_id", "source_response_target") if key in t})
+        meta.update({key: deepcopy(t[key]) for key in ("source_request_id", "scene_id", "source_response_target", "dataset_manifest_sha256", "response_style", "action_mode", "evaluation_protocol") if key in t})
         value = {**meta, "trajectory_id": t["trajectory_id"], "tools": deepcopy(t["tools"]),
                  "messages": deepcopy(t["messages"]), "score": quality["metrics"]["score"],
-                 "quality": quality,
+                 "quality": quality, "evidence_quality": check_evidence(t),
                  "behavior_source": "generator_final_action; no predictor resampling"}
         # Do not collapse distinct actors/scenes just because their text matches.
         key = json.dumps([meta, value["messages"], value["tools"]], sort_keys=True)
@@ -153,6 +213,9 @@ def _validate_group(rows):
         require(t["prompt"] == first["prompt"] and t["tools"] == first["tools"],
                 "Mixed preference contexts")
         require(t.get("target") == first.get("target"), "Mixed preference targets")
+        require(all(t.get(k) == first.get(k) for k in
+                    ("response_style", "action_mode", "evaluation_protocol", "dataset_manifest_sha256")),
+                "Mixed preference protocols")
         require(t["messages"][:len(t["prompt"])] == t["prompt"], "Invalid trajectory prefix")
         # Exact identity/order, when recorded, prevents scoring different candidate lists.
         require(row.get("candidate_item_ids") == rows[0].get("candidate_item_ids")
@@ -165,7 +228,7 @@ def _pair(good, bad, *, protocol, selection_metric, selection_value):
     require(a["messages"][prefix]["role"] == b["messages"][prefix]["role"] == "assistant",
             "Preference continuation must start with assistant")
     meta = {key: a[key] for key in ("role", "actor_id", "stage", "initial_state_id", "source_split")}
-    meta.update({key: deepcopy(a[key]) for key in ("source_request_id", "scene_id", "source_response_target") if key in a})
+    meta.update({key: deepcopy(a[key]) for key in ("source_request_id", "scene_id", "source_response_target", "dataset_manifest_sha256", "response_style", "action_mode", "evaluation_protocol") if key in a})
     return {**meta, "prompt": deepcopy(a["prompt"]), "tools": deepcopy(a["tools"]),
         "chosen": deepcopy(a["messages"][prefix:]), "rejected": deepcopy(b["messages"][prefix:]),
         "chosen_trajectory_id": a["trajectory_id"], "rejected_trajectory_id": b["trajectory_id"],
@@ -174,6 +237,10 @@ def _pair(good, bad, *, protocol, selection_metric, selection_value):
         "rejected_score": bad["_quality"]["metrics"]["score"],
         "chosen_logloss_bits": good["logloss"], "rejected_logloss_bits": bad["logloss"],
         "logloss_gap_bits": bad["logloss"] - good["logloss"],
+        "logloss_unit": good.get("logloss_unit", "bits_per_item"),
+        "chosen_evidence_quality": good["_evidence"],
+        "rejected_evidence_quality": bad["_evidence"],
+        "pair_reason": "evidence_quality" if bad["_quality"]["metrics"]["exact_match"] else "behavior_quality",
         "preference_source": protocol,
         "behavior_source": "original_generator_transcript; predictor_scores_only",
         "selection_metric": selection_metric, "selection_value": selection_value}
@@ -184,8 +251,9 @@ def select_preferences(records, *, max_pairs=10000, filter_column="diff_model_un
                        logloss_min_gap=.05, action_min_gap=.05, diagnostics=None):
     """Rank scenarios by uncertainty; pair original actions and explanations.
 
-    logloss: chosen passes per-behavior gates, improves original action score,
-    is no worse on either action head, and has lower observed-label mean NLL.
+    logloss: chosen matches both action heads exactly and passes provenance checks.
+    Rejected has a worse action or a demonstrated evidence error; chosen also has
+    lower observed-label NLL. NLL never substitutes for explanation quality.
     sampled_match: original author sampling/filter functions with explicit
     original-action safeguards; no resampled action is ever exported.
     """
@@ -209,7 +277,7 @@ def select_preferences(records, *, max_pairs=10000, filter_column="diff_model_un
             if row.get("prob") is not None and row.get("logloss") is not None and math.isfinite(row["logloss"]):
                 quality = assess_record(row)
                 if "score" in quality["metrics"]:
-                    usable.append({**row, "_quality": quality})
+                    usable.append({**row, "_quality": quality, "_evidence": check_evidence(row["trajectory"])})
         statuses[key] = "no_eligible_train_trajectory" if not valid else "missing_probabilities"
     metrics = _uncertainty_metrics(usable)
     metric_map = {(r["dataset"], r["cid"]): r for r in metrics}
@@ -219,15 +287,22 @@ def select_preferences(records, *, max_pairs=10000, filter_column="diff_model_un
 
     def compatible(good, bad):
         gm, bm = good["_quality"]["metrics"], bad["_quality"]["metrics"]
-        return (good["_quality"]["accepted"]
-                and gm["score"] - bm["score"] >= action_min_gap
+        if good is bad or not gm["exact_match"] or not good["_evidence"]["accepted"]:
+            return False
+        if good.get("logloss_unit") != bad.get("logloss_unit"):
+            return False
+        if bm["exact_match"]:
+            # Same correct action: only a demonstrated provenance violation qualifies.
+            # Missing annotations are unverified, not evidence of a worse explanation.
+            return bad["_evidence"]["status"] == "failed"
+        return (gm["score"] - bm["score"] >= action_min_gap
                 and all(gm[f + "_f1"] >= bm[f + "_f1"] for f in FIELDS))
 
     if pair_protocol == "logloss":
         for key, rows in scored.items():
-            eligible = [r for r in rows if r["_quality"]["accepted"]]
+            eligible = [r for r in rows if r["_quality"]["metrics"]["exact_match"] and r["_evidence"]["accepted"]]
             statuses[key] = ("insufficient_scored_branches" if len(rows) < 2 else
-                             "no_accepted_chosen" if not eligible else "action_quality_gap_or_conflict")
+                             "no_exact_behavior_and_evidence_chosen" if not eligible else "behavior_or_evidence_gap_or_conflict")
             action_pairs = [(a, b) for a in eligible for b in rows if compatible(a, b)]
             if not action_pairs:
                 continue
@@ -317,6 +392,7 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
         logloss_min_gap=logloss_min_gap, action_min_gap=action_min_gap)
     output = Path(output)
     records = deepcopy(records)
+    validate_request_splits(records)
     decisions, groups, response = [], defaultdict(list), []
     for row in records:
         t = row["trajectory"]
@@ -333,13 +409,18 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
         if not row.get("reachable", True):
             reasons.append("target_unreachable")
         reasons.extend(quality["reasons"])
+        evidence = check_evidence(t)
+        reasons.extend(evidence["reasons"])
         stratum = ("query" if row["stage"] == "query" else
                    behavior_stratum(t["target"]) if "target" in t else "unknown")
         decisions.append({"trajectory_id": t["trajectory_id"], "dataset": row.get("dataset"),
             "cid": row.get("cid"), "stage": row["stage"], "variant": row["variant"],
             "source_request_id": t.get("source_request_id"), "scene_id": t.get("scene_id"),
             "source_stratum": behavior_stratum(t["source_response_target"]) if "source_response_target" in t else stratum,
-            "stratum": stratum, "quality": quality, "sft_exclusion_reasons": reasons,
+            "stratum": stratum, "quality": quality, "evidence_quality": evidence,
+            "domain": row.get("dataset", "unknown"), "candidate_count": row.get("choice_cnt"),
+            "policy": row.get("policy", "unknown"), "response_style": t.get("response_style", "legacy"),
+            "sft_exclusion_reasons": reasons,
             "probability_available": row.get("prob") is not None,
             "probability_error": row.get("probability_error")})
         if row["stage"] == "query":
@@ -372,10 +453,15 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
         decision["sft_retained"] = retained
         if not retained and not decision["sft_exclusion_reasons"]:
             decision["sft_exclusion_reasons"].append("duplicate_transcript")
-        key = (decision["stage"], decision["variant"], decision["stratum"])
+        key = (decision["stage"], decision["variant"], decision["stratum"],
+               decision["domain"], decision["candidate_count"], decision["source_stratum"],
+               decision["policy"], decision["response_style"])
         counts = strata.setdefault(key, {"stage": key[0], "variant": key[1], "stratum": key[2],
-            "raw": 0, "quality_passed": 0, "sft_retained": 0})
+            "domain": key[3], "candidate_count": key[4], "source_stratum": key[5],
+            "policy": key[6], "response_style": key[7],
+            "raw": 0, "quality_passed": 0, "evidence_passed": 0, "sft_retained": 0})
         counts["raw"] += 1
+        counts["evidence_passed"] += int(decision["evidence_quality"]["accepted"])
         counts["quality_passed"] += int(decision["quality"]["accepted"])
         counts["sft_retained"] += int(retained)
     for counts in strata.values():
@@ -398,7 +484,7 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
         "pair_reasons": dict(Counter(d["stage"] + "/" + d["reason"] for d in pair_decisions)),
         "strata": list(strata.values()),
         "counting_note": "Row exclusion reasons can overlap; pair reasons count scenarios, not trajectories.",
-        "sft_protocol": "Strong original transcripts passing separate action gates; independent of DPO",
+        "sft_protocol": "Strong original transcripts passing separate action and evidence gates; independent of DPO",
         "response_dpo_protocol": pair_protocol,
         "thresholds": {"query_min": query_min, "response_min": response_min,
             "click_min": click_min, "purchase_min": purchase_min,
@@ -412,7 +498,7 @@ def add_filter_arguments(parser):
     parser.add_argument("--click-min", type=float, help="Positive-click F1 gate; defaults to response-min")
     parser.add_argument("--purchase-min", type=float, help="Positive-purchase F1 gate; defaults to response-min")
     parser.add_argument("--pair-protocol", choices=["logloss", "sampled_match"], default="logloss")
-    parser.add_argument("--logloss-min-gap", type=float, default=.05, help="Mean per-item NLL gap in bits")
+    parser.add_argument("--logloss-min-gap", type=float, default=.05, help="NLL gap in bits: per decision for single-item lists, per item for full exposure")
     parser.add_argument("--action-min-gap", type=float, default=.05)
 
 

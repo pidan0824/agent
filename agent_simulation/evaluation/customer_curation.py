@@ -20,6 +20,7 @@ from agent_simulation.datasets.labels import SFTDataset, select_record_ids
 from agent_simulation.evaluation.customer_filtering import OptionPredictor, probability_record, export_training, add_filter_arguments, validate_filter_options
 from agent_simulation.evaluation.micro.customer_agentic import FrozenSampleTools
 from agent_simulation.evaluation.trajectories import generate_trajectory, OutcomeScorer, score_group, digest
+from agent_simulation.evaluation.customer_quality import behavior_stratum
 from agent_simulation.inference.agentic import AgenticClient
 from agent_simulation.inference.requests import load_tokenizer, ContextCapacityError
 
@@ -42,7 +43,8 @@ class CurationTools(FrozenSampleTools):
             context["observed_history"] = deepcopy(self.history[-self.history_limit:])
             if self.stage == "response":
                 context["displayed_items"] = deepcopy(self.displayed)
-        return context
+        from agent_simulation.evaluation.customer_evidence import attach_sources
+        return attach_sources(context)
 
 
 def generation_jobs(request, *, bundle=None, policies=("sampled",), limit=10, encoder=None):
@@ -53,8 +55,10 @@ def generation_jobs(request, *, bundle=None, policies=("sampled",), limit=10, en
     for policy in policies:
         if policy == "sampled":
             require(bundle is not None, "Sampled generation requires prepared scenes")
-            jobs.extend(("response", policy, deepcopy(s["request"]), deepcopy(s["candidate"]))
-                        for s in bundle["response_scenes"])
+            for scene in bundle["response_scenes"]:
+                adapted = deepcopy(scene["request"])
+                adapted["response_input"]["response_action_mode"] = "single_item"
+                jobs.append(("response", policy, adapted, deepcopy(scene["candidate"])))
         else:
             adapted = deepcopy(request)
             adapted["response_input"], candidate = construct_candidates(
@@ -81,7 +85,7 @@ def parser():
     p.add_argument("--request-id", type=int, action="append")
     p.add_argument("--count", type=int, default=0, help="Prepared scenes: 0 uses all; raw alternatives require an explicit positive count")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--samples", type=int, default=2)
+    p.add_argument("--samples", type=int, default=10)
     p.add_argument("--sample-concurrency", type=int, default=2)
     p.add_argument("--scenes", type=Path, help="Prepared sampled scenes from datasets.customer_scenes")
     p.add_argument("--candidate-policies", nargs="+", choices=["sampled", "full", "retrieved"], default=["sampled"])
@@ -98,8 +102,9 @@ def parser():
     p.add_argument("--predictor-tokenizer", type=Path)
     p.add_argument("--bge-path", type=Path, default=Path("models/bge-small-zh-v1.5"))
     p.add_argument("--bge-device", default="cuda", help="BGE device for retrieval and Query scoring; honor CUDA_VISIBLE_DEVICES")
+    p.add_argument("--stream-timing", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--temperature", type=float, default=.7)
-    p.add_argument("--max-new-tokens", type=int, default=1024)
+    p.add_argument("--max-new-tokens", type=int, default=2048)
     p.add_argument("--max-model-calls", type=int, default=6)
     p.add_argument("--max-tool-calls", type=int, default=8)
     p.add_argument("--context-limit", type=int, default=16384)
@@ -109,6 +114,8 @@ def parser():
     p.add_argument("--filter-column", choices=["diff_model_uncertainty", "diff_all_uncertainty", "diff_data_uncertainty", "teacher_entropy", "teacher_logloss"], default="diff_model_uncertainty")
     p.add_argument("--sampling-column", choices=["entropy", "logloss"], default="entropy")
     p.add_argument("--ascending", action="store_true")
+    p.add_argument("--response-styles", nargs="+", choices=["ekb", "direct"], help="Matched frozen-scene comparison; defaults to ekb, or direct with --no-theory")
+    p.add_argument("--evaluation-only", action="store_true", help="Report all attempts without exporting training rows")
     p.add_argument("--theory", action=argparse.BooleanOptionalAction, default=True)
     add_filter_arguments(p)
     return p
@@ -117,22 +124,38 @@ def parser():
 def summarize(records, candidate_records):
     groups = defaultdict(list)
     for row in records:
-        groups[(row["stage"], row["mode"], row["policy"], row["variant"])].append(row)
+        groups[(row["stage"], row["mode"], row["policy"], row["variant"],
+                row.get("response_style", "ekb"), row.get("dataset", "unknown"),
+                row.get("choice_cnt"),
+                behavior_stratum(row["trajectory"]["target"]) if row["stage"] == "response" else "query",
+                behavior_stratum(row["trajectory"].get("source_response_target", row["trajectory"]["target"]))
+                    if row["stage"] == "response" else "query")].append(row)
     result = []
     for key, rows in groups.items():
         valid = [r for r in rows if r["trajectory"]["status"] == "ok"]
-        item = dict(zip(["stage", "mode", "policy", "variant"], key))
+        item = dict(zip(["stage", "mode", "policy", "variant", "response_style", "domain", "candidate_count", "behavior_group", "source_behavior_group"], key))
         item.update(total=len(rows), valid=len(valid), invalid=len(rows)-len(valid),
                     tool_calls=sum(len(r["trajectory"]["trace"].get("tools", [])) for r in rows))
-        for field in ["direct_score", "argmax_score", "sampled_score", "mean_item_entropy_bits", "direct_click_f1", "direct_purchase_f1", "direct_exact_match"]:
+        for field in ["direct_score", "argmax_score", "sampled_score", "mean_item_entropy_bits", "direct_click_f1", "direct_purchase_f1", "direct_click_recall", "direct_purchase_recall", "direct_exact_match", "logloss"]:
             values = [r[field] for r in valid if r.get(field) is not None]
             item[field] = float(np.mean(values)) if values else None
-            if field.startswith("direct_") and values:
+            item[field + "_count"] = len(values)
+            if field.startswith("direct_") and not field.endswith("_recall") and values:
                 item[field + "_all_attempts"] = float(sum(values) / len(rows))
+        empty = [r for r in rows if r["stage"] == "response" and
+                 not r["trajectory"].get("target", {}).get("clicked_item_ids")]
+        item["no_click_count"] = len(empty)
+        item["no_click_accuracy_all_attempts"] = (sum(r["trajectory"]["status"] == "ok" and
+            not r["trajectory"]["final_action"]["clicked_item_ids"] for r in empty) / len(empty)) if empty else None
+        item["evidence_passed"] = sum(r["trajectory"].get("evidence_quality", {}).get("accepted", False) for r in valid)
         result.append(item)
     return {"arms": result, "candidate_coverage": candidate_records,
             "interpretation": "Frozen-scene generation and retention diagnostics; this entry point constructs training trajectories.",
-            "entropy_protocol": "One common weak predictor for both generators; factorized 4-state item distributions. Query uses semantic matching, no fabricated categorical entropy."}
+            "entropy_protocol": "One common predictor: sampled single-item lists use joint 1+3N actions "
+                "(bits/decision); full/retrieved use factorized four-state item marginals (bits/item). "
+                "Never aggregate those losses. Query has no categorical entropy.",
+            "recall_protocol": "Recall is null when the true head is empty; report no-click exact match separately. "
+                "Metrics cover all generated attempts, not outcome-selected samples."}
 
 
 def main(argv=None):
@@ -158,6 +181,8 @@ def main(argv=None):
     require(0 <= args.query_min <= 1 and 0 <= args.response_min <= 1, "Quality thresholds must be in [0,1]")
     scorer = OutcomeScorer(args.bge_path, bge_device=args.bge_device)
     rng = np.random.default_rng(args.seed)
+    styles = args.response_styles or (["ekb"] if args.theory else ["direct"])
+    require(len(set(styles)) == len(styles), "Duplicate response styles")
     records, coverage = [], []
     with ExitStack() as resources:
         data = resources.enter_context(closing(SFTDataset(args.dataset, args.strong_tokenizer)))
@@ -175,7 +200,7 @@ def main(argv=None):
             models[variant] = resources.enter_context(closing(AgenticClient(url, name,
                 data.tokenizer if variant == "strong" else load_tokenizer(path, local_files_only=True),
                 temperature=args.temperature, max_new_tokens=args.max_new_tokens, seed=args.seed,
-                context_limit=args.context_limit,
+                context_limit=args.context_limit, stream=args.stream_timing,
                 log_path=args.output / (variant + "-calls.jsonl"))))
             models[variant].check_models()
         predictor_client = models["weak"]
@@ -189,12 +214,15 @@ def main(argv=None):
         if "retrieved" in args.candidate_policies:
             from agent_simulation.agents.retrieval.bge_encoder import bge_encoder
             encoder, _ = bge_encoder(args.bge_path, device=args.bge_device)
-        manifest = {"schema": "customer-usermirrorer-curation-v1", "args": vars(args), "request_ids": ids,
+        manifest = {"schema": "customer-usermirrorer-curation-v2", "args": vars(args), "request_ids": ids,
                     "dataset_manifest_sha256": sha256(args.dataset / "manifest.json"),
                     "scenes_manifest_sha256": sha256(args.scenes / "manifest.json") if prepared else None,
                     "source_sha256": {name: sha256(Path(__file__).parents[1] / name) for name in (
                         "evaluation/customer_curation.py", "evaluation/customer_filtering.py", "evaluation/customer_quality.py",
+                        "evaluation/customer_evidence.py", "evaluation/customer_contract.py", "evaluation/trajectories.py",
                         "datasets/customer_candidates.py", "agents/prompts/customer_ekb.py", "inference/agentic.py")},
+                    "evaluation_protocol": "A: independent Query; Response conditioned on recorded Query and frozen candidates. Not end-to-end simulation.",
+                    "response_styles": styles, "evaluation_only": args.evaluation_only,
                     "author_provenance": json.loads((Path(__file__).parents[1] / "vendor/usermirrorer/PROVENANCE.json").read_text()),
                     "target_isolation": "Author scene construction uses target insertion offline. Generator/predictor receive frozen inputs, never current action labels or positive positions.",
                     "candidate_protocol": "Author outcome-conditioned scenes by default. full/retrieved remain explicit alternative protocols.",
@@ -211,10 +239,13 @@ def main(argv=None):
                     policies=args.candidate_policies, limit=args.candidate_count, encoder=encoder)
                 for stage, policy, adapted, candidate in jobs:
                     scene_identity = candidate.get("scene_id", identity) if candidate else identity
-                    for mode in args.modes:
-                        binding = CurationTools(adapted, stage, mode=mode, theory=args.theory)
+                    arms = [(mode, style) for mode in args.modes
+                            for style in (styles if stage == "response" else ["direct"])]
+                    for mode, style in arms:
+                        use_theory = stage == "response" and style == "ekb"
+                        binding = CurationTools(adapted, stage, mode=mode, theory=use_theory)
                         options = AgenticOptions(max_model_calls=1 if mode == "fixed" else args.max_model_calls,
-                                                  max_tool_calls=args.max_tool_calls, theory=args.theory)
+                                                  max_tool_calls=args.max_tool_calls, theory=use_theory)
                         async def generate_samples():
                             semaphore = asyncio.Semaphore(args.sample_concurrency)
                             async def one(variant, model, index):
@@ -227,11 +258,13 @@ def main(argv=None):
                                         actor_id=actor, stage=stage, record_id=scene_identity, source_split=args.split,
                                         catalog_identity=manifest["dataset_manifest_sha256"], options=options, sample_index=index)
                                     trajectory["source_request_id"] = identity
+                                    trajectory["dataset_manifest_sha256"] = manifest["dataset_manifest_sha256"]
                                     trajectory["scene_id"] = str(scene_identity)
                                     if candidate and "source_response_target" in candidate:
                                         trajectory["source_response_target"] = deepcopy(candidate["source_response_target"])
                                     row = {"stage": stage, "mode": mode, "policy": policy, "variant": variant, "tid": index,
-                                        "cid": digest([scene_identity, mode, policy, args.theory, binding.fingerprint]),
+                                        "cid": digest([scene_identity, mode, policy, style, binding.fingerprint]),
+                                        "response_style": style, "evaluation_protocol": "independent_behavior_prediction",
                                         "dataset": "KuaiSearch/" + (candidate["domain"] if candidate else "Query"),
                                         "source_split": args.split, "trajectory": trajectory, "prob": None}
                                     if stage == "response" and trajectory["status"] == "ok":
@@ -259,6 +292,8 @@ def main(argv=None):
                                 if stage == "response":
                                     row["direct_click_f1"] = t["outcome_metrics"]["clicked_item_ids_f1"]
                                     row["direct_purchase_f1"] = t["outcome_metrics"]["purchased_item_ids_f1"]
+                                    row["direct_click_recall"] = t["outcome_metrics"]["clicked_item_ids_recall"]
+                                    row["direct_purchase_recall"] = t["outcome_metrics"]["purchased_item_ids_recall"]
                                     row["direct_exact_match"] = all(set(t["final_action"][field]) == set(target[field])
                                         for field in ("clicked_item_ids", "purchased_item_ids"))
                             if stage == "response":
@@ -271,11 +306,26 @@ def main(argv=None):
                                         row[name+"_score"] = scorer.score(stage, row[name+"_action"], target)["score"]
                             output.write(encoded(row) + "\n"); output.flush()
                             records.append(row)
-        exported = export_training(records,args.output,max_pairs=args.max_pairs,filter_column=args.filter_column,
+        exported = {} if args.evaluation_only else export_training(records,args.output,max_pairs=args.max_pairs,filter_column=args.filter_column,
             sampling_column=args.sampling_column,ascending=args.ascending,
             query_min=args.query_min,response_min=args.response_min,click_min=args.click_min,purchase_min=args.purchase_min,
             pair_protocol=args.pair_protocol,logloss_min_gap=args.logloss_min_gap,action_min_gap=args.action_min_gap)
+        review_rows, reviewed_keys = [], set()
+        for row in records:
+            t = row["trajectory"]
+            key = (row["variant"], t.get("source_request_id"))
+            if t["stage"] == "response" and t.get("response_style") == "ekb" and t["status"] == "ok" and key not in reviewed_keys and len(review_rows) < 20:
+                reviewed_keys.add(key)
+                review_rows.append({"trajectory_id": t["trajectory_id"], "source_request_id": t.get("source_request_id"),
+                    "variant": row["variant"], "rationale": t["rationale"], "action": t["final_action"],
+                    "messages": t["messages"], "verdict": "pending",
+                    "review_focus": ["unsupported preference", "click vs purchase", "missing facts", "action consistency"]})
+        (args.output / "semantic-review.jsonl").write_text("".join(encoded(r) + "\n" for r in review_rows))
         report = summarize(records, coverage)
+        from agent_simulation.evaluation.customer_request_metrics import request_metrics
+        request_report = request_metrics(records)
+        (args.output / "request-metrics.json").write_text(encoded(request_report) + "\n")
+        report["request_level_protocols"] = sorted({r["protocol"] for r in request_report})
         report.update(exported)
         report.update(split=args.split, filtering={"metric":args.filter_column,"sampling":args.sampling_column,
             "groups":["domain","candidate_count","observed_behavior_group"],"all_raw_rows_retained":True,

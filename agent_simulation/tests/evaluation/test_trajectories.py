@@ -18,6 +18,8 @@ from agent_simulation.tests.evaluation.test_customer_agentic import request
 
 
 def envelope(action):
+    if "query" in action:
+        return action
     return {"rationale": rationale(), "action": action}
 
 
@@ -26,6 +28,7 @@ def branch(identity, action, evidence, *, split="train"):
     return {"role": "customer", "actor_id": 7, "stage": "response", "initial_state_id": "frozen-1",
             "record_id": 11, "trajectory_id": identity, "source_split": split,
             "status": "ok", "final_action": action, "prompt": prompt, "tools": [],
+            "rationale": rationale(), "response_style": "ekb",
             "messages": [*deepcopy(prompt), {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
                 {"role": "tool", "tool_call_id": "call-1", "content": evidence},
@@ -71,14 +74,10 @@ class TrajectoryTests(unittest.TestCase):
         trajectories = [good, bad, {**deepcopy(good), "trajectory_id": "duplicate"}]
         score_group(trajectories, target, OutcomeScorer())
         sft, pairs, reason = training_rows(trajectories)
-        self.assertEqual((len(sft), len(pairs), reason), (1, 1, "paired"))
+        self.assertEqual((len(sft), len(pairs), reason),
+                         (1, 0, "customer_response_requires_probability_curation"))
         self.assertEqual(sft[0]["source_split"], "train")
-        self.assertIn("chosen-only evidence", json.dumps(pairs[0]["chosen"]))
-        self.assertNotIn("chosen-only evidence", json.dumps(pairs[0]["rejected"]))
-        self.assertIn("rejected-only evidence", json.dumps(pairs[0]["rejected"]))
-        self.assertEqual(pairs[0]["chosen"][0]["role"], "assistant")
-        self.assertEqual(pairs[0]["chosen_score"], 1)
-        self.assertEqual(pairs[0]["rejected_score"], 0)
+        self.assertEqual(sft[0]["messages"], good["messages"])
         for row in trajectories:
             row["source_split"] = "test"
         self.assertEqual(training_rows(trajectories), ([], [], "held_out_no_training_export"))
@@ -88,7 +87,7 @@ class TrajectoryTests(unittest.TestCase):
         good = branch("one", target, "same evidence")
         duplicate = {**deepcopy(good), "trajectory_id": "two"}
         score_group([good, duplicate], target, OutcomeScorer())
-        self.assertEqual(training_rows([good, duplicate])[2], "tie_or_insufficient_score_gap")
+        self.assertEqual(training_rows([good, duplicate])[2], "customer_response_requires_probability_curation")
         for key, changed in (("actor_id", 9), ("initial_state_id", "another"), ("stage", "query")):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, "identity"):
                 training_rows([good, {**duplicate, key: changed}])

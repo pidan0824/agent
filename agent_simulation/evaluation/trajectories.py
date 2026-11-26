@@ -111,17 +111,31 @@ def trajectory_messages(binding, *, role, stage, theory):
         stage, displayed_ids=[product["item_id"] for product in binding.displayed] if stage == "response" else None,
         price_ids=binding.context["requested_price_item_ids"] if stage == "seller" else None,
     )["final_schemas"]
-    instructions = (agentic_customer_instructions(theory=theory) if role == "customer"
-                    else agentic_seller_instructions(theory=theory))
-    task = {"query": "Predict the next observed Chinese search query; the current query and exposure are hidden.",
-            "response": "Predict clicks/purchases conditional on the recorded query and unchanged displayed list.",
-            "seller": "Predict the next observed quote, rather than an unobserved profit-optimal price."}[stage]
-    output_note = ("Return a JSON object containing the detailed EKB explanation and the action. "
-                   if role == "customer" and theory else
-                   "Return a JSON object containing a brief evidence-grounded rationale and the action. ")
-    messages = [{"role": "system", "content": instructions + "\n" + task +
-                 "\n" + output_note +
-                 "The rationale is a generated hypothesis, not an observed thought process. Schema: " + encoded(teacher_output(schemas, customer_ekb=role == "customer" and theory))},
+    single = stage == "response" and binding.context.get("response_action_mode") == "single_item"
+    if single:
+        from agent_simulation.evaluation.customer_contract import single_item_schema
+        schemas = [single_item_schema([p["item_id"] for p in binding.displayed])]
+    direct = role == "customer" and (stage == "query" or not theory)
+    if direct:
+        from agent_simulation.agents.prompts.instructions import FACT_RULES
+        instructions = FACT_RULES + "\nPredict this user's observed behavior from available facts. " + (
+            "Generate the next Chinese query. Current query and exposures are hidden."
+            if stage == "query" else
+            "Use the recorded query and frozen candidates. Relevance does not imply a click; "
+            "no-click is normal. Do not infer purchases from clicks.")
+        output = schemas[0]
+        output_note = "Return only the action JSON, without an explanation. Schema: "
+    else:
+        instructions = (agentic_customer_instructions(theory=theory) if role == "customer"
+                        else agentic_seller_instructions(theory=theory))
+        if role == "customer" and theory and getattr(binding, "mode", None) == "fixed":
+            from agent_simulation.agents.prompts.customer_agentic import fixed_customer_instructions
+            instructions = fixed_customer_instructions()
+        if role == "seller":
+            instructions += "\nPredict the next observed quote, rather than an unobserved profit-optimal price."
+        output = teacher_output(schemas, customer_ekb=role == "customer" and theory)
+        output_note = "Return the original explanation and action together. Schema: "
+    messages = [{"role": "system", "content": instructions + "\n" + output_note + encoded(output)},
                 {"role": "user", "content": encoded(binding.initial_context())}]
     return schemas, messages
 
@@ -130,6 +144,9 @@ async def generate_trajectory(binding, model, *, role, actor_id, stage, record_i
                               source_split, catalog_identity, options, sample_index):
     """No target argument: the generator receives only the frozen input binding."""
     schemas, messages = trajectory_messages(binding, role=role, stage=stage, theory=options.theory)
+    direct = role == "customer" and (stage == "query" or not options.theory)
+    final_schema = schemas[0] if direct else teacher_output(
+        schemas, customer_ekb=role == "customer" and options.theory)
     initial_state_id = digest([catalog_identity, role, actor_id, stage, record_id, binding.fingerprint])
     trajectory_id = digest([initial_state_id, options.theory, getattr(model, "model", "teacher"),
                             getattr(model, "seed", None), sample_index])
@@ -139,20 +156,31 @@ async def generate_trajectory(binding, model, *, role, actor_id, stage, record_i
     record = {"schema": "teacher-trajectory-v1", "role": role, "actor_id": actor_id, "stage": stage,
               "record_id": record_id, "source_split": source_split, "initial_state_id": initial_state_id,
               "trajectory_id": trajectory_id, "sample_index": sample_index,
-              "seed": getattr(model, "seed", None), "theory": options.theory, "status": "running", "trace": trace}
+              "seed": getattr(model, "seed", None), "theory": options.theory and stage != "query",
+              "response_style": "direct" if direct else "ekb" if role == "customer" else "rationale",
+              "evaluation_protocol": "independent_behavior_prediction",
+              "action_mode": binding.context.get("response_action_mode", "multi_item") if stage == "response" else stage,
+              "status": "running", "trace": trace}
 
     async def complete(conversation, tools):
         return await model.acomplete({"messages": conversation, "tools": tools,
-                                      "final_schema": teacher_output(schemas, customer_ekb=options.theory) if role == "customer" else None},
+                                      "final_schema": final_schema if role == "customer" else None},
                                     call_id=f'{trajectory_id}:{len(trace["model_calls"])}')
+
+    def validate(value):
+        if direct:
+            validate_arguments(value, schemas[0])
+            return deepcopy(value)
+        return validate_teacher_final(value, schemas, trace=trace,
+                                      customer_ekb=role == "customer" and options.theory)
 
     try:
         record["final_action"] = await run_agentic_workflow(
             messages=messages, tools=binding.schemas, complete=complete, execute_tool=binding.execute,
-            validate_final=lambda value: validate_teacher_final(value, schemas, trace=trace, customer_ekb=role == "customer" and options.theory),
+            validate_final=validate,
             options=options, trace=trace, guard=binding.guard)
         record["status"] = "ok"
-        record["rationale"] = deepcopy(trace["rationale"])
+        record["rationale"] = deepcopy(trace.get("rationale", {}))
     except (ModelOutputError, ContextCapacityError) as error:
         record.update(status="invalid", error=f"{type(error).__name__}: {error}")
     record["messages"] = deepcopy(trace.get("messages", messages))
@@ -160,6 +188,9 @@ async def generate_trajectory(binding, model, *, role, actor_id, stage, record_i
     record["tools"] = deepcopy(binding.schemas)
     require(record["messages"][:len(record["prompt"])] == record["prompt"],
             "Trajectory prefix changed; the training transcript must preserve actual context")
+    if role == "customer":
+        from agent_simulation.evaluation.customer_evidence import check_evidence
+        record["evidence_quality"] = check_evidence(record)
     return record
 
 
@@ -195,7 +226,11 @@ class OutcomeScorer:
                 prediction, observed = set(action[field]), set(target[field])
                 scores[field + "_f1"] = (2 * len(prediction & observed) / (len(prediction) + len(observed))
                                            if prediction or observed else 1.0)
-            return {"score": sum(scores.values()) / 2, **scores}
+            mean_f1 = sum(scores.values()) / 2
+            for field in ("clicked_item_ids", "purchased_item_ids"):
+                observed, prediction = set(target[field]), set(action[field])
+                scores[field + "_recall"] = len(observed & prediction) / len(observed) if observed else None
+            return {"score": mean_f1, **scores}
         predicted = {row["item_id"]: row["price_raw"] for row in action["prices"]}
         errors = [abs(predicted[row["item_id"]] - row["price_raw"]) / row["price_raw"] for row in target["prices"]]
         relative_error = sum(errors) / len(errors)
@@ -242,8 +277,10 @@ def training_rows(trajectories, *, min_gap=0.05):
     if first["source_split"] != "train":
         return [], [], "held_out_no_training_export"
     metadata = {key: first[key] for key in IDENTITY_FIELDS}
-    metadata.update({key: deepcopy(first[key]) for key in ("source_request_id", "scene_id", "source_response_target") if key in first})
-    accepted = [trajectory for trajectory in trajectories if trajectory["status"] == "ok" and trajectory["accepted"]]
+    metadata.update({key: deepcopy(first[key]) for key in ("source_request_id", "scene_id", "source_response_target", "dataset_manifest_sha256", "response_style", "action_mode", "evaluation_protocol") if key in first})
+    from agent_simulation.evaluation.customer_evidence import check_evidence
+    accepted = [trajectory for trajectory in trajectories if trajectory["status"] == "ok" and trajectory["accepted"]
+                and (trajectory["role"] != "customer" or check_evidence(trajectory)["accepted"])]
     unique = {}
     for trajectory in accepted:
         key = digest([trajectory["messages"], trajectory["tools"]])
@@ -252,6 +289,8 @@ def training_rows(trajectories, *, min_gap=0.05):
             "tools": row["tools"], "score": row["score"]} for row in unique.values()]
     if not accepted:
         return sft, [], "no_accepted_trajectory"
+    if first["role"] == "customer" and first["stage"] == "response":
+        return sft, [], "customer_response_requires_probability_curation"
     chosen = max(accepted, key=lambda row: (row["score"], row["trajectory_id"]))
     rejected = min((row for row in trajectories if row["status"] == "ok"),
                    key=lambda row: (row["score"], row["trajectory_id"]))

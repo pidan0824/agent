@@ -35,7 +35,7 @@ class RecordingModel:
 
     async def acomplete(self, value, *, call_id):
         self.requests.append(deepcopy(value))
-        envelope = {"rationale": rationale(), "action": self.response}
+        envelope = self.response if "query" in self.response else {"rationale": rationale(), "action": self.response}
         return {"role": "assistant", "content": json.dumps(envelope), "tool_calls": []}
 
 
@@ -102,9 +102,9 @@ class FrozenCustomerEvaluationTests(unittest.TestCase):
         observed = request()
         tools = FrozenSampleTools(observed, "query")
         first = tools.execute("query_customer_history", {"before_time_index": 10, "limit": 5})
-        first["observed_history"][0]["query"] = "mutated"
+        next(v for v in first["facts"].values() if v["field"] == "query")["value"] = "mutated"
         second = tools.execute("query_customer_history", {"before_time_index": 10, "limit": 5})
-        self.assertEqual(second["observed_history"][0]["query"], "old query")
+        self.assertEqual(next(v for v in second["facts"].values() if v["field"] == "query")["value"], "old query")
         with self.assertRaises(ValueError):
             tools.execute("query_customer_history", {"before_time_index": 11, "limit": 5})
         with self.assertRaises(PermissionError):

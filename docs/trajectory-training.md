@@ -4,7 +4,7 @@ Customer 与 Seller 现在都可由同一个 Qwen3-32B 选择查询、读取证�
 
 运行时分别用 `--customer-agentic`、`--seller-agentic`，可同时启用。Seller 沿用现有目标分批与统一报价提交；每个目标批次由同一模型做查询与决策，预算按批次计算。工具只读冻结市场，本角色权限、时间截止和调用预算由代码执行。不同目标批次不共享隐式对话。Customer Query 与同次 Response 续接对话，但当前只执行一次真实搜索，不包含多轮试搜。
 
-Customer 作者式候选／干扰项构造、结构化 EKB 和强弱解释筛选见 [Customer 数据构造](customer-curation.md)。下方 `trajectories` 入口保留为原始曝光、仅结果分差筛选的对照；它不包含新入口的选项概率筛选。
+Customer 作者式候选／干扰项构造、结构化 EKB 和强弱解释筛选见 [Customer 数据构造](customer-curation.md)。下方 trajectories 入口保留原始曝光轨迹收集。Customer Query 输出直接动作；Response 理论开启时使用 EKB 加证据标记，关闭时直接输出动作。此入口没有公共预测器概率，故 Customer Response 不导出 DPO 偏好对，须经 customer_curation / customer_filtering；不能绕过新证据与 Log Loss 条件。Seller 与 Query 的结果分差规则保留。
 
 ## 生成与筛选
 

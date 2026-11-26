@@ -43,3 +43,9 @@ def agentic_customer_instructions(*, theory=True):
     from agent_simulation.agents.prompts.customer_ekb import ekb_instructions
     rationale = ekb_instructions() if theory else TEACHER_OUTPUT_NOTE
     return body + "\n" + FACT_RULES + "\n" + read_skill_reference("evidence", theory=theory) + theory_text + "\n" + rationale
+
+
+def fixed_customer_instructions():
+    """Fixed-information EKB: retain upstream core once; omit tool-planning wrapper."""
+    from agent_simulation.agents.prompts.customer_ekb import ekb_instructions
+    return FACT_RULES + "\n" + read_skill_reference("evidence") + "\n" + ekb_instructions()

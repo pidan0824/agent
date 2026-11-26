@@ -54,7 +54,10 @@ class CurationTests(unittest.TestCase):
         self.assertEqual(metrics[0]["student_hit"], 0.)
         for name, value in [("reachable",False), ("source_split","test")]:
             changed=deepcopy(rows)
-            for row in changed: row[name]=value
+            for row in changed:
+                row[name]=value
+                if name == "source_split":
+                    row["trajectory"]["source_split"] = value
             self.assertEqual(select_preferences(changed), ([],[],[]))
 
     def test_fixed_and_autonomous_keep_query_hidden_and_exposure_read_only(self):

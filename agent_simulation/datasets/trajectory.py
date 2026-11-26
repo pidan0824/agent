@@ -162,7 +162,9 @@ def read_training_records(path, mode, tokenizer, *, max_length=32768, limit=0):
             encoded = encode_record(row, mode, tokenizer, max_length=max_length)
             records.append({'encoded': encoded, 'metadata': {
                 key: row[key] for key in ('role', 'actor_id', 'stage', 'initial_state_id', 'trajectory_id',
-                                         'chosen_trajectory_id', 'rejected_trajectory_id') if key in row}})
+                                         'chosen_trajectory_id', 'rejected_trajectory_id', 'source_request_id',
+                                         'scene_id', 'source_response_target', 'dataset_manifest_sha256',
+                                         'response_style', 'action_mode', 'evaluation_protocol') if key in row}})
             if limit and len(records) >= limit:
                 break
     require(bool(records), 'Empty trajectory training release')

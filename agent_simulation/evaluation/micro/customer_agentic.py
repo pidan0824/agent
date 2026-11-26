@@ -16,18 +16,13 @@ from pathlib import Path
 import time
 
 from agent_simulation.agents.agentic import (
-    AgenticOptions, customer_auxiliary_tools, execute_customer_auxiliary, run_agentic_workflow,
-    teacher_output, validate_teacher_final,
+    AgenticOptions, customer_auxiliary_tools, execute_customer_auxiliary,
 )
 from agent_simulation.agents.context.customer_features import customer_behavior_features
 from agent_simulation.agents.context.shopping import displayed_details
-from agent_simulation.agents.decisions import action_output
-from agent_simulation.agents.prompts.customer_agentic import agentic_customer_instructions
 from agent_simulation.agents.schemas import validate_arguments
 from agent_simulation.data.common import require, sha256
 from agent_simulation.environment.operations.api import CUSTOMER_QUERY_TOOLS
-from agent_simulation.inference.client import ModelOutputError
-from agent_simulation.inference.requests import ContextCapacityError
 
 
 def _json(value):
@@ -39,6 +34,7 @@ class FrozenSampleTools:
 
     def __init__(self, request, stage, *, theory=True):
         require(stage in ("query", "response"), "Unknown Customer stage")
+        theory = theory and stage == "response"
         self.stage, self.theory = stage, theory
         # Copy only the stage's input; no current target is retained by this binding.
         self.context = deepcopy(request[stage + "_input"])
@@ -60,6 +56,7 @@ class FrozenSampleTools:
         result = {
             "profile": {key: value for key, value in profile.items() if key != "user_id"},
             "history_cutoff_exclusive": self.cutoff,
+            "evidence_actor_id": self.context["profile"]["user_id"],
             "behavior_features": customer_behavior_features(
                 self.history, cutoff=self.cutoff, behavioral_summary=self.context.get("behavioral_summary"),
                 user_id=profile.get("user_id")),
@@ -70,7 +67,8 @@ class FrozenSampleTools:
             result.update(query=self.context["query"], displayed_items=[
                 {key: product.get(key) for key in ("item_id", "item_title", "price_raw")}
                 for product in self.displayed])
-        return result
+        from agent_simulation.evaluation.customer_evidence import attach_sources
+        return attach_sources(result)
 
     def guard(self):
         require(hashlib.sha256(_json(self.context).encode()).hexdigest() == self.fingerprint,
@@ -85,8 +83,9 @@ class FrozenSampleTools:
             require(0 <= before <= self.cutoff, "History query exceeds frozen cutoff")
             require("before_simulation_step" not in args, "Observed-data evaluation has no simulation clock")
             visible = [event for event in self.history if event["time_index"] < before]
-            return {"observed_history": deepcopy(visible[-args["limit"]:]), "simulation_history": [],
-                    "end_exclusive": before, "eligible_events": len(visible)}
+            from agent_simulation.evaluation.customer_evidence import attach_sources
+            return attach_sources({"evidence_actor_id": self.context["profile"]["user_id"], "observed_history": deepcopy(visible[-args["limit"]:]), "simulation_history": [],
+                    "end_exclusive": before, "eligible_events": len(visible)})
         if name == "query_long_term_memory":
             return {"experiences": [], "status": "No generated memories in this observed-data snapshot"}
         if name == "query_displayed_products":
@@ -97,40 +96,17 @@ class FrozenSampleTools:
 async def predict_request(request, stage, model, *, options=None, sample_index=0):
     options = options or AgenticOptions()
     binding = FrozenSampleTools(request, stage, theory=options.theory)
-    identity = f'{stage}:{request["session_id"]}'
-    schema = action_output(stage, displayed_ids=[p["item_id"] for p in binding.displayed]
-                           if stage == "response" else None)["final_schemas"][0]
-    task = ("Predict the next observed Chinese search query. The current target query and exposure list are hidden."
-            if stage == "query" else
-            "Predict clicks and purchases conditional on this recorded query and unchanged displayed list.")
-    messages = [
-        {"role": "system", "content": agentic_customer_instructions(theory=options.theory) + "\n" + task +
-         "\nReturn one final JSON envelope matching this schema: " + _json(teacher_output([schema], customer_ekb=options.theory))},
-        {"role": "user", "content": _json(binding.initial_context())},
-    ]
-    trace = {}
+    from agent_simulation.evaluation.trajectories import generate_trajectory
     started = time.monotonic()
-    result = {"sample_id": identity, "stage": stage, "sample_index": sample_index,
+    trajectory = await generate_trajectory(binding, model, role="customer",
+        actor_id=request["query_input"]["profile"]["user_id"], stage=stage,
+        record_id=request["session_id"], source_split=request["assigned_split"],
+        catalog_identity="frozen-micro", options=options, sample_index=sample_index)
+    result = {**trajectory, "sample_id": f'{stage}:{request["session_id"]}',
               "request_id": request["session_id"], "snapshot_sha256": binding.fingerprint,
-              "split": request["assigned_split"], "sampling_seed": getattr(model, "seed", None),
-              "status": "running", "trace": trace}
-
-    async def complete(conversation, tools):
-        return await model.acomplete({"messages": conversation, "tools": tools,
-                                      "final_schema": teacher_output([schema], customer_ekb=options.theory)},
-                                     call_id=f'{identity}:sample:{sample_index}:call:{len(trace["model_calls"])}')
-
-    def validate(final):
-        return validate_teacher_final(final, [schema], trace=trace, customer_ekb=options.theory)
-
-    try:
-        result["prediction"] = await run_agentic_workflow(
-            messages=messages, tools=binding.schemas, complete=complete, execute_tool=binding.execute,
-            validate_final=validate, options=options, trace=trace, guard=binding.guard)
-        result["status"] = "ok"
-    except (ModelOutputError, ContextCapacityError) as error:
-        result.update(status="invalid", error=f"{type(error).__name__}: {error}")
-    # The target is attached only after inference has completed or failed.
+              "split": request["assigned_split"], "sampling_seed": getattr(model, "seed", None)}
+    if trajectory["status"] == "ok":
+        result["prediction"] = trajectory["final_action"]
     result["target"] = deepcopy(request[stage + "_target"])
     result["seconds"] = time.monotonic() - started
     return result
@@ -236,7 +212,7 @@ def main(argv=None):
                     "selection_split": args.split, "stages": stages, "options": asdict(options),
                     "samples_per_decision": args.samples_per_decision, "model": args.model,
                     "temperature": args.temperature, "seed": args.seed,
-                    "theory_application": "Theory-enabled runs use the upstream detailed EKB structure; theory-disabled runs use the separate hypothesis/evidence contract.",
+                    "theory_application": "Response theory-on uses EKB with evidence annotations; theory-off and Query return direct actions.",
                     "protocol": "Query prediction and conditional Response on recorded Query/display; no search or settlement.",
                     "selection_policy": "All samples are reported; no outcome-based selection or distillation.",
                     "historical_test_use": "Existing project training may have used test for checkpoint selection; do not call it untouched."}

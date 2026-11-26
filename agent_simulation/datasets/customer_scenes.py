@@ -15,6 +15,7 @@ from agent_simulation.datasets.labels import select_record_ids
 def freeze_prices(catalog, scene):
     """Use the same strictly-prior price lookup for positives and distractors."""
     request = scene["request"]
+    request["response_input"]["response_action_mode"] = "single_item"
     cutoff = request["response_input"]["history_cutoff_exclusive"]
     ids = scene["candidate"]["candidate_item_ids"]
     observations = catalog.connection.execute("""
@@ -137,9 +138,13 @@ def read_scenes(directory, *, dataset=None, split=None):
     require(len(scene_ids) == len(set(scene_ids)), "Duplicate split scene IDs")
     for bundle in scenes:
         source = bundle["request"]
+        require(source["assigned_split"] == manifest["split"], "Source request split differs")
         positives = set(source["response_target"]["clicked_item_ids"]) | set(source["response_target"]["purchased_item_ids"])
         for child in bundle["response_scenes"]:
             require(child["request"]["session_id"] == source["session_id"], "Mixed source request")
+            require(child["request"]["assigned_split"] == source["assigned_split"], "Child request crosses dataset splits")
+            require(child["candidate"]["source_request_id"] == source["session_id"], "Mixed candidate source request")
+            child["request"]["response_input"]["response_action_mode"] = "single_item"
             chosen = child["candidate"]["target_item_id"]
             require(chosen in positives if positives else chosen is None, "Invalid split target")
             selected = set(child["candidate"]["candidate_item_ids"])

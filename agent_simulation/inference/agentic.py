@@ -20,7 +20,7 @@ class AgenticClient:
     """Keep tool calls intact; the bounded workflow validates tools and final actions."""
 
     def __init__(self, url, model, tokenizer, *, max_new_tokens=2048, timeout=120,
-                 temperature=0, seed=None, log_path=None, transport=None, context_limit=None):
+                 temperature=0, seed=None, log_path=None, transport=None, context_limit=None, stream=False):
         require(bool(model) and type(max_new_tokens) is int and max_new_tokens > 0,
                 "Invalid agentic model or generation budget")
         require(math.isfinite(timeout) and timeout > 0, "Invalid agentic timeout")
@@ -28,6 +28,7 @@ class AgenticClient:
                 "Invalid agentic temperature")
         require(context_limit is None or (type(context_limit) is int and context_limit > max_new_tokens),
                 "Invalid served context limit")
+        self.stream = stream
         self.context_limit = context_limit
         self.model, self.tokenizer = model, tokenizer
         self.max_new_tokens, self.temperature, self.seed = max_new_tokens, temperature, seed
@@ -60,7 +61,7 @@ class AgenticClient:
             raise ContextCapacityError("Agentic request exceeds the served model context limit")
         payload = {"model": self.model, "messages": prepared["messages"],
                    "max_tokens": self.max_new_tokens, "temperature": self.temperature,
-                   "n": 1, "stream": False,
+                   "n": 1, "stream": self.stream,
                    "chat_template_kwargs": {"enable_thinking": False}}
         if self.seed is not None:
             payload["seed"] = self.seed
@@ -78,9 +79,15 @@ class AgenticClient:
                   "served_model": self.model, "request": deepcopy(request),
                   "input_tokens": count, "output_tokens": 0, "finished": False}
         try:
-            response = self.http.post("chat/completions", json=payload)
-            response.raise_for_status()
-            data = response.json()
+            if self.stream:
+                payload["stream_options"] = {"include_usage": True}
+                data = self._stream_response(payload, record)
+            else:
+                response = self.http.post("chat/completions", json=payload)
+                response.raise_for_status()
+                data = response.json()
+                record.update(ttft_seconds=None, decode_tokens_per_second=None,
+                              timing_protocol="non-streaming; TTFT unavailable")
             choice, = data["choices"]
             reason, message = choice.get("finish_reason"), choice["message"]
             record.update(raw_output=deepcopy(message), finish_reason=reason,
@@ -105,6 +112,48 @@ class AgenticClient:
             record["seconds"] = time.monotonic() - started
             if self.log is not None:
                 self.log.append(record)
+
+    def _stream_response(self, payload, record):
+        started = time.monotonic()
+        first = last = None
+        content, calls, usage, reason = [], {}, {}, None
+        with self.http.stream("POST", "chat/completions", json=payload) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+                value = line[5:].strip()
+                if value == "[DONE]":
+                    break
+                chunk = json.loads(value)
+                if chunk.get("error"):
+                    raise RuntimeError(str(chunk["error"]))
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+                for choice in chunk.get("choices", []):
+                    delta = choice.get("delta", {})
+                    if delta.get("content") or delta.get("tool_calls"):
+                        now = time.monotonic()
+                        first = now if first is None else first
+                        last = now
+                    if delta.get("content"):
+                        content.append(delta["content"])
+                    for fragment in delta.get("tool_calls", []):
+                        call = calls.setdefault(fragment["index"], {"id": "", "type": "function",
+                            "function": {"name": "", "arguments": ""}})
+                        if fragment.get("id"):
+                            call["id"] = fragment["id"]
+                        for key in ("name", "arguments"):
+                            call["function"][key] += fragment.get("function", {}).get(key) or ""
+                    reason = choice.get("finish_reason") or reason
+        record.update(ttft_seconds=first-started if first is not None else None,
+            decode_tokens_per_second=((usage.get("completion_tokens", 0)-1)/(last-first)
+                if first is not None and last > first and usage.get("completion_tokens", 0)>1 else None),
+            timing_protocol="client first nonempty SSE delta; decode rate approximated from server token usage",
+            http_seconds=time.monotonic()-started)
+        return {"usage": usage, "choices": [{"finish_reason": reason, "message": {
+            "role": "assistant", "content": "".join(content) or None,
+            "tool_calls": [calls[i] for i in sorted(calls)]}}]}
 
     async def acomplete(self, request, *, call_id):
         return await asyncio.to_thread(self.complete, request, call_id=call_id)

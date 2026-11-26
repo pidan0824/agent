@@ -1,6 +1,6 @@
 # Customer 数据构造流程
 
-当前主流程用于离线构造训练数据：作者式候选／干扰项 → 强弱结构化 EKB 轨迹 → 同一行为预测器的选项概率与熵 → 场景／偏好筛选 → SFT、DPO 导出。候选场景在模型调用前冻结。Query、原始多点击／购买记录、空点击／空购买、fixed／autonomous 两种信息获取模式都保留；Response 按真实正例拆成单正例短列表。
+当前主流程用于离线构造训练数据：作者式候选／干扰项 → 独立 Query 与强弱 Response EKB／直接动作轨迹 → 同一行为预测器的选项概率与熵 → 场景／偏好筛选 → SFT、DPO 导出。候选场景在模型调用前冻结。Query、原始多点击／购买记录、空点击／空购买、fixed／autonomous 两种信息获取模式都保留；Response 按真实正例拆成单正例短列表。
 
 ## 作者代码与适配
 
@@ -41,7 +41,7 @@ Query 每个原请求只生成一组（每模型／每种信息模式各按 samp
 ./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
   --dataset "$dataset" --scenes result/customer-scenes \
   --output result/customer-teacher --split train \
-  --modes fixed --samples 2
+  --modes fixed --samples 10
 ```
 
 默认仅使用 sampled（采样候选）场景和固定信息模式，不自动展开完整比较矩阵。`--count 0` 使用所有已准备场景；`--request-id` 可固定请求。`--modes fixed` 使用固定事实，`--modes autonomous` 自主选择只读工具，也可显式同时生成两种模式。强模型默认 Qwen3-32B，弱解释模型与默认公共行为预测器均改为 Qwen3.5-9B；弱模型服务和 tokenizer 通过 `--weak-url/model/tokenizer` 指定。公共行为预测器可使用独立的 `--predictor-url/model/tokenizer`，不必与弱解释生成器绑定。
@@ -50,64 +50,98 @@ Customer 生成入口中的 BGE 检索及 Query 相似度评分也默认使用 `
 
 EKB 直接保留作者详细解释的要求，不额外限制 100 字、单句或字段文本长度。作者示例编码器为 `gte-Qwen2-1.5B-instruct`，本项目当前配置的内容编码器是中文 BGE。
 
-EKB 保留作者 Stimulus → Knowledge → Evaluation、因素和 Evaluation Style，按项目 JSON 输出。不能虚构心理状态；多选／空集覆盖原模板强制单选约束。原始模型动作、解释、工具返回、四状态选项概率、argmax 和采样行为分别保存。此处“单正例”指列表和监督标签；动作仍使用点击／购买两个集合，并保留空集合能力，公共预测器仍使用四状态概率，不在本次切换为作者的单一字母分类器。
+EKB 保留作者 Stimulus → Knowledge → Evaluation、因素和 Evaluation Style，追加项目自己的 evidence_refs。作者 vendor 原文件与函数不改动；证据标记、动作限制、联合概率、严格偏好条件与独立评估均为项目适配。
 
-## 3. 独立筛选和导出
+Query 正式入口始终直接输出查询 JSON，不生成 EKB，不含当前真实 Query、当前曝光和当前动作标签。每个请求的 Query 只生成一次（每模型／信息模式／采样序号），不随 Response 的 EKB 消融分支重复。
 
-```bash
+Response 的 sampled 单正例短列表最多选择一个不同商品，点击与购买字段仍分别保留：空动作、仅点击、仅购买、同一商品点击且购买。不同商品分别出现在点击和购买中也不合法。full/retrieved 协议保留多选，不能与 sampled 合并计算效果。
+
+### EKB 证据标记
+
+代码从实际可见历史和商品构造事实表，为每条事实生成稳定编号（H… 历史、P… 商品、Q… 当前查询）。每条事实由代码保存来源、字段、值、时间、用户与商品标识；点击和购买使用不同字段。提示中用事实表替换重复的历史／商品正文，不再重复发送一份 evidence_sources。
+
+模型保留原始 Stimulus、Knowledge、Evaluation，只增加 evidence_refs：三个阶段各列引用编号；无依据时使用空列表，在原文中说明未知或暂定推断。模型不再生成字段路径、value_json、Observed claim 或重复抄写事实。
+
+代码检查编号确实出现在实际 user/tool 消息中、历史与历史价格早于截止点、用户及商品标识一致、行为字段类型合法，以及原始最终 JSON 与保存的 EKB／动作一致。当前 Query 和静态商品事实可作为当前已可见信息，不声称它们属于过去交互。
+
+machine_checked 只表示来源检查通过，不能证明自然语言推断成立。保留少量人工语义审阅：semantic-review.jsonl 按模型与原请求抽取最多 20 条 EKB，重点看点击误称购买、价格偏好推断、缺失事实和解释／动作冲突。审阅结论写入对应轨迹 semantic_review.verdict（pass/fail），离线重筛时 fail 禁止进入 SFT 或作为 chosen；未审阅始终标记 not_reviewed，不能报告成语义已验证。此过程不自动调用第二个 LLM。
+
+旧路径／值式证据输出不会自动转成新编号，旧记录保留；重新生成才使用新协议。
+
+## 3. 两类实验边界
+
+A：独立行为预测，是当前 customer_curation 的协议。
+
+- Query：过去历史 → 独立生成 Query → 与真实 Query 比较。
+- Response：固定真实 Query、同一候选列表、相同可见历史 → direct 或 EKB → 预测点击／购买。
+- direct 直接输出动作 JSON，不要求任何解释；EKB 输出原始解释与动作。
+- 默认 fixed、EKB；显式选择 direct ekb 才展开消融。仅比较解释影响时使用 fixed，避免工具查询差异成为混杂因素。
+
+以下仅是以后运行的示例，本轮没有执行：
+
+~~~bash
+./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
+  --dataset "$dataset" --scenes result/customer-scenes-test \
+  --output result/customer-ekb-ablation --split test \
+  --modes fixed --response-styles direct ekb --samples 1 --evaluation-only
+~~~
+
+evaluation-only 保存所有原始尝试、概率和报告，不执行训练数据筛选导出。报告按阶段、模型、信息模式、候选协议、EKB/direct、数据域、候选数与行为类型分组；提供点击／购买 F1、Recall、完整动作匹配、无点击正确率、Log Loss、证据检查数和有效数量。真实标签为空的头 Recall 为 null，单列无点击正确率；不以空集 Recall=1 稀释指标。所有失败尝试保留，不能只报告筛选后的高分样本。
+
+B：端到端仿真是另一个协议：历史 → 预测 Query → 平台搜索返回列表 → Response → 结算。现有仿真运行器负责这条路径，不能拿新搜索列表的动作直接和旧曝光标签比较，也不能与 A 混报。本轮没有新增或运行 B 实验。
+
+## 4. 概率、筛选与训练导出
+
+~~~bash
 ./agent_simulation/python.sh -m agent_simulation.evaluation.customer_filtering \
   --input result/customer-teacher/records.jsonl \
   --output result/customer-training-data
-```
+~~~
 
-可重用已保存轨迹重新筛选，本阶段不调用任何模型。生成结束时也会按相同函数导出一次。
+离线筛选不调用模型、不修改原始 EKB 或动作。正常生成入口也会导出一次；evaluation-only 禁用这一步。
 
-生成与离线导出使用同一套筛选函数；离线重筛只读取保存的动作、标签、分数与概率，不重新调用模型。默认 Response 配对协议为 `--pair-protocol logloss`，可显式选择 `sampled_match`。作者 vendor 函数保持原样，新的动作约束、Log Loss 配对和统计属于项目适配。
+### 概率协议
 
-### SFT：分别检查点击、购买与空集合
+- sampled 单正例列表有 1+3N 个互斥合法动作：无动作，以及每件商品的仅点击／仅购买／两者都有。公共预测器对这些动作评分，保留完整概率、熵、argmax、采样动作；Log Loss 为真实完整动作的负 log2 概率，单位 bits/decision。
+- full/retrieved 多选保留逐商品四状态边缘概率；Log Loss 为均值 bits/item，不是完整集合的联合概率。
+- 不能把两种单位混合排序、配对或汇总。候选数量不同的场景也分别分层。
+- Query 是自由文本，保留 BGE 相似度，不伪造选项熵。
+- 这些概率来自同一个公共行为预测器，不能称为强弱生成器自身的置信度，也不保证已校准。
 
-SFT 独立收集 strong 的原始完整轨迹，不要求预测器成功、弱模型正确或存在 rejected；不改写 EKB、最终动作、工具调用及返回内容。
+单正例概率最大需要 37 个选项（12 件商品），服务需允许对应数量的 logprobs；项目 serve.sh 设置 --max-logprobs 64。它不会自动启动服务。
 
-- Query 保留原始生成文本，按真实 Query 相似度筛选，默认 `--query-min 0.7`。
-- 有点击时单独检查点击 F1，有购买时单独检查购买 F1。默认两个门槛均为 0.8；`--click-min`、`--purchase-min` 可分别设置，`--response-min` 是两者的共同默认值。
-- 真实点击为空时必须预测空点击；真实购买为空时必须预测空购买。即使另一项得分很高，也不能抵消虚构点击／购买。
-- 多点击、多购买、购买但没有点击记录均按两个原始集合处理；不强制单选，也不强制购买必须出现在点击集合中。
-- 离线未覆盖门槛时采用轨迹保存的门槛；旧记录无门槛则使用 Query 0.7、点击／购买各 0.8。旧 Response 只有 accepted 标记而缺少真实标签时，不静默沿用旧平均分判定，会报告缺少标签。
-- 行为分层按当前场景标签采用无／单／多点击 × 有／无购买，分别报告保留率；单正例协议下源请求的多点击类别另保存在 source_response_target 中，不能把拆分后的单点击计数解释为源用户行为分布；不以分层为由伪造、补齐样本，也不默认限制各组配额。
+### SFT
 
-### Response DPO：解释评分与原始动作方向一致
+独立收集 strong 原始轨迹，不依赖偏好对或概率评分成功。Query 相似度默认 ≥0.7；Response 点击与购买 F1 分别默认 ≥0.8，真实空头必须预测为空。EKB 还须通过证据检查；direct 分支没有解释证据门槛。单正例合法动作下，上述 Response 门槛实际要求匹配真实动作。完整曝光多选仍按两个集合判断。
 
-公共预测器只评分。四状态 A/B/C/D 是逐商品的均无／仅点击／仅购买／两者均有；保留选项概率、熵、argmax 和采样行为作为诊断。逐商品 Log Loss 是真实状态概率的负对数均值，沿用作者 `get_logloss` 的 **log2，即 bits/item**，不是完整点击集合的联合概率，也不宣称已经校准。
+### Response DPO
 
-默认 `logloss` 协议在相同初始状态、prompt、工具权限、候选与目标内比较：
+chosen 不按模型大小指定，强弱任一方都可成为 chosen。相同场景、输入、工具权限、候选、任务协议和概率单位才可配对。
 
-1. chosen 的原始动作通过上述分层质量门槛。
-2. chosen 原始动作的平均 F1 比 rejected 高至少 `--action-min-gap 0.05`，且点击、购买两项都不劣于 rejected。
-3. chosen 的真实标签平均 Log Loss 比 rejected 低至少 `--logloss-min-gap 0.05` bits/item。
-4. 任一信号方向冲突、差距不足或没有足够概率记录时，不构造该偏好对；合格 SFT 仍独立保留。
-5. chosen 可以来自 strong 或 weak；按质量选择，模型来源保留在数据中。每个场景最多一对，优先 Log Loss 差距较大的合格对。
+1. chosen 原始点击与购买必须同时完整匹配真实标签，并通过证据检查。
+2. rejected 行为不正确时，要求 chosen 平均 F1 优势至少 action-min-gap（默认 0.05），两头均不劣。
+3. 两边行为都正确时，只有 rejected 存在可确定的证据引用错误，才可构造证据质量偏好；缺少旧标记仅为未验证，不能自动判定解释更差。
+4. 默认 logloss 协议还要求 chosen 的 Log Loss 低至少 logloss-min-gap（默认 0.05，单位取决于任务协议）。仅更低 Log Loss 不足以配对。
+5. 两边行为都错、chosen 行为正确但证据不通过、分数方向冲突、概率不足均不配对。
+6. 原始解释、动作和各分支实际工具结果逐字保留，不把公共预测器采样动作拼接回 EKB。
 
-因此，当前完整 Agent 协议不把“动作完全相同、只有解释分数不同”的轨迹变成偏好对。这类解释单独优化不在本次实现范围内。
+sampled_match 是显式可选作者采样对照，也执行 chosen 原始动作完全正确、证据检查通过的门槛；它仍不使用 Log Loss 差距。主流程默认 logloss。Query DPO 独立按真实 Query 相似度分差选择，不套用 Response 的 EKB 质量判定。
 
-`sampled_match` 保留作者 `behavior_sampling` 的选项采样匹配选择，但增加原始动作保护：chosen 的采样动作和原始动作均完整匹配真实集合，rejected 两者均不完整匹配，并通过原始动作分差约束。此协议不使用 Log Loss 差距门槛。**两种协议导出的 chosen/rejected 都逐条保留原始生成轨迹，绝不把预测器采样动作拼接回去。**
+作者 calculate_metrics/data_filtering 继续用于强弱解释条件下的不确定性统计和分层场景选择，新的严格配对条件位于项目适配层。数据域、候选数量、当前行为类型分层；统计同时保留原请求多点击类型。缺少有效偏好对是正常结果，不为凑数放宽正确性。
 
-强弱模型相同 sample ID 的概率用于作者不确定性统计。场景排序继续采用 `--filter-column`（默认强弱熵差），并用作者 `data_filtering` 按数据域、候选数量、行为分层选择；`--max-pairs` 限制 Response 对数。缺少成对强弱样本但有合格概率分支的 Log Loss 场景仍可配对，其不确定性排序值为 0 并标记不可用，不伪造强弱差异。`--sampling-column entropy|logloss` 只控制 `sampled_match` 的作者分支抽样。
+### 防泄漏、导出与统计
 
-Query DPO 保留同场景真实 Query 匹配分差规则（同样由 `--action-min-gap` 控制），不捏造自由文本的选项熵。DPO 两分支保留各自实际工具返回；现有训练器只对 assistant 生成内容计算损失，工具返回不参与生成概率。
+拆分前确定官方原请求 split。场景读取检查父请求、全部子列表与 manifest 的划分一致；导出再次检查同一数据版本下的 source_request_id 不得跨划分（不因数据域不同而放行）。训练读取只接受 train，不重新随机划分子列表。source_request_id、scene_id、原始标签及任务协议传到训练元数据。test 不进入训练导出。
 
-### 导出与统计
+- sft.jsonl / preferences.jsonl：接现有轨迹 SFT、DPO 训练器。
+- filter-decisions.jsonl：每条行为与证据检查、保留状态、淘汰原因、概率失败原因。
+- pair-decisions.jsonl：场景为何配对／未配对。
+- filter-funnel.json：按阶段、模型、数据域、候选数量、当前／原始行为类型、候选协议及 EKB/direct 统计保留率；原因可能重叠。
+- uncertainty-metrics.jsonl：作者强弱分歧指标，采样匹配率不等于生成动作正确率。
 
-- `sft.jsonl`、`preferences.jsonl`：接现有[轨迹 SFT→DPO 训练入口](trajectory-training.md)。
-- `uncertainty-metrics.jsonl`：作者强弱概率／熵统计；teacher_hit/student_hit 仍指预测器采样完整匹配率。
-- `filter-decisions.jsonl`：每条轨迹的实际门槛、质量分、是否进入 SFT、剔除原因、概率可用性与错误。
-- `pair-decisions.jsonl`：每个场景是否配对，或因缺概率、无合格 chosen、动作分差／方向冲突、Log Loss 分差／方向冲突、配额等原因未配对。
-- `filter-funnel.json`：原始数、有效数、质量通过数、Query／Response SFT 与偏好对数、各分层保留率、剔除原因计数。行级原因允许重叠，配对原因按场景计数，二者不相加。`test` 来源不进入训练导出。
+数据没有可用的真实曝光顺序，不使用位置特征、不把列表排列解释成真实展示排名。短列表效果、完整曝光多选效果、端到端仿真结果分别报告。旧结果保留，不修改为新协议结果。
 
-数据没有可用的真实曝光位置，数组顺序不代表原始展示排名。以上匹配与筛选均按商品 ID 集合，不使用位置特征或位置偏差假设。候选是事先冻结的，同一场景各模型收到相同排列；短列表中的排列是构造顺序，不声称恢复了真实曝光顺序。
-
-之前的 2026-11-21 两请求效果试跑属于旧 BGE 截短协议，结果仍保留在原目录；不作为本次作者式候选流程的效果结论。本次改动只做固定小数据的流程检查，不启动性能比较或训练。
-
-固定信息模式不开放查询工具，直接提供历史与候选后生成 EKB 和动作；自主查询模式是本项目的可选扩展，须显式设置 `--modes autonomous`。搜索 Query 的生成与查询工具调用是两个独立概念，Query 阶段始终保留。
+默认模型仍是 Qwen3-32B、Qwen3.5-9B；BGE small zh v1.5 使用 CUDA。生成默认 temperature=0.7、seed=42、samples=10、max-new-tokens=2048、context-limit=16384，fixed 每次最多一次生成调用；自主模式显式启用，默认最多 6 次模型调用、8 次工具调用。2048 是输出 token 预算，不是 EKB 字数限制。
 
 ## 单正例拆分的解释边界
 
@@ -125,3 +159,29 @@ Query DPO 保留同场景真实 Query 匹配分差规则（同样由 `--action-m
 作者 MIND 的 preprocessing/DataProcessor_MIND.py 保留原始 impression_list，但只保留恰好一个点击、列表不超过 10、历史至少 5 的请求。scene_sampling.py 有条件复用 MIND 的真实曝光列表；该分支还存在 sampled_dataframe / sample_dataframe 变量不一致，不能说其所有默认路径均正确复用了曝光。其通用路径仍调用三路采样。我们不复制 MIND 的单点击请求剔除策略：多正例拆分、不点击和 Query 均保留。
 
 作者 Amazon 预处理把评分／评论记录映射为单一 item_id 交互，模板称为购买历史，但没有独立的点击、购买双标签或转化漏斗。我们继续保留 clicked_item_ids / purchased_item_ids 两套真实标签，且不由点击推断购买。曝光未点击只是该请求下未点击，并不等于永久不喜欢；从完整曝光抽出的短列表仍是结果条件化训练构造，不等价于用户真的只看到了这几件商品。
+
+## 多采样、请求级指标与性能
+
+正式默认每模型每场景 samples=10，与作者示例 n=10 对应；sample-concurrency 默认 2。小规模格式／耗时试跑显式指定 samples=1 或 2，不能把这种试跑当成已完成多采样筛选。SFT 独立保留合格轨迹；DPO 还需同场景的合格 chosen 与有明确差距的 rejected。全部错误时不配对；只有一个正确分支时 SFT 可以保留，DPO 仍可能没有合格对。错误且证据可靠的分支可成为 rejected，正确但证据不可靠的分支不得成为 chosen。
+
+request-metrics.json 按模型、协议、信息模式、解释模式、原请求和采样序号聚合，合并子场景动作并去重，记录 Click/Purchase Precision、Recall、F1 和各自 Exact Match。检查预期子场景数，缺失或失败标记 incomplete；不能丢弃失败请求后宣称无偏效果。每个采样序号独立报告，不从十条中挑最正确的一条计算预测准确率。
+
+sampled 聚合标为 split_reconstructed；它仍受结果条件化候选影响。真正的原始曝光评估使用 candidate-policies full，与构造短列表重建结果分开。正式样本队列必须覆盖购买正例；本轮旧样例全部没有购买，不能证明购买预测能力，也没有擅自生成新的购买样例。
+
+stream-timing 默认开启，模型调用日志保留 input_tokens、output_tokens、seconds、ttft_seconds、decode_tokens_per_second。TTFT 是客户端发出 HTTP 请求到首个非空 SSE 内容／工具增量的时间，包含排队与网络；decode rate 按服务端输出 token 数与首尾增量时间近似计算，不能当作精确逐 token 的内核速度。关闭流式时 TTFT 和 decode rate 为 null，不用总耗时冒充 TTFT。没有增加额外模型调用来做计时。
+
+## 提示词与上下文审计
+
+固定模式精简提示词移除工具规划包装、重复的 EKB 决策类型说明和重复输出说明，保留作者 default_system 全文、项目事实规则、证据解释与 JSON 适配。不新增字数上限。自主模式仍保留工具规划说明。
+
+上下文另外提供 history_events（按时间排序，每个事件链接 Query、点击、购买事实）与 candidate_context（按商品关联属性）。历史价格标记 historical_observation 和 not_current_quote；未知当前报价显式保留，不以事实缺失暗示价格可推断。事实表仍保存来源和时间；事件索引只保存引用，不重复商品正文。
+
+新增保守的价格陈述检查：仅对一句话中明确出现单个候选商品 ID、价格词和数字的情况，检查该商品价格是否未知、数值是否吻合，以及历史价格有没有时间限定。多商品、代词、隐含比较等无法确定时仍交给语义审阅。这不是完整自然语言事实验证，不能据此声称每句话都被证明。
+
+prompt-only 对照读取上一轮实际 user 消息，保持原样上下文、模型、seed=42/43、temperature=0.7、max_new_tokens=2048、并发 2 与流式方式，仅替换系统提示的重复包装。本次上下文索引与价格标记不混入这组效率对照；事实检查新增失败原因也不代表生成行为本身变差。
+
+## Independent EKB effect evaluation
+
+For label-blind A/B/C comparisons and the matching direct multi-sample control, see
+[Customer EKB controlled evaluation](customer-ekb-ablation.md). This evaluation-only
+entry point uses a simplified EKB prompt and never exports SFT/DPO data.

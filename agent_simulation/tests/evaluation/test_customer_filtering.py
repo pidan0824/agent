@@ -98,7 +98,7 @@ class FilteringTests(unittest.TestCase):
         self.assertEqual(len(select_sft(rows)), 2)
         self.assertEqual(select_preferences(rows)[1], [])
         for row in rows:
-            row["source_split"] = "test"
+            row["source_split"] = row["trajectory"]["source_split"] = "test"
         self.assertFalse(select_sft(rows))
 
     def test_offline_export_counts_strata_drop_reasons_and_query(self):
@@ -135,7 +135,7 @@ class FilteringTests(unittest.TestCase):
             self.assertEqual(report["sft_total"],1)
         rows = self.pair_rows()
         for row in rows:
-            row["source_split"] = "test"
+            row["source_split"] = row["trajectory"]["source_split"] = "test"
         with TemporaryDirectory() as directory:
             report = export_training(rows, Path(directory))
             self.assertEqual((report["sft_total"],report["pairs_total"]),(0,0))
