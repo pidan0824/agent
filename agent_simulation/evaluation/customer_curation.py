@@ -19,7 +19,7 @@ from agent_simulation.datasets.customer_candidates import construct_candidates, 
 from agent_simulation.datasets.labels import SFTDataset, select_record_ids
 from agent_simulation.evaluation.customer_filtering import OptionPredictor, probability_record, export_training, add_filter_arguments, validate_filter_options
 from agent_simulation.evaluation.micro.customer_agentic import FrozenSampleTools
-from agent_simulation.evaluation.trajectories import generate_trajectory, OutcomeScorer, score_group, digest
+from agent_simulation.evaluation.trajectories import generate_trajectory, trajectory_messages, OutcomeScorer, score_group, digest
 from agent_simulation.evaluation.customer_quality import behavior_stratum
 from agent_simulation.inference.agentic import AgenticClient
 from agent_simulation.inference.requests import load_tokenizer, ContextCapacityError
@@ -45,6 +45,47 @@ class CurationTools(FrozenSampleTools):
                 context["displayed_items"] = deepcopy(self.displayed)
         from agent_simulation.evaluation.customer_evidence import attach_sources
         return attach_sources(context)
+
+
+def fixed_response_requests(response_input, *, history_limit=10):
+    """Use the exact fixed curation prompts and schemas in controlled evaluation."""
+    from agent_simulation.agents.agentic import initial_agentic_request, teacher_output
+    result = {}
+    for style in ("direct", "ekb"):
+        theory = style == "ekb"
+        binding = CurationTools({"response_input": response_input}, "response",
+                               mode="fixed", theory=theory, history_limit=history_limit)
+        schemas, messages = trajectory_messages(binding, role="customer", stage="response", theory=theory)
+        messages, tools, _ = initial_agentic_request(messages, [], AgenticOptions(max_model_calls=1, theory=theory))
+        result[style] = {"messages": messages, "tools": tools,
+                        "final_schema": teacher_output(schemas, customer_ekb=True) if theory else schemas[0]}
+    return binding.initial_context(), result
+
+
+def observed_action_rows(request, identity, split, dataset_identity):
+    """Full-exposure ground truth, independent of teacher success or shortlist labels."""
+    if split != "train":
+        return []
+    from agent_simulation.agents.schemas import validate_arguments
+    from agent_simulation.agents.agentic import initial_agentic_request
+    result = []
+    for stage in ("query", "response"):
+        binding = CurationTools(request, stage, mode="fixed", theory=False)
+        schemas, prompt = trajectory_messages(binding, role="customer", stage=stage, theory=False)
+        prompt, _, _ = initial_agentic_request(prompt, [], AgenticOptions(max_model_calls=1, theory=False))
+        target = deepcopy(request[stage + "_target"])
+        validate_arguments(target, schemas[0])
+        state_id = digest([dataset_identity, identity, stage, prompt])
+        result.append({"role": "customer", "actor_id": request[stage + "_input"]["profile"]["user_id"],
+            "stage": stage, "source_split": split, "source_request_id": identity,
+            "dataset_manifest_sha256": dataset_identity, "initial_state_id": state_id,
+            "scene_id": str(identity) + ":full", "trajectory_id": digest([state_id, target, "observed"]),
+            "tools": [], "messages": prompt + [{"role": "assistant", "content": encoded(target)}],
+            "target": target, "response_style": "direct",
+            "action_mode": "multi_item" if stage == "response" else "query",
+            "evaluation_protocol": "independent_behavior_prediction",
+            "behavior_source": "observed_action; full exposure; no generated rationale"})
+    return result
 
 
 def generation_jobs(request, *, bundle=None, policies=("sampled",), limit=10, encoder=None):
@@ -85,6 +126,7 @@ def parser():
     p.add_argument("--request-id", type=int, action="append")
     p.add_argument("--count", type=int, default=0, help="Prepared scenes: 0 uses all; raw alternatives require an explicit positive count")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--sft-only", action="store_true", help="Generate strong teacher only; skip weak model, option predictor and DPO")
     p.add_argument("--samples", type=int, default=10)
     p.add_argument("--sample-concurrency", type=int, default=2)
     p.add_argument("--scenes", type=Path, help="Prepared sampled scenes from datasets.customer_scenes")
@@ -183,7 +225,7 @@ def main(argv=None):
     rng = np.random.default_rng(args.seed)
     styles = args.response_styles or (["ekb"] if args.theory else ["direct"])
     require(len(set(styles)) == len(styles), "Duplicate response styles")
-    records, coverage = [], []
+    records, coverage, observed = [], [], []
     with ExitStack() as resources:
         data = resources.enter_context(closing(SFTDataset(args.dataset, args.strong_tokenizer)))
         ids = args.request_id or ((sorted(prepared)[:args.count] if args.count else sorted(prepared)) if prepared else select_record_ids(
@@ -195,21 +237,22 @@ def main(argv=None):
             [str(args.dataset / "customer" / args.split / "labels.parquet"), ids]).fetchall()}
         require(members == set(ids), "Request not in selected release split")
         models = {}
-        for variant, url, name, path in [("strong", args.strong_url, args.strong_model, args.strong_tokenizer),
-                                         ("weak", args.weak_url, args.weak_model, args.weak_tokenizer)]:
+        model_specs = [("strong", args.strong_url, args.strong_model, args.strong_tokenizer),
+                       ("weak", args.weak_url, args.weak_model, args.weak_tokenizer)]
+        for variant, url, name, path in (model_specs[:1] if args.sft_only else model_specs):
             models[variant] = resources.enter_context(closing(AgenticClient(url, name,
                 data.tokenizer if variant == "strong" else load_tokenizer(path, local_files_only=True),
                 temperature=args.temperature, max_new_tokens=args.max_new_tokens, seed=args.seed,
                 context_limit=args.context_limit, stream=args.stream_timing,
                 log_path=args.output / (variant + "-calls.jsonl"))))
             models[variant].check_models()
-        predictor_client = models["weak"]
-        if args.predictor_model is not None:
+        predictor_client = models.get("weak")
+        if not args.sft_only and args.predictor_model is not None:
             predictor_client = resources.enter_context(closing(AgenticClient(args.predictor_url,args.predictor_model,
                 load_tokenizer(args.predictor_tokenizer,local_files_only=True), context_limit=args.context_limit,
                 max_new_tokens=1)))
             predictor_client.check_models()
-        predictor = OptionPredictor(predictor_client, context_limit=args.context_limit)
+        predictor = OptionPredictor(predictor_client, context_limit=args.context_limit) if not args.sft_only else None
         encoder = None
         if "retrieved" in args.candidate_policies:
             from agent_simulation.agents.retrieval.bge_encoder import bge_encoder
@@ -238,6 +281,8 @@ def main(argv=None):
                 jobs = generation_jobs(request, bundle=prepared.get(identity),
                     policies=args.candidate_policies, limit=args.candidate_count, encoder=encoder)
                 for stage, policy, adapted, candidate in jobs:
+                    if args.sft_only and args.split == "train" and not args.evaluation_only and stage == "query":
+                        continue  # The original Query is exported without teacher generation.
                     scene_identity = candidate.get("scene_id", identity) if candidate else identity
                     arms = [(mode, style) for mode in args.modes
                             for style in (styles if stage == "response" else ["direct"])]
@@ -267,7 +312,7 @@ def main(argv=None):
                                         "response_style": style, "evaluation_protocol": "independent_behavior_prediction",
                                         "dataset": "KuaiSearch/" + (candidate["domain"] if candidate else "Query"),
                                         "source_split": args.split, "trajectory": trajectory, "prob": None}
-                                    if stage == "response" and trajectory["status"] == "ok":
+                                    if predictor is not None and stage == "response" and trajectory["status"] == "ok":
                                         try:
                                             row["raw_item_probabilities"] = await asyncio.to_thread(predictor.score, binding, trajectory)
                                         except ContextCapacityError as error:
@@ -306,7 +351,12 @@ def main(argv=None):
                                         row[name+"_score"] = scorer.score(stage, row[name+"_action"], target)["score"]
                             output.write(encoded(row) + "\n"); output.flush()
                             records.append(row)
-        exported = {} if args.evaluation_only else export_training(records,args.output,max_pairs=args.max_pairs,filter_column=args.filter_column,
+                if not args.evaluation_only:
+                    observed.extend(observed_action_rows(request, identity, args.split, manifest["dataset_manifest_sha256"]))
+        if not args.evaluation_only:
+            (args.output / "observed-actions.jsonl").write_text("".join(encoded(row) + "\n" for row in observed))
+        exported = {} if args.evaluation_only else export_training(records,args.output,
+            observed_actions=observed, sft_only=args.sft_only, max_pairs=args.max_pairs,filter_column=args.filter_column,
             sampling_column=args.sampling_column,ascending=args.ascending,
             query_min=args.query_min,response_min=args.response_min,click_min=args.click_min,purchase_min=args.purchase_min,
             pair_protocol=args.pair_protocol,logloss_min_gap=args.logloss_min_gap,action_min_gap=args.action_min_gap)

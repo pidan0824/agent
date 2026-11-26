@@ -2,6 +2,8 @@
 
 from statistics import median
 import math
+import hashlib
+import json
 
 from agent_simulation.data.common import require
 
@@ -44,3 +46,11 @@ def seller_behavior_features(records, *, seller_id, cutoff, item_ids=None):
                 "Traffic and price associations do not identify demand elasticity or causal effects.",
                 "Raw currency units, costs, margins and unobserved competitor performance are unknown.",
                 "Stable prices are descriptive evidence, not proof of EDLP or any particular motive."]}
+
+
+def with_evidence_id(value):
+    """Name a code-owned observation block without copying its contents."""
+    value = dict(value)
+    value.pop("evidence_id", None)
+    identity = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    return {**value, "evidence_id": "S" + hashlib.sha256(identity.encode()).hexdigest()[:12]}

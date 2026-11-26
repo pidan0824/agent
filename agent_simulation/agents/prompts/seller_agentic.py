@@ -23,4 +23,7 @@ def agentic_seller_instructions(*, theory=True):
     return (body + "\n" + FACT_RULES + "\n" + read_reference("evidence") + "\n"
             + (read_reference("pricing-hypotheses") if theory else
                "Theory hypotheses are disabled; justify the prediction directly from available evidence.")
-            + "\n" + TEACHER_OUTPUT_NOTE)
+            + "\n" + TEACHER_OUTPUT_NOTE
+            + "\nIn each rationale.evidence entry cite at least one supplied evidence_id in square brackets, "
+              "for example [S0123456789ab]. Cite only input or actual tool observations, not your own hypotheses. "
+              "A citation identifies an available source, not proof of the inference.")

@@ -379,10 +379,68 @@ def validate_filter_options(*, query_min=None, response_min=None, click_min=None
             "Pair gaps must be positive and finite")
 
 
+
+def combine_observed_sft(selected, records, observed):
+    """Keep exact, supported rationale transcripts as auxiliaries to real actions."""
+    from agent_simulation.agents.schemas import strict_json, validate_arguments
+    from agent_simulation.agents.decisions import action_output
+    validate_request_splits([*records, *observed])
+    result, identities = [], set()
+    observed_keys = {}
+    for row in observed:
+        require(row["source_split"] == "train" and row["role"] == "customer",
+                "Observed action pool must contain only Customer Train")
+        require(row.get("response_style") == "direct" and not row.get("tools"),
+                "Observed actions cannot contain generated rationale or tools")
+        require(all(m["role"] in ("system", "user") and not m.get("tool_calls") for m in row["messages"][:-1]),
+                "Observed action prefix must contain only frozen input")
+        final = row["messages"][-1]
+        require(final["role"] == "assistant" and not final.get("tool_calls")
+                and strict_json(final["content"]) == row["target"], "Observed action/target mismatch")
+        # Validate IDs against the actual visible fact table, not an attached label list.
+        contexts = []
+        for message in row["messages"][:-1]:
+            if message["role"] == "user":
+                try:
+                    contexts.append(json.loads(message["content"]))
+                except (ValueError, TypeError):
+                    pass
+        context = next((c for c in contexts if isinstance(c, dict) and "facts" in c), None)
+        require(context is not None, "Observed action lacks frozen facts")
+        require(context.get("evidence_actor_id") == row["actor_id"], "Observed action actor mismatch")
+        ids = [p["item_id"] for p in context.get("candidate_context", [])]
+        schema = action_output(row["stage"], displayed_ids=ids if row["stage"] == "response" else None)["final_schemas"][0]
+        validate_arguments(row["target"], schema)
+        key = (row.get("dataset_manifest_sha256"), row["source_request_id"], row["stage"])
+        require(key not in observed_keys, "Duplicate observed request/stage")
+        observed_keys[key] = row
+        require(row["trajectory_id"] not in identities, "Duplicate observed trajectory ID")
+        identities.add(row["trajectory_id"])
+        result.append(deepcopy(row))
+    by_id = {r["trajectory"]["trajectory_id"]: r for r in records}
+    for row in selected:
+        source = by_id[row["trajectory_id"]]
+        t = source["trajectory"]
+        key = (t.get("dataset_manifest_sha256"), t.get("source_request_id"), t["stage"])
+        require(key in observed_keys, "Rationale has no matching observed request/stage")
+        require(t["actor_id"] == observed_keys[key]["actor_id"], "Rationale actor differs from observed request")
+        if t["stage"] == "response":
+            require(all(set(t["target"][field]) <= set(observed_keys[key]["target"][field])
+                        for field in ("clicked_item_ids", "purchased_item_ids")),
+                    "Rationale targets contradict observed actions")
+        if (t["stage"] != "response" or t.get("response_style") != "ekb"
+                or not assess_record(source)["metrics"]["exact_match"]):
+            continue
+        require(row["trajectory_id"] not in identities, "Observed/generated trajectory ID collision")
+        identities.add(row["trajectory_id"])
+        result.append(row)
+    return result
+
+
 def export_training(records, output, *, max_pairs=10000, filter_column="diff_model_uncertainty",
                     sampling_column="entropy", ascending=False, query_min=None, response_min=None,
                     click_min=None, purchase_min=None, pair_protocol="logloss",
-                    logloss_min_gap=.05, action_min_gap=.05):
+                    logloss_min_gap=.05, action_min_gap=.05, observed_actions=None, sft_only=False):
     """Offline replay with row-level gates, scene-level pair reasons and coverage."""
     from collections import Counter, defaultdict
     from pathlib import Path
@@ -425,7 +483,7 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
             "probability_error": row.get("probability_error")})
         if row["stage"] == "query":
             # Both row and trajectory split guard must hold.
-            if row["source_split"] == t["source_split"] == "train":
+            if not sft_only and row["source_split"] == t["source_split"] == "train":
                 groups[(row["dataset"], row["cid"])].append(t)
         else:
             response.append(row)
@@ -435,15 +493,25 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
         query_pairs.extend(pairs)
         pair_decisions.append({"stage": "query", "dataset": dataset, "cid": cid, "reason": reason})
     response_decisions = []
-    response_sft, response_pairs, metrics = select_preferences(response, max_pairs=max_pairs,
-        filter_column=filter_column, sampling_column=sampling_column, ascending=ascending,
-        pair_protocol=pair_protocol, logloss_min_gap=logloss_min_gap,
-        action_min_gap=action_min_gap, diagnostics=response_decisions)
+    if sft_only:
+        response_sft, response_pairs, metrics = select_sft(response), [], []
+    else:
+        response_sft, response_pairs, metrics = select_preferences(response, max_pairs=max_pairs,
+            filter_column=filter_column, sampling_column=sampling_column, ascending=ascending,
+            pair_protocol=pair_protocol, logloss_min_gap=logloss_min_gap,
+            action_min_gap=action_min_gap, diagnostics=response_decisions)
     pair_decisions.extend({"stage": "response", **item} for item in response_decisions)
     sft = select_sft([r for r in records if r["stage"] == "query"]) + response_sft
     pairs = list({digest([r["initial_state_id"], r["actor_id"], r["stage"], r["prompt"],
                           r["tools"], r["chosen"], r["rejected"]]): r
                   for r in query_pairs + response_pairs}.values())
+    if observed_actions is not None:
+        old_ids = {r["trajectory_id"] for r in sft}
+        sft = combine_observed_sft(sft, records, observed_actions)
+        removed = old_ids - {r["trajectory_id"] for r in sft}
+        for decision in decisions:
+            if decision["trajectory_id"] in removed:
+                decision["sft_exclusion_reasons"].append("observed_action_replaces_direct_or_inexact_teacher")
     sft_ids = Counter(r["trajectory_id"] for r in sft)
     strata = {}
     for decision in decisions:
@@ -479,12 +547,15 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
         "query_pairs": sum(r["stage"] == "query" for r in pairs),
         "response_pairs": sum(r["stage"] == "response" for r in pairs),
         "sft_total": len(sft), "pairs_total": len(pairs),
+        "observed_action_rows": len(observed_actions or []), "sft_only": sft_only,
         "sft_exclusion_reasons": dict(Counter(reason for d in decisions for reason in d["sft_exclusion_reasons"])),
         "response_probability_missing": sum(r.get("prob") is None for r in response),
         "pair_reasons": dict(Counter(d["stage"] + "/" + d["reason"] for d in pair_decisions)),
         "strata": list(strata.values()),
         "counting_note": "Row exclusion reasons can overlap; pair reasons count scenarios, not trajectories.",
-        "sft_protocol": "Strong original transcripts passing separate action and evidence gates; independent of DPO",
+        "sft_protocol": ("Observed full-exposure actions plus exact, evidence-checked teacher rationales"
+                         if observed_actions is not None else
+                         "Strong original transcripts passing separate action and evidence gates; independent of DPO"),
         "response_dpo_protocol": pair_protocol,
         "thresholds": {"query_min": query_min, "response_min": response_min,
             "click_min": click_min, "purchase_min": purchase_min,
@@ -509,6 +580,8 @@ def main(argv=None):
     p = argparse.ArgumentParser(description="Filter saved Customer trajectories; no model inference")
     p.add_argument("--input", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--observed-actions", type=Path, help="Frozen original action pool; defaults to input sibling when present")
+    p.add_argument("--sft-only", action="store_true")
     p.add_argument("--query-min", type=float)
     p.add_argument("--response-min", type=float)
     p.add_argument("--max-pairs", type=int, default=10000)
@@ -522,14 +595,21 @@ def main(argv=None):
         logloss_min_gap=args.logloss_min_gap, action_min_gap=args.action_min_gap)
     require(not args.output.exists(), "Use a new filtering output directory")
     records = [json.loads(s) for s in args.input.read_text().splitlines() if s.strip()]
+    observed_path = args.observed_actions or args.input.with_name("observed-actions.jsonl")
+    require(args.observed_actions is None or observed_path.is_file(), "Missing observed action pool")
+    observed = ([json.loads(s) for s in observed_path.read_text().splitlines() if s.strip()]
+                if observed_path.is_file() else None)
     args.output.mkdir(parents=True)
-    report = export_training(records, args.output, max_pairs=args.max_pairs, filter_column=args.filter_column,
+    if observed is not None:
+        (args.output / "observed-actions.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in observed))
+    report = export_training(records, args.output, observed_actions=observed, sft_only=args.sft_only, max_pairs=args.max_pairs, filter_column=args.filter_column,
         sampling_column=args.sampling_column, ascending=args.ascending,
         query_min=args.query_min, response_min=args.response_min,
         click_min=args.click_min, purchase_min=args.purchase_min,
         pair_protocol=args.pair_protocol, logloss_min_gap=args.logloss_min_gap, action_min_gap=args.action_min_gap)
     (args.output / "manifest.json").write_text(json.dumps({"schema": "customer-filter-export-v2",
         "input": str(args.input.resolve()), "input_sha256": sha256(args.input),
+        "observed_actions_sha256": sha256(observed_path) if observed is not None else None,
         "filter_column": args.filter_column, "sampling_column": args.sampling_column,
         "ascending": args.ascending, "pair_protocol": args.pair_protocol,
         "thresholds": report["thresholds"]}, indent=2) + "\n")

@@ -29,16 +29,19 @@ def collate_trajectories(rows, pad_token_id, device):
     length = max(len(row.input_ids) for row in rows)
     ids = torch.full((len(rows), length), pad_token_id, dtype=torch.long, device=device)
     attention = torch.zeros_like(ids)
+    components = torch.zeros_like(ids)
     labels = torch.full_like(ids, IGNORE_INDEX)
     for index, row in enumerate(rows):
         size = len(row.input_ids)
         ids[index, :size] = torch.tensor(row.input_ids, device=device)
         attention[index, :size] = 1
         labels[index, :size] = torch.tensor(row.labels, device=device)
-    return {'input_ids': ids, 'attention_mask': attention, 'labels': labels}
+        components[index, :size] = torch.tensor(row.components if row.components is not None else
+            [1 if token != IGNORE_INDEX else 0 for token in row.labels], device=device)
+    return {'input_ids': ids, 'attention_mask': attention, 'labels': labels, 'components': components}
 
 
-def trajectory_log_probs(model, batch):
+def trajectory_token_losses(model, batch):
     """Sum log p of a decision's assistant tokens under its actual observations."""
     labels = batch['labels']
     positions = labels[:, 1:].ne(IGNORE_INDEX).any(dim=0).nonzero().flatten()
@@ -51,7 +54,32 @@ def trajectory_log_probs(model, batch):
     losses = F.cross_entropy(outputs.logits.float().reshape(-1, outputs.logits.shape[-1]),
                              targets.reshape(-1), ignore_index=IGNORE_INDEX,
                              reduction='none').reshape_as(targets)
-    return -losses.sum(-1), counts
+    return losses, targets, batch["components"][:, positions + 1]
+
+
+def trajectory_log_probs(model, batch):
+    losses, targets, _ = trajectory_token_losses(model, batch)
+    return -losses.sum(-1), targets.ne(IGNORE_INDEX).sum(-1)
+
+
+def component_sft_losses(model, trajectories, pad_token_id, device):
+    """One forward per decision depth, with separately normalized components."""
+    sums, counts = [[] for _ in trajectories], [[] for _ in trajectories]
+    for depth in range(max(len(t.turns) for t in trajectories)):
+        indices = [i for i, t in enumerate(trajectories) if len(t.turns) > depth]
+        batch = collate_trajectories([trajectories[i].turns[depth] for i in indices], pad_token_id, device)
+        losses, targets, components = trajectory_token_losses(model, batch)
+        masks = torch.stack([(components == c) & targets.ne(IGNORE_INDEX) for c in range(1, 5)], -1)
+        totals = (losses.unsqueeze(-1) * masks).sum(1)
+        sizes = masks.sum(1)
+        for position, index in enumerate(indices):
+            sums[index].append(totals[position])
+            counts[index].append(sizes[position])
+    totals = torch.stack([torch.stack(v).sum(0) for v in sums])
+    sizes = torch.stack([torch.stack(v).sum(0) for v in counts])
+    require(bool(torch.all(sizes[:, 0] > 0)), "SFT requires final action supervision")
+    return totals / sizes.clamp_min(1), sizes
+
 
 
 def complete_trajectory_log_probs(model, trajectories, pad_token_id, device):
@@ -118,12 +146,21 @@ def reference_scores(model, records, pad_token_id, device, *, batch_size=1):
     return scores
 
 
-def training_batch_loss(model, records, pad_token_id, device, mode, *, reference=None, beta=0.1):
+def training_batch_loss(model, records, pad_token_id, device, mode, *, reference=None, beta=0.1,
+                        rationale_weight=1.0, tool_weight=1.0, format_weight=0.25):
     if mode == 'sft':
-        values, counts = complete_trajectory_log_probs(
+        values, counts = component_sft_losses(
             model, [row['encoded']['trajectory'] for row in records], pad_token_id, device)
-        loss = -(values / counts).mean()
-        return loss, {'assistant_nll': float(loss.detach())}
+        coefficients = [1.0, rationale_weight, tool_weight, format_weight]
+        require(all(math.isfinite(w) and w >= 0 for w in coefficients), "Invalid SFT component weight")
+        weights = values.new_tensor([row.get("weight", 1.0) for row in records])
+        require(bool(torch.all(torch.isfinite(weights) & (weights > 0))), "Invalid request weight")
+        loss = ((values * values.new_tensor(coefficients)).sum(-1) * weights).mean()
+        details = {name + "_nll": float((values[:, i] * weights).mean().detach())
+                   for i, name in enumerate(("action", "rationale", "tool", "format"))}
+        details.update({name + "_tokens": int(counts[:, i].sum())
+                        for i, name in enumerate(("action", "rationale", "tool", "format"))})
+        return loss, details
     require(reference is not None and len(reference) == len(records), 'Missing fixed DPO reference')
     values = {}
     for branch in ('chosen', 'rejected'):
@@ -132,7 +169,8 @@ def training_batch_loss(model, records, pad_token_id, device, mode, *, reference
     refs = {branch: torch.tensor([row[branch] for row in reference], device=device,
                                 dtype=values[branch].dtype) for branch in ('chosen', 'rejected')}
     losses, margins = dpo_loss(values['chosen'], values['rejected'], refs['chosen'], refs['rejected'], beta)
-    return losses.mean(), {'dpo_margin': float(margins.detach().mean()),
+    weights = losses.new_tensor([row.get('weight', 1.0) for row in records])
+    return (losses * weights).mean(), {'dpo_margin': float(margins.detach().mean()),
                            'preference_accuracy': float((margins.detach() > 0).float().mean())}
 
 
@@ -183,6 +221,8 @@ def train(args):
     require(args.max_steps is None or args.max_steps > 0, 'max-steps must be positive')
     require(math.isfinite(args.learning_rate) and args.learning_rate > 0, 'Invalid learning rate')
     require(math.isfinite(args.beta) and args.beta > 0, 'Invalid DPO beta')
+    require(all(math.isfinite(v) and v >= 0 for v in (args.rationale_weight, args.tool_weight, args.format_weight)),
+            'Invalid SFT component weight')
     from peft import LoraConfig, PeftModel, get_peft_model
     from transformers import set_seed
     from agent_simulation.training.run import load_base_model
@@ -207,6 +247,8 @@ def train(args):
                 'mask': 'generated assistant content/tool calls/end tokens only; observations excluded',
                 'dpo_logprob': 'sum over all assistant tokens of each complete actual branch',
                 'turn_encoding': 'official template per decision prefix; earlier assistant turns context-only',
+                'sft_loss': 'separately normalized action/rationale/tool/format; request-stage balanced',
+                'request_weighting': 'equal request-stage mass, then equal scene mass, then variant mass; global mean one',
                 'source_split': 'train', 'restart_policy': 'new output required; no optimizer resume'}
     if args.init_adapter:
         from agent_simulation.inference.local.checkpoints import adapter_training_identity
@@ -281,12 +323,13 @@ def train(args):
                         loss, details = training_batch_loss(model, [records[i] for i in indices],
                             tokenizer.pad_token_id, device, args.mode,
                             reference=[frozen[i] for i in indices] if frozen is not None else None,
-                            beta=args.beta)
+                            beta=args.beta, rationale_weight=args.rationale_weight,
+                            tool_weight=args.tool_weight, format_weight=args.format_weight)
                         require(bool(torch.isfinite(loss)), 'Non-finite trajectory loss')
                         fraction = len(indices) / len(selected)
                         (loss * fraction).backward()
                         for key, value in {'loss': float(loss.detach()), **details}.items():
-                            aggregate[key] = aggregate.get(key, 0.0) + fraction * value
+                            aggregate[key] = aggregate.get(key, 0.0) + (value if key.endswith("_tokens") else fraction * value)
                     torch.nn.utils.clip_grad_norm_(trainable, 1.0, error_if_nonfinite=True)
                     optimizer.step()
                     scheduler.step()
@@ -336,6 +379,9 @@ def parser():
     parser.add_argument('--accumulation', type=int, default=4)
     parser.add_argument('--learning-rate', type=float, default=1e-5)
     parser.add_argument('--beta', type=float, default=0.1)
+    parser.add_argument('--rationale-weight', type=float, default=1.0)
+    parser.add_argument('--tool-weight', type=float, default=1.0)
+    parser.add_argument('--format-weight', type=float, default=0.25)
     parser.add_argument('--rank', type=int, default=64)
     parser.add_argument('--max-length', type=int, default=32768)
     parser.add_argument('--limit', type=int, default=0, help='Optional input-row cap for smoke runs')

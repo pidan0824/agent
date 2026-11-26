@@ -20,7 +20,7 @@ from agent_simulation.agents.agentic import (
     execute_seller_auxiliary, teacher_output, validate_teacher_final,
 )
 from agent_simulation.agents.context.market import context_view, SELLER_MARKET_NOTE
-from agent_simulation.agents.context.seller_features import seller_behavior_features
+from agent_simulation.agents.context.seller_features import seller_behavior_features, with_evidence_id
 from agent_simulation.agents.decisions import action_output
 from agent_simulation.agents.prompts.customer_agentic import agentic_customer_instructions
 from agent_simulation.agents.prompts.seller_agentic import agentic_seller_instructions
@@ -75,11 +75,11 @@ class FrozenSellerSampleTools:
                 "item_id", "item_title", "brand_name", "category_level3_name",
                 "last_observed_price_raw", "last_observed_time_index", "last_valid_reference", "price_status",
             ) if key in product})
-        return {"profile": {key: value for key, value in self.context["profile"].items() if key != "seller_id"},
+        return with_evidence_id({"profile": {key: value for key, value in self.context["profile"].items() if key != "seller_id"},
                 "history_cutoff_exclusive": self.cutoff, "owned_products": products,
                 "requested_price_item_ids": self.context["requested_price_item_ids"],
                 "behavior_features": self.features,
-                "memory_status": "No generated memories in the observed-data snapshot."}
+                "memory_status": "No generated memories in the observed-data snapshot."})
 
     def guard(self):
         require(digest(self.context) == self.fingerprint, "Frozen Seller evaluation snapshot changed")
@@ -94,14 +94,14 @@ class FrozenSellerSampleTools:
             require(not {"before_simulation_step", "start_simulation_step"}.intersection(args),
                     "Observed-data evaluation has no simulation clock")
         if name == "query_business":
-            return self.data.business(self.actor_id, **args, ranking_connection=self.catalog.connection)
+            return with_evidence_id(self.data.business(self.actor_id, **args, ranking_connection=self.catalog.connection))
         if name == "query_public_products":
-            return self.data.public(self.actor_id, self.owned, **args)
+            return with_evidence_id(self.data.public(self.actor_id, self.owned, **args))
         if name == "discover_public_products":
-            return self.data.discover(self.actor_id, self.owned, **args)
+            return with_evidence_id(self.data.discover(self.actor_id, self.owned, **args))
         if name == "query_market_position":
             require(args["item_id"] in self.owned, "Market query must refer to an owned product")
-            return {**context_view(self.data.market_position(self.actor_id, **args)), "semantics": SELLER_MARKET_NOTE}
+            return with_evidence_id({**context_view(self.data.market_position(self.actor_id, **args)), "semantics": SELLER_MARKET_NOTE})
         return execute_seller_auxiliary(name, args, theory=self.theory)
 
 
@@ -162,6 +162,9 @@ async def generate_trajectory(binding, model, *, role, actor_id, stage, record_i
               "action_mode": binding.context.get("response_action_mode", "multi_item") if stage == "response" else stage,
               "status": "running", "trace": trace}
 
+    if role == "seller":
+        record["previous_prices"] = {str(p["item_id"]): p["last_valid_price_raw"]
+                                      for p in binding.features["products"]}
     async def complete(conversation, tools):
         return await model.acomplete({"messages": conversation, "tools": tools,
                                       "final_schema": final_schema if role == "customer" else None},
@@ -191,6 +194,9 @@ async def generate_trajectory(binding, model, *, role, actor_id, stage, record_i
     if role == "customer":
         from agent_simulation.evaluation.customer_evidence import check_evidence
         record["evidence_quality"] = check_evidence(record)
+    if role == "seller":
+        from agent_simulation.evaluation.seller_quality import check_seller_evidence
+        record["evidence_quality"] = check_seller_evidence(record)
     return record
 
 
@@ -237,7 +243,7 @@ class OutcomeScorer:
         return {"score": -relative_error, "relative_price_error": relative_error}
 
 
-def score_group(trajectories, target, scorer, *, query_min=0.7, response_min=0.8, seller_max_error=0.05, click_min=None, purchase_min=None):
+def score_group(trajectories, target, scorer, *, query_min=0.7, response_min=0.8, seller_max_error=0.05, click_min=None, purchase_min=None, seller_change_tolerance=0.0):
     """The complete group's generation has ended before the outcome is attached."""
     for trajectory in trajectories:
         trajectory["target"] = deepcopy(target)
@@ -258,6 +264,15 @@ def score_group(trajectories, target, scorer, *, query_min=0.7, response_min=0.8
             trajectory["accepted"] = quality["accepted"]
             trajectory["quality_thresholds"] = quality["thresholds"]
             trajectory["quality_reasons"] = quality["reasons"]
+        elif trajectory["stage"] == "seller":
+            from agent_simulation.evaluation.seller_quality import seller_action_quality
+            quality = seller_action_quality(trajectory["final_action"], target,
+                trajectory.get("previous_prices", {}), tolerance=seller_change_tolerance)
+            trajectory["accepted"] = trajectory["accepted"] and quality["accepted"]
+            trajectory["quality_reasons"] = quality["reasons"]
+            trajectory["outcome_metrics"]["directions"] = quality["directions"]
+            trajectory["quality_thresholds"] = {"seller_max_error": seller_max_error,
+                                                "seller_change_tolerance": seller_change_tolerance}
         elif trajectory["stage"] == "query":
             trajectory["quality_thresholds"] = {"query_min": query_min}
 
@@ -281,6 +296,9 @@ def training_rows(trajectories, *, min_gap=0.05):
     from agent_simulation.evaluation.customer_evidence import check_evidence
     accepted = [trajectory for trajectory in trajectories if trajectory["status"] == "ok" and trajectory["accepted"]
                 and (trajectory["role"] != "customer" or check_evidence(trajectory)["accepted"])]
+    if first["role"] == "seller":
+        from agent_simulation.evaluation.seller_quality import check_seller_evidence
+        accepted = [t for t in accepted if check_seller_evidence(t)["accepted"]]
     unique = {}
     for trajectory in accepted:
         key = digest([trajectory["messages"], trajectory["tools"]])
@@ -349,6 +367,7 @@ def parser():
     p.add_argument("--query-min", type=float, default=0.7)
     p.add_argument("--response-min", type=float, default=0.8)
     p.add_argument("--seller-max-error", type=float, default=0.05)
+    p.add_argument("--seller-change-tolerance", type=float, default=0.0, help="Relative change deadband; zero means exact observed changes")
     p.add_argument("--preference-min-gap", type=float, default=0.05)
     return p
 
@@ -358,6 +377,7 @@ def main(argv=None):
     require(args.count > 0 and args.samples_per_decision > 0, "Positive sample counts required")
     require(args.samples_per_decision == 1 or args.temperature > 0, "Multiple trajectories require positive temperature")
     require(all(math.isfinite(value) and 0 <= value <= 1 for value in (args.query_min, args.response_min)), "Invalid acceptance threshold")
+    require(math.isfinite(args.seller_change_tolerance) and args.seller_change_tolerance >= 0, "Invalid Seller change tolerance")
     require(math.isfinite(args.seller_max_error) and args.seller_max_error >= 0, "Invalid Seller error threshold")
     require(math.isfinite(args.preference_min_gap) and args.preference_min_gap > 0, "Positive preference score gap required")
     require(not args.output.exists(), "Use a new trajectory output directory")
@@ -377,7 +397,7 @@ def main(argv=None):
                     "catalog_manifest_sha256": catalog_identity, "options": asdict(options),
                     "model": args.model, "temperature": args.temperature, "seed": args.seed,
                     "samples_per_decision": args.samples_per_decision,
-                    "thresholds": {key: getattr(args, key) for key in ("query_min", "response_min", "seller_max_error", "preference_min_gap")},
+                    "thresholds": {key: getattr(args, key) for key in ("query_min", "response_min", "seller_max_error", "seller_change_tolerance", "preference_min_gap")},
                     "training_export": args.split == "train",
                     "target_policy": "Generate the entire decision group without the current label; attach labels and score afterward.",
                     "customer_protocol": "Query separately; Response conditional on recorded Query/display.",
@@ -414,7 +434,8 @@ def main(argv=None):
                             source_split=args.split, catalog_identity=catalog_identity, options=options, sample_index=index))
                         trajectories.append(trajectory)
                     score_group(trajectories, target, scorer, query_min=args.query_min,
-                                response_min=args.response_min, seller_max_error=args.seller_max_error)
+                                response_min=args.response_min, seller_max_error=args.seller_max_error,
+                                seller_change_tolerance=args.seller_change_tolerance)
                     sft, preferences, reason = training_rows(trajectories, min_gap=args.preference_min_gap)
                     for destination, records in ((all_output, trajectories), (sft_output, sft), (preference_output, preferences)):
                         for record in records:

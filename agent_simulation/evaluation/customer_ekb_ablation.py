@@ -120,8 +120,8 @@ def select_blind(attempts, *, first=False):
             "selection_rule": "prespecified_sample_zero" if first else "joint_action_plurality_earliest_index_tie"}
 
 
-async def generate(model, context, style, index):
-    request = generation_request(context, style)
+async def generate(model, context, style, index, *, request=None):
+    request = request if request is not None else generation_request(context, style)
     row = {"style": style, "sample_index": index, "status": "invalid"}
     try:
         reply = await model.acomplete(request, call_id=f"{fingerprint(context)}:{style}:{index}")
@@ -130,7 +130,7 @@ async def generate(model, context, style, index):
         obj = strict_json(reply["content"])
         validate_arguments(obj, request["final_schema"])
         action = obj if style == "direct" else obj["action"]
-        if context["action_mode"] == "single_item":
+        if context.get("action_mode") == "single_item":
             require(len(set(action[HEADS[0]] + action[HEADS[1]])) <= 1,
                     "Single-positive scene permits at most one distinct item")
         row.update(status="ok", action=action, rationale=None if style == "direct" else obj["rationale"])
@@ -173,6 +173,7 @@ def parser():
     p.add_argument("--scenes", type=Path, help="Optional outcome-conditioned shortlist diagnostic; default full exposure")
     p.add_argument("--request-id", type=int, action="append")
     p.add_argument("--count", type=int, default=10)
+    p.add_argument("--protocol", choices=("curation", "simplified"), default="curation")
     p.add_argument("--samples", type=int, default=10)
     p.add_argument("--concurrency", type=int, default=2)
     p.add_argument("--history-limit", type=int, default=10)
@@ -214,25 +215,30 @@ def main(argv=None):
             for scene_id, request in children:
                 scene_id = str(scene_id)
                 require(scene_id not in targets, "Duplicate scene ID")
-                context = frozen_context(request["response_input"], args.history_limit)
+                if args.protocol == "curation":
+                    from agent_simulation.evaluation.customer_curation import fixed_response_requests
+                    context, requests = fixed_response_requests(request["response_input"], history_limit=args.history_limit)
+                else:
+                    context = frozen_context(request["response_input"], args.history_limit)
+                    requests = {style: generation_request(context, style) for style in ("direct", "ekb")}
                 scenes.append({"scene_id": scene_id, "source_request_id": identity, "context": context,
-                               "context_sha256": fingerprint(context)})
+                               "requests": requests, "context_sha256": fingerprint(context)})
                 targets[scene_id] = {"target": deepcopy(request["response_target"]),
                                     "source_target": deepcopy(source["response_target"])}
         args.output.mkdir(parents=True)
-        manifest = {"schema": "customer-ekb-ablation-v1", "args": {k: str(v) if isinstance(v, Path) else v for k,v in vars(args).items()},
+        manifest = {"schema": "customer-ekb-ablation-v2", "response_protocol": args.protocol, "args": {k: str(v) if isinstance(v, Path) else v for k,v in vars(args).items()},
             "request_ids": ids, "dataset_manifest_sha256": sha256(args.dataset / "manifest.json"),
             "scenes_manifest_sha256": sha256(args.scenes / "manifest.json") if args.scenes else None,
             "source_sha256": sha256(Path(__file__)), "policy": policy,
             "protocol": "Fixed recorded Query; conditional Response only. Query evaluation remains separate.",
-            "arms": {"A": "direct sample 0", "B": "simple EKB sample 0", "C": "EKB joint-action plurality",
+            "arms": {"A": "direct sample 0", "B": "selected-protocol EKB sample 0", "C": "EKB joint-action plurality",
                      "A10": "direct joint-action plurality; same sample count as C"},
             "selection": "No labels, outcome scores, predictor loss or semantic verdicts enter selection.",
             "limitations": ["Shortlists, when supplied, are outcome-conditioned diagnostic scenes.",
                 "Existing checkpoints may have used this test split for selection; not necessarily untouched.",
                 "Same sample count and max tokens are not equal realized generation cost.",
                 "Vote frequency is not a calibrated probability or evidence quality measure.",
-                "This evaluates a simplified EKB prompt, not an exact reproduction of the author's method."]}
+                "The selected protocol is recorded; neither protocol reproduces the full author experiment."]}
         (args.output / "manifest.json").write_text(dump(manifest) + "\n")
         (args.output / "frozen-inputs.jsonl").write_text("".join(dump(s) + "\n" for s in scenes))
         selections, generated = [], {}
@@ -248,7 +254,7 @@ def main(argv=None):
                             async with sem:
                                 model = copy(client)
                                 model.seed = args.seed + index
-                                row = await generate(model, scene["context"], style, index)
+                                row = await generate(model, scene["context"], style, index, request=scene["requests"][style])
                                 return {**row, "scene_id": scene["scene_id"]}
                         jobs = [(style, i) for i in range(args.samples) for style in ("direct", "ekb")]
                         # Counterbalance arm order without changing the samples or evidence.

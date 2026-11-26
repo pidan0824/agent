@@ -74,7 +74,7 @@ class SellerAgent(BaseAgent):
     def prepare_prices(self, actor, baseline):
         """Finish database reads and optional context inference before dispatching quotes."""
         if self.agentic_model is not None:
-            from agent_simulation.agents.context.seller_features import seller_behavior_features
+            from agent_simulation.agents.context.seller_features import seller_behavior_features, with_evidence_id
             owned = sorted(int(item) for item, product in baseline["products"].items()
                            if product["seller_id"] == actor)
             require(owned, "Seller is not registered")
@@ -94,6 +94,7 @@ class SellerAgent(BaseAgent):
                                                                   cutoff=self.runtime.data.cutoff)}
                 if "clock" in baseline:
                     context["decision_time"] = self.runtime.inputs.decision_time(baseline, "seller", actor)
+                context = with_evidence_id(context)
                 batches.append((context, self._agentic_messages(context)))
             return batches
         return [(context, seller_decision_messages(context))

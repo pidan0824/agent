@@ -1,12 +1,16 @@
 # Customer EKB controlled evaluation
 
-This is an evaluation-only alternative to training-data curation. It does not
+This is an evaluation-only alternative to training-data curation. The default
+`--protocol curation` shares fixed contexts, prompts, output schemas and the
+initial budget message with customer_curation. `--protocol simplified` explicitly
+replays the earlier three-field experiment. The protocol and frozen requests
+are recorded in each run; old reports are not rewritten. It does not
 export SFT/DPO rows or select using observed behavior. No generation has been run
 to validate efficacy of this new protocol.
 
 ## Protocol
 
-The Response task receives a frozen recorded Query, the latest 10 prior history
+In the simplified protocol, the Response task receives a frozen recorded Query, the latest 10 prior history
 events, and the same candidates in every arm. Query generation remains available
 through the existing independent Query workflow and is not replaced by EKB.
 Candidate serialization uses item ID, with no claim that exposure positions are
@@ -16,7 +20,7 @@ full exposures retain multiple choices.
 | Arm | Prediction |
 | --- | --- |
 | A | Prespecified direct sample 0 |
-| B | Prespecified simplified-EKB sample 0 |
+| B | Prespecified EKB sample 0 under the selected protocol |
 | C | Plurality of complete joint click/purchase actions from N EKB samples |
 | A10 | Same plurality rule from N direct samples; N defaults to 10 |
 
@@ -26,14 +30,14 @@ failure, not a successful no-click prediction. A/B never replace a failed sample
 0 with a later valid sample. The selector receives generated records only.
 Choices are saved and hashed before labels enter the evaluator.
 
-B minus A tests this simplified EKB prompt under single sampling; C minus B tests
+B minus A tests the selected EKB protocol under single sampling; C minus B tests
 EKB sampling/aggregation. C minus A10 helps separate EKB from sampling effects.
 Equal sample counts and output ceilings do not imply equal actual compute.
 Use the existing per-call streaming log for input/output tokens, TTFT, decode rate
 and total time; report costs alongside behavior metrics. First-sample subsets
 share randomness with the larger pools and are not independent experiments.
 
-The simplified EKB contains stimulus, knowledge and evaluation, followed by the
+The optional simplified EKB contains stimulus, knowledge and evaluation, followed by the
 action. It asks for relevant observed history, candidate comparison, and explicit
 uncertainty. It neither requires fact IDs nor forces factors, personality or
 internal motives. It is a task adaptation, not the author's original template.
@@ -95,4 +99,4 @@ per-request effects. Unchanged actions do not prove explanations were ignored;
 changed actions do not establish that the influence was useful or factual.
 
 This replay/intervention diagnostic is specified here but is not yet implemented.
-The current entry point generates joint simplified explanations/actions only.
+The current entry point generates joint explanations/actions only.

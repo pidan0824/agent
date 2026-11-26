@@ -330,4 +330,6 @@ class FrozenSellerTools:
             result = execute_seller_auxiliary(name, arguments, theory=self.theory)
         else:
             result = dispatch(self.runtime, self.state, "seller", self.actor, self.owned, name, arguments)
+            from agent_simulation.agents.context.seller_features import with_evidence_id
+            result = with_evidence_id(result)
         return deepcopy(result)

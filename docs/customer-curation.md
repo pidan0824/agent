@@ -35,6 +35,25 @@ dataset=result/lite-5pct-quality-3k-20261112/release/sft
 本阶段不调用生成模型。只有启用 content 路径才加载编码器；单独 random 或 collaborative 不需要 BGE。内容编码默认使用 GPU（`--bge-device cuda`）；可指定 `cuda:1` 或通过 `CUDA_VISIBLE_DEVICES=1` 选择物理 GPU 1。CUDA 不可用时明确报错，不静默退回 CPU。默认三种评分均启用；`--methods` 可显式选择。可通过 `--max-input-tokens` 和 `--tokenizer` 按实际 Query／Response 初始提示、schema、工具定义作长度过滤。输出 `scenes.jsonl`、`skipped.jsonl`、`manifest.json`，保留每种跳过原因及原始标签。场景文件使用 customer-single-positive-scenes-v2：每个源请求保存一份 Query 与若干 Response 子场景。旧 v1 多正例场景须重新准备，不能静默按新协议读取。Query 输入始终不含当前真实 Query 或候选列表。
 Query 每个原请求只生成一组（每模型／每种信息模式各按 samples 采样），不随正例数重复。Response 候选不足、历史不足或超长仅跳过对应子场景；Query 独立检查输入长度并保留。count 和 request-id 均按原请求计数，manifest 分别记录原请求、Query 场景和 Response 子场景数量。
 
+## 首轮建议：保留真实动作的 SFT-only
+
+先使用完整曝光和固定信息，避免把短列表、工具选择与依据监督混在同一轮改动中：
+
+```bash
+./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
+  --dataset "$dataset" --output result/customer-sft-only-NEW \
+  --split train --candidate-policies full --count 100 \
+  --modes fixed --samples 2 --sft-only
+```
+
+`--sft-only` 只连接 strong 服务，不加载弱模型 tokenizer、不调用公共选项预测器、不构造 DPO；训练生成时不重复生成 Query，直接保存真实 Query。这个示例只描述运行方式，不表示已进行教师生成或正式训练。
+
+新的生成入口总会保存 `observed-actions.jsonl`：每个入选 Train 原请求一条真实 Query 和一条完整曝光真实 Response，与教师是否成功无关。真实动作前缀重新由固定事实和直接动作协议构造，不拼接失败解释或工具轨迹。目标商品必须属于原曝光，非法标签明确失败。Test/evaluation-only 不导出训练样本。
+
+`sft.jsonl` 合并真实动作与合格依据增强轨迹。增强轨迹仅保留两个动作集合都完全匹配标签、通过现有证据检查的 EKB；不会把部分匹配的教师动作改写成真实动作。直接动作和 Query 教师轨迹由真实动作替代，原生成记录仍留在 records.jsonl。未人工审阅的依据仍标记 not_reviewed，不称为语义已验证。funnel 单列 observed_action_rows，原有生成轨迹漏斗不把真实动作伪装成教师通过样本。
+
+离线 customer_filtering 默认读取 records.jsonl 同目录的 observed-actions.jsonl，也可用 `--observed-actions` 明确指定。侧文件缺失时仍支持旧的纯轨迹导出，并在 sft_protocol 中区别标记；新实验应保留该文件及 manifest。离线 `--sft-only` 可跳过偏好配对。
+
 ## 2. 生成 EKB 和信息获取轨迹
 
 ```bash
@@ -112,7 +131,7 @@ B：端到端仿真是另一个协议：历史 → 预测 Query → 平台搜索
 
 ### SFT
 
-独立收集 strong 原始轨迹，不依赖偏好对或概率评分成功。Query 相似度默认 ≥0.7；Response 点击与购买 F1 分别默认 ≥0.8，真实空头必须预测为空。EKB 还须通过证据检查；direct 分支没有解释证据门槛。单正例合法动作下，上述 Response 门槛实际要求匹配真实动作。完整曝光多选仍按两个集合判断。
+独立收集 strong 原始轨迹，不依赖偏好对或概率评分成功。以下阈值描述原轨迹筛选；新混合 SFT 的依据增强部分另外要求完整动作精确匹配，真实动作池独立保留。Query 相似度默认 ≥0.7；Response 点击与购买 F1 分别默认 ≥0.8，真实空头必须预测为空。EKB 还须通过证据检查；direct 分支没有解释证据门槛。单正例合法动作下，上述 Response 门槛实际要求匹配真实动作。完整曝光多选仍按两个集合判断。
 
 ### Response DPO
 
@@ -147,7 +166,7 @@ sampled_match 是显式可选作者采样对照，也执行 chosen 原始动作�
 
 例如原请求点击 A、B，购买 B，生成两条 Response：A + 干扰项（排除 B），标签为点击 A、无购买；B + 干扰项（排除 A），标签为点击 B、购买 B。Query 只保留一组。无点击且无购买的请求生成一张真实曝光负例列表，两个动作集合均为空。
 
-拆分能复用更多单交互训练场景，但这些子场景共享同一请求，不是独立用户。划分继承原请求 split；SFT 和 DPO 记录保留 source_request_id、scene_id、source_response_target，用于追溯和请求级分组。不能对拆分行重新随机划分训练／测试，也不能把子列表预测的并集直接当作原完整曝光条件下的多点击评估结果。当前不额外按原请求做损失重加权，因此多正例请求贡献的 Response 样本较多。
+拆分能复用更多单交互训练场景，但这些子场景共享同一请求，不是独立用户。划分继承原请求 split；SFT 和 DPO 记录保留 source_request_id、scene_id、source_response_target，用于追溯和请求级分组。不能对拆分行重新随机划分训练／测试，也不能把子列表预测的并集直接当作原完整曝光条件下的多点击评估结果。训练器按原请求/阶段分配总权重，再分给子场景和轨迹，避免多正例与高通过率请求仅因行数多而放大。完整曝光真实动作也保留在同一原请求下。
 
 候选仍是从真实曝光抽出的结果条件化短列表；干扰项只表示该次请求未点击且未购买的商品，不代表用户永久不喜欢。正例与无点击请求均只使用各自的真实曝光池。没有真实曝光顺序字段，不推断位置。内容编码保持 GPU 默认，原始数据及旧实验结果不改写。
 

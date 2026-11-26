@@ -9,6 +9,7 @@ import argparse
 from copy import deepcopy
 from dataclasses import dataclass
 import json
+from collections import defaultdict
 from pathlib import Path
 
 from agent_simulation.data.common import require
@@ -67,6 +68,7 @@ def normalized_messages(messages, tools):
 class AssistantTurnTokens:
     input_ids: list
     labels: list
+    components: list | None = None
 
     @property
     def assistant_tokens(self):
@@ -86,7 +88,70 @@ class TrajectoryTokens:
         return max(len(turn.input_ids) for turn in self.turns)
 
 
-def encode_trajectory(messages, tools, tokenizer, *, prompt_messages=0, max_length=32768):
+
+COMPONENTS = {"action": 1, "rationale": 2, "tool": 3, "format": 4}
+
+
+def json_field_spans(content):
+    """Locate top-level JSON values without matching key names inside prose."""
+    from agent_simulation.agents.schemas import strict_json
+    require(isinstance(strict_json(content), dict), "Final SFT action must be a JSON object")
+    decoder = json.JSONDecoder()
+    cursor = len(content) - len(content.lstrip())
+    require(content[cursor:cursor + 1] == "{", "Final SFT action must be a JSON object")
+    cursor += 1
+    spans = {}
+    while True:
+        while cursor < len(content) and content[cursor].isspace():
+            cursor += 1
+        if content[cursor:cursor + 1] == "}":
+            require(not content[cursor + 1:].strip(), "Trailing final JSON content")
+            return spans
+        key, cursor = decoder.raw_decode(content, cursor)
+        require(isinstance(key, str) and key not in spans, "Invalid or duplicate final JSON key")
+        while cursor < len(content) and content[cursor].isspace():
+            cursor += 1
+        require(content[cursor:cursor + 1] == ":", "Missing JSON value")
+        cursor += 1
+        while cursor < len(content) and content[cursor].isspace():
+            cursor += 1
+        start = cursor
+        _, cursor = decoder.raw_decode(content, cursor)
+        spans[key] = (start, cursor)
+        while cursor < len(content) and content[cursor].isspace():
+            cursor += 1
+        require(content[cursor:cursor + 1] in (",", "}"), "Invalid final JSON separator")
+        if content[cursor] == ",":
+            cursor += 1
+
+
+def final_components(messages, tools, tokenizer, through, prefix_length):
+    content = messages[-1]["content"]
+    spans = json_field_spans(content)
+    if "action" in spans:
+        require("rationale" in spans, "Action envelope lacks rationale")
+        regions = [(start, end, COMPONENTS[name]) for name, (start, end) in spans.items()
+                   if name in ("action", "rationale")]
+    else:
+        regions = [(0, len(content), COMPONENTS["action"])]
+    rendered = render_chat(messages, tools, tokenizer, tokenize=False, add_generation_prompt=False)
+    start = rendered.rfind(content)
+    require(start >= 0, "Chat template rewrote final JSON")
+    tokens = tokenizer(rendered, add_special_tokens=False, return_offsets_mapping=True)
+    require(list(tokens["input_ids"]) == through, "Offset tokenization differs from chat template")
+    result = [0] * prefix_length + [COMPONENTS["format"]] * (len(through) - prefix_length)
+    for index, (left, right) in enumerate(tokens["offset_mapping"]):
+        if index < prefix_length or right <= left:
+            continue
+        for begin, end, component in regions:
+            if left < start + end and right > start + begin:
+                result[index] = component
+                break
+    require(COMPONENTS["action"] in result, "Final SFT action has no supervised tokens")
+    return result
+
+
+def encode_trajectory(messages, tools, tokenizer, *, prompt_messages=0, max_length=32768, separate_components=False):
     """Encode each decision under the official template's actual historical prefix.
 
     Template-inserted assistant headers are conditioning, not generated actions.
@@ -113,7 +178,12 @@ def encode_trajectory(messages, tools, tokenizer, *, prompt_messages=0, max_leng
         require(len(through) <= max_length,
                 f'Trajectory exceeds context capacity ({len(through)} > {max_length}); no truncation')
         require(len(prefix) > 0, 'Assistant action needs a causal prompt')
-        turns.append(AssistantTurnTokens(through, [IGNORE_INDEX] * len(prefix) + through[len(prefix):]))
+        components = None
+        if separate_components:
+            components = ([0] * len(prefix) + [COMPONENTS["tool"]] * (len(through) - len(prefix))
+                          if index != len(messages) - 1 else
+                          final_components(messages[:index + 1], tools, tokenizer, through, len(prefix)))
+        turns.append(AssistantTurnTokens(through, [IGNORE_INDEX] * len(prefix) + through[len(prefix):], components))
     require(bool(turns), 'Trajectory has no causally supervised assistant tokens')
     return TrajectoryTokens(turns)
 
@@ -126,7 +196,7 @@ def encode_record(row, mode, tokenizer, *, max_length=32768):
         require(row.get(field) is not None, 'Missing trajectory identity: ' + field)
     tools = row.get('tools', [])
     if mode == 'sft':
-        return {'trajectory': encode_trajectory(row['messages'], tools, tokenizer, max_length=max_length)}
+        return {'trajectory': encode_trajectory(row['messages'], tools, tokenizer, max_length=max_length, separate_components=True)}
     require(mode == 'dpo', 'Unknown trajectory training mode')
     prompt = row['prompt']
     require(isinstance(prompt, list) and prompt, 'DPO needs a common initial prompt')
@@ -170,6 +240,19 @@ def read_training_records(path, mode, tokenizer, *, max_length=32768, limit=0):
     require(bool(records), 'Empty trajectory training release')
     require(len({row['metadata']['role'] for row in records}) == 1,
             'Train separate Customer and Seller adapters')
+    # Normalize globally: batch-local normalization cancels weights at batch_size=1.
+    groups = defaultdict(lambda: defaultdict(list))
+    for record in records:
+        meta = record["metadata"]
+        request = meta.get("source_request_id", meta["initial_state_id"])
+        group = (meta.get("dataset_manifest_sha256"), meta["role"], meta["actor_id"], meta["stage"], request)
+        scene = meta.get("scene_id", meta["initial_state_id"])
+        groups[group][scene].append(record)
+    scale = len(records) / len(groups)
+    for scenes in groups.values():
+        for variants in scenes.values():
+            for record in variants:
+                record["weight"] = scale / len(scenes) / len(variants)
     return records
 
 
