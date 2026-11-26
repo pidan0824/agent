@@ -164,3 +164,52 @@ Seller 首轮开发集的相对报价误差从 0.524 降至 0.495，方向 macro
 价格误差改善的配对区间仍跨零，只是初步信号。两类角色尚未共同达标，保留集继续关闭。
 下一步应使用完整 Train 内按场景选出的更丰富、可追溯上下文，优先复用真实动作监督，
 而不是给旧小集合追加长 CoT；新的输入与数据方案须重新冻结并保留同条件 zero-shot 对照。
+
+
+### 完整 Train 内重新选择拟合场景
+
+`experiments/customer_fit_selection.py` 只重建 Customer fit，不改变已有 dev/audit。
+沿用四种行为预算比例，在每种行为内部覆盖非空的历史/曝光分层，层内使用完整 Train
+选择器的输入完整性、用户覆盖和严格过去行为证据排序。默认最多 512 个原请求；
+仍保留完整原曝光，容量不足时记录跳过与配额缺口，不删商品或补造上下文。
+
+```bash
+./agent_simulation/python.sh experiments/customer_fit_selection.py \
+  --dataset result/lite-full-training-20261126/sft \
+  --population result/lite-full-training-20261126/customer-scenes-evidence-100 \
+  --cohorts result/cot-sft-pilot-20261126/cohorts \
+  --output result/customer-quality-fit-NEW --requests 512
+
+./agent_simulation/python.sh experiments/cot_sft_pilot.py export \
+  --cohorts result/customer-quality-fit-NEW \
+  --output result/customer-quality-actions-NEW
+```
+
+不传 teachers 时只导出实际 Query/Response，不需要教师服务或新 CoT。
+进程内缓存保留入选候选用户在 fit 截止前的全部 Train 历史及曝光；源 catalog 只读。
+输出冻结候选顺序、配额、数据身份、输入 token 上限、实际选中及容量跳过记录；
+显式 --resume 要求计划身份不变。
+
+本轮预先固定的下一次训练为新底座、1 epoch、默认学习率 1e-5、rank 16、
+click/purchase 权重 2/4、Response 分支辅助权重 1，使用这批真实动作，不做轮数或学习率网格。
+这是数据与训练配置的整体验证，不用于声称某个单项改动的因果收益。
+此前两条 Train 样本的 Transformers/vLLM 核对得到相同 SFT 动作，
+未发现能解释其退化的部署差异；该小检查不能代表所有后端行为完全等价。
+
+
+Response 的可选 `--response-decision-weight` 默认 0。
+启用时，原 action 损失仍包含完整点击/购买数组；额外对两个字段各取
+“首个商品 token 或空列表闭合 token”的 NLL，平均后乘该辅助权重，再应用原请求权重。
+不是只监督左括号，也不是新增二分类推理头。Query、Seller 和工具/依据文本没有该辅助项；
+DPO 拒绝非零辅助权重。此项不增加模型前向次数。
+
+旧 265 条训练记录的编码核算显示，在原 2/4 请求权重下，
+点击正/空分支单个 action token 的合计系数约为 15.21/18.96。
+这是由 token 数归一化得到的损失系数，不是实测梯度范数，不能单独证明退化原因。
+辅助项用于避免列表长度继续稀释首个行为决策；是否改善预测仍以冻结开发集为准。
+
+
+本轮实际选中 481 个请求（479 位用户），覆盖 38 个非空拟合场景，导出 962 条真实动作、
+0 条生成依据。记录了 770 次输入容量跳过和 6 个场景配额缺口，不补齐、不改变评估队列。
+有严格过去行为证据的请求占比从原 fit 的 63/128（49.2%）变为 310/481（64.4%）；
+历史事件中位数仍为 1，不能把这次选择宣传为获得了更长历史或完成了语义去噪。

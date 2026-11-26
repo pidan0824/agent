@@ -90,7 +90,8 @@ class TrajectoryTokens:
 
 
 
-COMPONENTS = {"action": 1, "rationale": 2, "tool": 3, "format": 4}
+COMPONENTS = {"action": 1, "rationale": 2, "tool": 3, "format": 4,
+              "click_decision": 5, "purchase_decision": 6}
 
 
 def json_field_spans(content):
@@ -126,7 +127,7 @@ def json_field_spans(content):
             cursor += 1
 
 
-def final_components(messages, tools, tokenizer, through, prefix_length):
+def final_components(messages, tools, tokenizer, through, prefix_length, *, response_decisions=False):
     content = messages[-1]["content"]
     spans = json_field_spans(content)
     if "action" in spans:
@@ -156,10 +157,25 @@ def final_components(messages, tools, tokenizer, through, prefix_length):
                 result[index] = component
                 break
     require(COMPONENTS["action"] in result, "Final SFT action has no supervised tokens")
+    if response_decisions and set(action_spans) == {"clicked_item_ids", "purchased_item_ids"}:
+        action = json.loads(content[action_start:action_end])
+        for field, component in (("clicked_item_ids", 5), ("purchased_item_ids", 6)):
+            require(isinstance(action[field], list), "Response decisions require arrays")
+            # The first element or closing bracket decides nonempty versus empty.
+            # The opening '[' itself can be the same token in both outcomes.
+            boundary = action_start + action_spans[field][0] + 1
+            while content[boundary].isspace():
+                boundary += 1
+            matches = [i for i, (left, right) in enumerate(tokens["offset_mapping"])
+                       if i >= prefix_length and left <= start + boundary < right]
+            require(len(matches) == 1 and result[matches[0]] == COMPONENTS["action"],
+                    "Cannot align Response decision token")
+            result[matches[0]] = component
     return result
 
 
-def encode_trajectory(messages, tools, tokenizer, *, prompt_messages=0, max_length=32768, separate_components=False):
+def encode_trajectory(messages, tools, tokenizer, *, prompt_messages=0, max_length=32768,
+                      separate_components=False, response_decisions=False):
     """Encode each decision under the official template's actual historical prefix.
 
     Template-inserted assistant headers are conditioning, not generated actions.
@@ -190,13 +206,14 @@ def encode_trajectory(messages, tools, tokenizer, *, prompt_messages=0, max_leng
         if separate_components:
             components = ([0] * len(prefix) + [COMPONENTS["tool"]] * (len(through) - len(prefix))
                           if index != len(messages) - 1 else
-                          final_components(messages[:index + 1], tools, tokenizer, through, len(prefix)))
+                          final_components(messages[:index + 1], tools, tokenizer, through, len(prefix),
+                                           response_decisions=response_decisions))
         turns.append(AssistantTurnTokens(through, [IGNORE_INDEX] * len(prefix) + through[len(prefix):], components))
     require(bool(turns), 'Trajectory has no causally supervised assistant tokens')
     return TrajectoryTokens(turns)
 
 
-def encode_record(row, mode, tokenizer, *, max_length=32768):
+def encode_record(row, mode, tokenizer, *, max_length=32768, response_decisions=False):
     require(row.get('source_split', row.get('split')) == 'train',
             'Trajectory training requires explicit official Train provenance')
     require(row.get('role') in ('customer', 'seller'), 'Unknown trajectory actor role')
@@ -204,7 +221,8 @@ def encode_record(row, mode, tokenizer, *, max_length=32768):
         require(row.get(field) is not None, 'Missing trajectory identity: ' + field)
     tools = row.get('tools', [])
     if mode == 'sft':
-        return {'trajectory': encode_trajectory(row['messages'], tools, tokenizer, max_length=max_length, separate_components=True)}
+        return {'trajectory': encode_trajectory(row['messages'], tools, tokenizer, max_length=max_length,
+                                                separate_components=True, response_decisions=response_decisions)}
     require(mode == 'dpo', 'Unknown trajectory training mode')
     prompt = row['prompt']
     require(isinstance(prompt, list) and prompt, 'DPO needs a common initial prompt')
@@ -223,13 +241,15 @@ def encode_record(row, mode, tokenizer, *, max_length=32768):
 
 
 def read_training_records(path, mode, tokenizer, *, max_length=32768, limit=0,
-                          click_weight=1.0, purchase_weight=1.0):
+                          click_weight=1.0, purchase_weight=1.0, response_decisions=False):
     """Read a bounded training release; corrupt/oversized rows fail explicitly."""
     require(type(limit) is int and limit >= 0, 'Invalid training row cap')
     require(all(math.isfinite(w) and w >= 1 for w in (click_weight,purchase_weight)),
             "Positive action weights must be finite and at least one")
     require(mode == "sft" or (click_weight == purchase_weight == 1),
             "Positive action weights are only for SFT")
+    require(type(response_decisions) is bool and (mode == "sft" or not response_decisions),
+            "Response decision supervision is SFT-only")
     records, identities, action_factors = [], set(), {}
     with Path(path).open(encoding='utf-8') as stream:
         for line_number, line in enumerate(stream, 1):
@@ -249,7 +269,8 @@ def read_training_records(path, mode, tokenizer, *, max_length=32768, limit=0,
                 factor = max(click_weight if action["clicked_item_ids"] else 1.0,
                              purchase_weight if action["purchased_item_ids"] else 1.0)
             action_factors[identity] = factor
-            encoded = encode_record(row, mode, tokenizer, max_length=max_length)
+            encoded = encode_record(row, mode, tokenizer, max_length=max_length,
+                                    response_decisions=response_decisions)
             records.append({'encoded': encoded, 'metadata': {
                 key: row[key] for key in ('role', 'actor_id', 'stage', 'initial_state_id', 'trajectory_id',
                                          'chosen_trajectory_id', 'rejected_trajectory_id', 'source_request_id',

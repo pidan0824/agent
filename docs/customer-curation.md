@@ -59,19 +59,29 @@ dataset=result/lite-full-training-NEW/sft
 筛选改变训练分布，尤其不能把分层后的购买率当成自然购买率；原请求权重不自动校正此偏移。
 完整标签池未删改，可以独立用于直接动作训练。
 
-场景构造与生成入口直接读取同一清单，避免重新随机抽样：
+训练选样与 CoT 调用使用独立预算。原始动作监督无需逐条配上生成解释；
+例如教师阶段可先限制为每层最多 2 个请求，而不是沿用上面的每层 100 个预算。
+74 个非空层对应最多 148 个教师请求；这只是预算示例，不是质量或最佳规模结论。
+场景构造与生成读取该教师清单，避免重新随机抽样：
 
 ```bash
+./agent_simulation/python.sh -m agent_simulation.datasets.customer_selection \
+  --dataset "$dataset" --output result/customer-teacher-selection-NEW --per-scene 2
+
 ./agent_simulation/python.sh -m agent_simulation.datasets.customer_scenes \
-  --dataset "$dataset" --selection result/customer-selection-NEW \
+  --dataset "$dataset" --selection result/customer-teacher-selection-NEW \
   --output result/customer-scenes-NEW
 
 # 或在完整曝光协议下生成；尚未通过实际 token 预算检查的长请求仍可能超长。
 ./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
-  --dataset "$dataset" --selection result/customer-selection-NEW \
+  --dataset "$dataset" --selection result/customer-teacher-selection-NEW \
   --candidate-policies full --output result/customer-teacher-NEW \
   --split train --modes fixed --samples 1 --sft-only
 ```
+
+上述 148 是 full/fixed/samples=1 下 Response 教师调用的请求上限；
+作者式 sampled 协议可能按真实正例展开多个子场景，应按场景 manifest 再计算调用预算。
+教师筛选失败不删除对应真实动作监督，也不默认继续重采样直到命中。
 
 `--selection` 消费整个已选清单，不再加 `--count` 截取，否则会破坏各层配额。
 准备短列表时，历史不足等原有可构造性检查仍可能跳过 Response 子场景；Query 保持独立。

@@ -62,14 +62,18 @@ def trajectory_log_probs(model, batch):
     return -losses.sum(-1), targets.ne(IGNORE_INDEX).sum(-1)
 
 
-def component_sft_losses(model, trajectories, pad_token_id, device):
+def component_sft_losses(model, trajectories, pad_token_id, device, *, response_decisions=False):
     """One forward per decision depth, with separately normalized components."""
     sums, counts = [[] for _ in trajectories], [[] for _ in trajectories]
     for depth in range(max(len(t.turns) for t in trajectories)):
         indices = [i for i, t in enumerate(trajectories) if len(t.turns) > depth]
         batch = collate_trajectories([trajectories[i].turns[depth] for i in indices], pad_token_id, device)
         losses, targets, components = trajectory_token_losses(model, batch)
-        masks = torch.stack([(components == c) & targets.ne(IGNORE_INDEX) for c in range(1, 5)], -1)
+        component_masks = [(components == 1) | (components == 5) | (components == 6)]
+        component_masks += [components == c for c in range(2, 5)]
+        if response_decisions:
+            component_masks += [components == c for c in (5, 6)]
+        masks = torch.stack([mask & targets.ne(IGNORE_INDEX) for mask in component_masks], -1)
         totals = (losses.unsqueeze(-1) * masks).sum(1)
         sizes = masks.sum(1)
         for position, index in enumerate(indices):
@@ -147,19 +151,30 @@ def reference_scores(model, records, pad_token_id, device, *, batch_size=1):
 
 
 def training_batch_loss(model, records, pad_token_id, device, mode, *, reference=None, beta=0.1,
-                        rationale_weight=1.0, tool_weight=1.0, format_weight=0.25):
+                        rationale_weight=1.0, tool_weight=1.0, format_weight=0.25,
+                        response_decision_weight=0.0):
+    require(math.isfinite(response_decision_weight) and response_decision_weight >= 0
+            and (mode == "sft" or response_decision_weight == 0), "Invalid Response decision weight")
     if mode == 'sft':
         values, counts = component_sft_losses(
-            model, [row['encoded']['trajectory'] for row in records], pad_token_id, device)
+            model, [row['encoded']['trajectory'] for row in records], pad_token_id, device,
+            response_decisions=response_decision_weight > 0)
         coefficients = [1.0, rationale_weight, tool_weight, format_weight]
+        names = ["action", "rationale", "tool", "format"]
+        if response_decision_weight:
+            coefficients += [response_decision_weight / 2] * 2
+            names += ["click_decision", "purchase_decision"]
+            for index, row in enumerate(records):
+                if row.get("metadata", {}).get("stage") == "response":
+                    require(bool(torch.all(counts[index, 4:] == 1)), "Missing Response decision supervision")
         require(all(math.isfinite(w) and w >= 0 for w in coefficients), "Invalid SFT component weight")
         weights = values.new_tensor([row.get("weight", 1.0) for row in records])
         require(bool(torch.all(torch.isfinite(weights) & (weights > 0))), "Invalid request weight")
         loss = ((values * values.new_tensor(coefficients)).sum(-1) * weights).mean()
         details = {name + "_nll": float((values[:, i] * weights).mean().detach())
-                   for i, name in enumerate(("action", "rationale", "tool", "format"))}
+                   for i, name in enumerate(names)}
         details.update({name + "_tokens": int(counts[:, i].sum())
-                        for i, name in enumerate(("action", "rationale", "tool", "format"))})
+                        for i, name in enumerate(names)})
         return loss, details
     require(reference is not None and len(reference) == len(records), 'Missing fixed DPO reference')
     values = {}
@@ -223,6 +238,9 @@ def train(args):
     require(math.isfinite(args.beta) and args.beta > 0, 'Invalid DPO beta')
     require(all(math.isfinite(v) and v >= 0 for v in (args.rationale_weight, args.tool_weight, args.format_weight)),
             'Invalid SFT component weight')
+    decision_weight = getattr(args, "response_decision_weight", 0.0)
+    require(math.isfinite(decision_weight) and decision_weight >= 0
+            and (args.mode == "sft" or decision_weight == 0), "Invalid Response decision weight")
     from peft import LoraConfig, PeftModel, get_peft_model
     from transformers import set_seed
     from agent_simulation.training.run import load_base_model
@@ -238,7 +256,11 @@ def train(args):
     records = read_training_records(args.input, args.mode, tokenizer,
                                     max_length=args.max_length, limit=args.limit,
                                     click_weight=getattr(args,"click_weight",1.0),
-                                    purchase_weight=getattr(args,"purchase_weight",1.0))
+                                    purchase_weight=getattr(args,"purchase_weight",1.0),
+                                    response_decisions=decision_weight > 0)
+    require(not decision_weight or (records[0]["metadata"]["role"] == "customer"
+            and any(r["metadata"]["stage"] == "response" for r in records)),
+            "Response decision weight requires Customer Response records")
     init_identity = adapter_digest(args.init_adapter) if args.init_adapter else None
     identity = {'format': FORMAT, 'mode': args.mode, 'role': records[0]['metadata']['role'],
                 'input_sha256': sha256(args.input), 'model': str(args.model.resolve()),
@@ -251,6 +273,7 @@ def train(args):
                 'turn_encoding': 'official template per decision prefix; earlier assistant turns context-only',
                 'sft_loss': 'separately normalized action/rationale/tool/format; Response values exclude fixed JSON keys',
                 'request_weighting': 'equal base request-stage mass, then scenes and variants; explicit positive action multipliers apply per parent request',
+                'response_decision_auxiliary': 'optional mean NLL of first element-or-close token per action array; action loss retained',
                 'source_split': 'train', 'restart_policy': 'new output required; no optimizer resume'}
     if args.init_adapter:
         from agent_simulation.inference.local.checkpoints import adapter_training_identity
@@ -326,7 +349,8 @@ def train(args):
                             tokenizer.pad_token_id, device, args.mode,
                             reference=[frozen[i] for i in indices] if frozen is not None else None,
                             beta=args.beta, rationale_weight=args.rationale_weight,
-                            tool_weight=args.tool_weight, format_weight=args.format_weight)
+                            tool_weight=args.tool_weight, format_weight=args.format_weight,
+                            response_decision_weight=decision_weight)
                         require(bool(torch.isfinite(loss)), 'Non-finite trajectory loss')
                         fraction = len(indices) / len(selected)
                         (loss * fraction).backward()
@@ -388,6 +412,8 @@ def parser():
     parser.add_argument('--rationale-weight', type=float, default=1.0)
     parser.add_argument('--tool-weight', type=float, default=1.0)
     parser.add_argument('--format-weight', type=float, default=0.25)
+    parser.add_argument('--response-decision-weight', type=float, default=0.0,
+                        help='SFT auxiliary mean of first element-or-close token NLL for click/purchase arrays')
     parser.add_argument('--rank', type=int, default=64)
     parser.add_argument('--max-length', type=int, default=32768)
     parser.add_argument('--limit', type=int, default=0, help='Optional input-row cap for smoke runs')
