@@ -33,11 +33,16 @@ def write_json(path, value):
 
 def decision_request(case, style):
     require(style in ("direct", "concise", "original"), "Unknown rationale style")
-    context, stage, role = case["context"], case["stage"], case["role"]
-    displayed = [p["item_id"] for p in context.get("candidate_context", [])]
-    schemas = action_output(stage, displayed_ids=displayed if stage == "response" else None,
-        price_ids=context.get("requested_price_item_ids") if stage == "seller" else None)["final_schemas"]
+    stage, role = case["stage"], case["role"]
+    frozen = case.get("direct_request")
     direct = stage == "query" or style == "direct"
+    if frozen and direct:
+        return deepcopy(frozen)
+    context = case.get("context", {})
+    displayed = [p["item_id"] for p in context.get("candidate_context", [])]
+    schemas = ([frozen["final_schema"]] if frozen else
+        action_output(stage, displayed_ids=displayed if stage == "response" else None,
+        price_ids=context.get("requested_price_item_ids") if stage == "seller" else None)["final_schemas"])
     if direct:
         instructions = FACT_RULES + "\nPredict the next observed action from the supplied strictly prior facts. "
         instructions += ("Generate the next Chinese query; the current query and exposure are hidden." if stage == "query" else
@@ -55,10 +60,31 @@ def decision_request(case, style):
                 concise_seller_instructions, agentic_seller_instructions)
             instructions = concise_seller_instructions() if style == "concise" else agentic_seller_instructions()
         output = teacher_output(schemas, customer_ekb=role == "customer")
+    if frozen:
+        messages = deepcopy(frozen["messages"])
+        messages[0] = {"role": "system", "content": instructions + "\nReturn only JSON. Schema: " + dump(output)}
+        return {"messages": messages, "tools": [], "final_schema": output}
     messages = [{"role": "system", "content": instructions + "\nReturn only JSON. Schema: " + dump(output)},
                 {"role": "user", "content": encode_context(context) if role == "customer" else dump(context)}]
     messages, tools, _ = initial_agentic_request(messages, [], AgenticOptions(max_model_calls=1, theory=not direct))
     return {"messages": messages, "tools": tools, "final_schema": output}
+
+
+def sampled_customer_cases(bundle, partition, stratum, dataset_identity):
+    """Reuse production observed-action prompts and freeze the same child action space."""
+    from agent_simulation.evaluation.customer_curation import observed_action_rows
+    from agent_simulation.evaluation.customer_contract import single_item_schema
+    source = bundle["request"]
+    observed = observed_action_rows(source, source["session_id"], "train", dataset_identity, bundle=bundle)
+    cases = []
+    for row in observed:
+        schema = (single_item_schema(row["candidate_item_ids"]) if row["stage"] == "response"
+                  else action_output("query")["final_schemas"][0])
+        case = {k: deepcopy(v) for k, v in row.items() if k not in ("messages", "tools", "trajectory_id")}
+        case.update(case_id=row["stage"] + ":" + row["scene_id"], partition=partition, stratum=stratum,
+                    direct_request={"messages": deepcopy(row["messages"][:-1]), "tools": [], "final_schema": schema})
+        cases.append(case)
+    return cases
 
 
 def customer_case(catalog, identity, partition, stratum, dataset_identity):
@@ -332,10 +358,11 @@ def export(args):
         if case["partition"]!="fit":continue
         req=decision_request(case,"direct")
         meta={k:case[k] for k in ("role","actor_id","stage","source_split","source_request_id","dataset_manifest_sha256")}
-        meta.update(initial_state_id=digest([case["case_id"],case["context"]]),
+        meta.update(initial_state_id=case.get("initial_state_id") or digest([case["case_id"],case.get("context",case.get("direct_request"))]),
             trajectory_id=digest([case["case_id"],"observed",case["target"]]),
-            scene_id=case["case_id"],tools=[],
+            scene_id=case.get("scene_id",case["case_id"]),tools=[],
             messages=req["messages"]+[{"role":"assistant","content":dump(case["target"])}])
+        meta.update({k:deepcopy(case[k]) for k in ("target","action_mode","evaluation_protocol","source_response_target","candidate_item_ids") if k in case})
         rows_by_role[case["role"]].append(meta)
     counts={role:{"observed":len(values),"rationale":0} for role,values in rows_by_role.items()}
     for directory in args.teachers:
@@ -362,9 +389,10 @@ def export(args):
             verdict=quality(case,row["prediction"],row["rationale"],row["messages"],row["style"],review)
             if not verdict["accepted"]:continue
             meta={k:case[k] for k in ("role","actor_id","stage","source_split","source_request_id","dataset_manifest_sha256")}
-            meta.update(initial_state_id=digest([case["case_id"],case["context"]]),
+            meta.update(initial_state_id=case.get("initial_state_id") or digest([case["case_id"],case.get("context",case.get("direct_request"))]),
                 trajectory_id=digest([case["case_id"],identity["model"],row["messages"]]),
-                scene_id=case["case_id"],tools=[],messages=row["messages"],evidence_quality=verdict,semantic_review=review)
+                scene_id=case.get("scene_id",case["case_id"]),tools=[],messages=row["messages"],evidence_quality=verdict,semantic_review=review)
+            meta.update({k:deepcopy(case[k]) for k in ("target","action_mode","evaluation_protocol","source_response_target","candidate_item_ids") if k in case})
             rows_by_role[case["role"]].append(meta)
             counts[case["role"]]["rationale"]+=1
     for role,records in rows_by_role.items():
@@ -401,17 +429,29 @@ def comparison(args):
                 "Evaluation input or schema changed")
         require(cases[key]["partition"] in ("dev","audit"),"No training-set success claims")
     rng=np.random.default_rng(20261126)
-    def paired(left,right,larger=True):
+    def paired(left,right,larger=True,groups=None):
+        detail = {}
+        if groups is not None:
+            require(len(groups)==len(left)==len(right), "Parent grouping differs from scores")
+            indices = defaultdict(list)
+            for index, group in enumerate(groups):
+                indices[group].append(index)
+            detail = {"scene_n":len(left), "aggregation":"Mean child score within parent, then equal parent weights; bootstrap parents"}
+            left = [float(np.mean([left[i] for i in members])) for members in indices.values()]
+            right = [float(np.mean([right[i] for i in members])) for members in indices.values()]
         a=np.asarray(left,float)
         b=np.asarray(right,float)
         delta=b-a if larger else a-b
         samples=[float(delta[rng.integers(0,len(delta),len(delta))].mean()) for _ in range(2000)]
-        return {"n":len(delta),"baseline_mean":float(a.mean()),"sft_mean":float(b.mean()),
+        return {**detail,"n":len(delta),"baseline_mean":float(a.mean()),"sft_mean":float(b.mean()),
                 "improvement":float(delta.mean()),"paired_bootstrap_95pct":np.quantile(samples,[.025,.975]).tolist()}
     report={"protocol":"paired fixed inputs, same base family, same output budget; conditional behavior pilot",
             "partition":manifests["sft"]["partition"],"models":{n:m["model"] for n,m in manifests.items()},
             "invalid":{n:sum(r["status"]!="ok" for r in rs.values()) for n,rs in predictions.items()}}
     response=[k for k in predictions["sft"] if cases[k]["stage"]=="response"]
+    def response_groups(keys):
+        return ([cases[k]["source_request_id"] for k in keys]
+                if all(cases[k].get("action_mode")=="single_item" for k in keys) else None)
     if response:
         values={name:{} for name in predictions}
         head_values={name:defaultdict(dict) for name in predictions}
@@ -426,19 +466,20 @@ def comparison(args):
                     heads.append(score)
                     head_values[name][field][key]=score
                 values[name][key]=sum(heads)/2
-        report["customer_response"]=paired([values["zero_shot"][k] for k in response],[values["sft"][k] for k in response])
+        report["customer_response"]=paired([values["zero_shot"][k] for k in response],[values["sft"][k] for k in response],groups=response_groups(response))
         report["customer_response"]["by_head"]={}
         for field in ("clicked_item_ids","purchased_item_ids"):
             head=paired([head_values["zero_shot"][field][k] for k in response],
-                        [head_values["sft"][field][k] for k in response])
+                        [head_values["sft"][field][k] for k in response],groups=response_groups(response))
             for label,positive in (("observed_positive",True),("observed_empty",False)):
                 keys=[k for k in response if bool(cases[k]["target"][field])==positive]
                 head[label]=paired([head_values["zero_shot"][field][k] for k in keys],
-                                   [head_values["sft"][field][k] for k in keys]) if keys else None
+                                   [head_values["sft"][field][k] for k in keys],groups=response_groups(keys)) if keys else None
             report["customer_response"]["by_head"][field]=head
         report["customer_response"]["by_stratum"]={stratum:paired(
             [values["zero_shot"][k] for k in response if cases[k]["stratum"]==stratum],
-            [values["sft"][k] for k in response if cases[k]["stratum"]==stratum])
+            [values["sft"][k] for k in response if cases[k]["stratum"]==stratum],
+            groups=response_groups([k for k in response if cases[k]["stratum"]==stratum]))
             for stratum in sorted({cases[k]["stratum"] for k in response})}
     queries=[k for k in predictions["sft"] if cases[k]["stage"]=="query"]
     if queries:

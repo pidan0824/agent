@@ -218,3 +218,32 @@ DPO 拒绝非零辅助权重。此项不增加模型前向次数。
 0 条生成依据。记录了 770 次输入容量跳过和 6 个场景配额缺口，不补齐、不改变评估队列。
 有严格过去行为证据的请求占比从原 fit 的 63/128（49.2%）变为 310/481（64.4%）；
 历史事件中位数仍为 1，不能把这次选择宣传为获得了更长历史或完成了语义去噪。
+
+### 单正例短列表小实验
+
+下一轮 Customer 使用 `experiments/customer_sampled_pilot.py`。候选仍来自完整官方 Train；
+按原时间区间计划选取 fit/dev/audit 256/64/128 个原请求，保留四种行为预算比例，
+在历史和曝光分层间轮流选取输入完整、用户较分散的请求。原曝光没有 32 件上限。
+沿用正式采样器的至少 3 次过去交互要求，因此不声称覆盖冷启动用户。
+
+每个原请求的多个正例分别拆成 2–12 件候选的子场景；其他真实正例不变成负例，
+空动作保留。random/content/collaborative 三种采样方式不变，价格统一取严格过去观察。
+所有子场景与父请求处于同一时间分区，Query 只保留一次。候选不足或超过输入容量的
+场景明确记录跳过，不因基线或 SFT 预测结果重新挑样本。
+
+`sampled_customer_cases` 直接复用正式真实动作导出的提示和动作 schema；
+短 CoT 仅替换系统解释要求，保持同一用户事实和候选。SFT 和 zero-shot 使用同一份
+冻结 direct_request。评测先对每个原请求的子场景分数取均值，再给各原请求相同权重，
+配对 bootstrap 也以原请求为单位，避免多正例请求拆分后被重复加权。
+
+```bash
+./agent_simulation/python.sh -m experiments.customer_sampled_pilot \
+  --dataset result/lite-full-training-20261126/sft \
+  --population result/lite-full-training-20261126/customer-scenes-evidence-100 \
+  --reference result/cot-sft-pilot-20261126/cohorts \
+  --output result/customer-sampled-NEW --fit-parents 256 --bge-device cpu
+```
+
+source-requests.partial.jsonl 支持相同协议的显式 --resume。进程内缓存只加速只读查询；
+统一历史价格保留其他用户的过去报价，不使用按入选用户缩窄后的价格来源。
+样本准备完成不等于训练或效果通过，实际数量以 manifest 为准；audit 在配置冻结前不调用模型。

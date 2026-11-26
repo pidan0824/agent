@@ -54,6 +54,62 @@ class PilotTests(unittest.TestCase):
         messages=req["messages"]+[{"role":"assistant","content":dump({"action":c["target"],"rationale":r})}]
         self.assertFalse(quality(c,c["target"],r,messages,"concise")["accepted"])
 
+    def test_sampled_pilot_reuses_production_inputs_without_duplicate_query_or_budget(self):
+        from experiments.cot_sft_pilot import sampled_customer_cases
+        from agent_simulation.evaluation.customer_curation import observed_action_rows
+        from agent_simulation.tests.datasets.test_customer_sampling import request as sampled_request, pool, Encoder
+        from agent_simulation.datasets.customer_candidate_sampling import SampledCandidateBuilder
+        from agent_simulation.agents.schemas import validate_arguments
+        products, interactions = pool()
+        source = sampled_request()
+        bundle = {"request": source, "query_enabled": True,
+                  "response_scenes": SampledCandidateBuilder(products, interactions, Encoder()).build_all(source)}
+        observed = observed_action_rows(source, 100, "train", "release", bundle=bundle)
+        cases = sampled_customer_cases(bundle, "fit", "fixture", "release")
+        self.assertEqual([c["stage"] for c in cases], ["query", "response", "response"])
+        for c, row in zip(cases, observed):
+            direct = decision_request(c, "direct")
+            self.assertEqual(direct["messages"], row["messages"][:-1])
+            validate_arguments(c["target"], direct["final_schema"])
+            self.assertEqual(decision_request(c, "concise")["messages"][1:], direct["messages"][1:])
+            changed = deepcopy(c)
+            changed["target"] = changed["source_response_target"] = {"SECRET": "hidden"}
+            self.assertEqual(decision_request(changed, "concise"), decision_request(c, "concise"))
+        with self.assertRaises(ValueError):
+            validate_arguments(source["response_target"], decision_request(cases[1], "direct")["final_schema"])
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "cases.jsonl").write_text("".join(dump(c)+"\n" for c in cases))
+            (root / "manifest.json").write_text(dump({"status":"complete","cases_sha256":sha256(root/"cases.jsonl")}))
+            with redirect_stdout(io.StringIO()):
+                export(Namespace(cohorts=root, teachers=[], output=root/"export"))
+            saved = [json.loads(line) for line in (root/"export/customer.jsonl").read_text().splitlines()]
+            for row, original in zip(saved, observed):
+                self.assertEqual(row["messages"][:-1], original["messages"][:-1])
+                self.assertEqual(row["target"], original["target"])
+                self.assertEqual(row["scene_id"], original["scene_id"])
+
+    def test_sampled_capacity_filter_preserves_other_children_and_query(self):
+        from unittest.mock import patch
+        from experiments.customer_sampled_pilot import filter_sampled_cases
+        from agent_simulation.tests.datasets.test_customer_sampling import request as sampled_request, pool, Encoder
+        from agent_simulation.datasets.customer_candidate_sampling import SampledCandidateBuilder
+        products, interactions = pool()
+        source = sampled_request()
+        bundle = {"request": source, "query_enabled": True,
+                  "response_scenes": SampledCandidateBuilder(products, interactions, Encoder()).build_all(source)}
+        parent = {100: {"partition":"fit", "stratum":"fixture"}}
+        with patch("experiments.customer_sampled_pilot.prompt_tokens",
+                   side_effect=[range(n) for n in (10,10,200,200,10,10)]) as tokens:
+            scenes, cases, skipped = filter_sampled_cases([bundle], parent, "release", None, 100)
+        self.assertEqual(tokens.call_count, 6)
+        self.assertEqual([c["stage"] for c in cases], ["query","response"])
+        self.assertTrue(scenes[0]["query_enabled"])
+        self.assertEqual(len(scenes[0]["response_scenes"]), 1)
+        self.assertEqual(cases[1]["target"], {"clicked_item_ids":[11],"purchased_item_ids":[11]})
+        self.assertEqual(skipped[0]["scene_id"], "100:positive:10")
+        self.assertEqual(skipped[0]["input_tokens"], {"direct":200,"concise":200})
+
     def test_observed_export_excludes_dev_and_audit(self):
         with TemporaryDirectory() as d:
             root=Path(d)
@@ -101,6 +157,41 @@ class PilotTests(unittest.TestCase):
             write_json(root/"sft/manifest.json",identity)
             with self.assertRaisesRegex(ValueError,"decoding"):
                 comparison(args)
+
+    def test_shortlist_scores_weight_parent_requests_equally(self):
+        from experiments.cot_sft_pilot import write_json
+        from agent_simulation.evaluation.trajectories import digest
+        with TemporaryDirectory() as d:
+            root=Path(d)
+            cases=[]
+            for i, parent in enumerate((11,11,12)):
+                c=case(partition="dev")
+                c.update(case_id=f"response:{i}",source_request_id=parent,action_mode="single_item",
+                         target={"clicked_item_ids":[4],"purchased_item_ids":[4]})
+                cases.append(c)
+            (root/"cases.jsonl").write_text("".join(dump(c)+"\n" for c in cases))
+            checksum=sha256(root/"cases.jsonl")
+            write_json(root/"manifest.json",dict(status="complete",cases_sha256=checksum))
+            identity=dict(style="direct",cases_sha256=checksum,ids=[c["case_id"] for c in cases],
+                base_config_sha256="same",max_new_tokens=256,temperature=0,seed=42,partition="dev",model="fixture")
+            for name in ("zero","sft"):
+                path=root/name;path.mkdir()
+                write_json(path/"manifest.json",identity)
+                rows=[]
+                for i,c in enumerate(cases):
+                    rows.append(dict(case_id=c["case_id"],status="ok",
+                        request_sha256=digest(decision_request(c,"direct")),
+                        prediction={"clicked_item_ids":[4] if name=="sft" and i<2 else [],"purchased_item_ids":[]}))
+                (path/"predictions.jsonl").write_text("".join(dump(r)+"\n" for r in rows))
+            with redirect_stdout(io.StringIO()):
+                comparison(Namespace(cohorts=root,baseline=root/"zero",sft=root/"sft",output=root/"comparison.json"))
+            result=json.loads((root/"comparison.json").read_text())["customer_response"]
+            self.assertEqual((result["n"],result["scene_n"]),(2,3))
+            self.assertEqual(result["sft_mean"],.25)
+            click=result["by_head"]["clicked_item_ids"]
+            self.assertEqual((click["n"],click["scene_n"],click["sft_mean"]),(2,3,.5))
+            positive=click["observed_positive"]
+            self.assertEqual((positive["n"],positive["scene_n"],positive["sft_mean"]),(2,3,.5))
 
     def test_export_rejects_rewritten_teacher_input(self):
         from experiments.cot_sft_pilot import write_json
