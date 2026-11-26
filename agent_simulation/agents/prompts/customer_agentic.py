@@ -45,7 +45,9 @@ def agentic_customer_instructions(*, theory=True):
     return body + "\n" + FACT_RULES + "\n" + read_skill_reference("evidence", theory=theory) + theory_text + "\n" + rationale
 
 
-def fixed_customer_instructions():
+def fixed_customer_instructions(*, concise=False):
     """Fixed-information EKB: retain upstream core once; omit tool-planning wrapper."""
-    from agent_simulation.agents.prompts.customer_ekb import ekb_instructions
+    from agent_simulation.agents.prompts.customer_ekb import ekb_instructions, concise_ekb_instructions
+    if concise:
+        return FACT_RULES + "\n" + concise_ekb_instructions()
     return FACT_RULES + "\n" + read_skill_reference("evidence") + "\n" + ekb_instructions()

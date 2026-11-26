@@ -297,3 +297,46 @@ prompt-only 对照读取上一轮实际 user 消息，保持原样上下文、�
 For label-blind A/B/C comparisons and the matching direct multi-sample control, see
 [Customer EKB controlled evaluation](customer-ekb-ablation.md). This evaluation-only
 entry point uses a simplified EKB prompt and never exports SFT/DPO data.
+
+## 轻量 SFT 与跨场景并发（2026-11-27）
+
+正式入口现支持显式 `--sft-only --cot-preset lightweight`。未指定预设时仍沿用 original 研究配置；不会把 DPO 的多采样实验静默改成单采样。
+
+| 设置 | original | lightweight |
+| --- | --- | --- |
+| 每模型每场景 samples | 10 | 1 |
+| temperature | 0.7 | 0 |
+| max-new-tokens | 2048 | 768 |
+| scene-concurrency | 1 | 4 |
+| EKB 提示 | 原始 EKB | 复用已审计的 concise EKB |
+| 模式与模型 | 原有 fixed/autonomous、强弱模型协议 | fixed、仅 strong，须显式 sft-only |
+
+上述数值可被显式参数覆盖；重复采样仍要求非零 temperature。轻量预设保留相同 EKB schema、事实上下文、证据检查和原始生成动作，不在失败后改写答案。Train Query 仍直接用原始监督，不调用 teacher。短解释不等于已通过语义审阅。
+
+`--scene-concurrency` 控制同时处理的场景分支数量，`--sample-concurrency` 控制每分支内样本并发。最多同时执行前者 × 后者个采样工作流；轻量默认每分支只有一个样本，因此最多 4 个。固定模式每工作流一次生成调用。调度按输入顺序落盘、保留独立样本 seed，惰性拉取有限任务，不为全量场景一次建立全部 asyncio tasks。错误会取消并回收待处理任务；已提交的 HTTP 请求不能保证服务端立即停止。新逻辑没有启动或扩容模型服务。
+
+仅供后续明确启动时使用，本次未执行生成：
+
+~~~bash
+./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
+  --dataset "$dataset" --scenes "$scenes" --output "$new_output" \
+  --sft-only --cot-preset lightweight --scene-concurrency 4 \
+  --teacher-budget "$teacher_budget"
+~~~
+
+`--teacher-budget` 是可选的 **Response 子场景总预算**，仅用于 lightweight / Train / sampled / fixed / EKB 的训练构造，不用于 Test 或 evaluation-only。省略它仍处理输入中的全部场景；显式设为 0 只导出原始监督，不建立 teacher 客户端。若覆盖 samples，生成次数上限相应为预算 × samples。
+
+预算分配复用既有已准备场景，按类目域与观察到的行为类型分组，在各组内依次优先：Query 与标题完整、没有缺少对应 ID 历史支持的可见属性冲突、有相同商品 ID 历史、有规范化后相同 Query 历史。其余同分使用 seed 和 scene ID 稳定打散，再轮流给各组分配预算。标签只用于行为覆盖分组，不进入质量优先级或模型输入；预算小于分组数时不能保证覆盖每一组。它是保守的输入证据启发式，不是质量分类器或 PRM，不保证 teacher 一定正确。
+
+- `teacher-scene-evidence.jsonl`：逐场景输入证据与属性冲突标记。
+- `teacher-budget.json`：考虑数量、选择数量、预算、被选 scene IDs。
+- `observed-actions.jsonl` 与 SFT 导出：输入范围内所有有效原始 Query / Response 都保留，未获 teacher 预算不等于删除行为数据。
+- 部分子场景未生成时，已有请求级指标会标记不完整；预算筛选后的生成诊断不能当作全体请求的无偏准确率。
+
+预算扫描不调用 LLM，但仍需遍历已准备场景。现有 prepared scene 加载、原始监督与导出集合仍驻留内存；本次没有重写全量数据存储，也没有用小型离线测试宣称全量内存或吞吐已验证。全集 Train 可以作为场景来源，teacher 预算与原始数据覆盖范围分别控制。
+
+### 不同 ID、相同可见属性的来源核查
+
+核对原始 `data/kuaisearch/lite/source/raw/items_lite.jsonl`：第 4,335,912 行的 34262 与第 5,593,803 行的 89935，除 item_id 外所有字段完全相同，包括酸梅条标题、品牌、同一店铺（40751）、各级类目 ID/名称。catalog 保留了这两条独立记录，并非提示压缩或标题拼接造成。同一原请求缓存（44867）中，两者 price_raw 也都是 490；这是价格观测，不能当成已知当前报价或直接推断货币单位。
+
+源商品表不提供能解释区别的图片、规格等字段。因此不能断定是不同 SKU、重复上架或其他平台内部区分，也不能将两个 ID 自动合并。新预算逻辑对标题、品牌、三级类目、价格完全一致的候选组做标记；仅同标题不算属性完全相同。有对应 ID 历史只表示额外证据可用，不证明用户会复购或一定点击。真实动作仍按原 ID 保留。

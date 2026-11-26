@@ -130,7 +130,7 @@ def trajectory_messages(binding, *, role, stage, theory):
                         else agentic_seller_instructions(theory=theory))
         if role == "customer" and theory and getattr(binding, "mode", None) == "fixed":
             from agent_simulation.agents.prompts.customer_agentic import fixed_customer_instructions
-            instructions = fixed_customer_instructions()
+            instructions = fixed_customer_instructions(concise=getattr(binding, "concise", False))
         if role == "seller":
             instructions += "\nPredict the next observed quote, rather than an unobserved profit-optimal price."
         output = teacher_output(schemas, customer_ekb=role == "customer" and theory)
