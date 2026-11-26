@@ -59,6 +59,16 @@ class SceneSelectionTests(unittest.TestCase):
         self.assertIn((6,5),selected)
         self.assertEqual(self.c.execute("SELECT max(prior_requests) FROM scene_selection").fetchone()[0],0)
 
+    def test_same_scene_prefers_prior_action_evidence_without_removing_cold_scenes(self):
+        # Equal-length, strictly prior histories; only actor 2 has recorded action evidence.
+        self.c.execute("INSERT INTO requests VALUES (100,1,1,'train',[],[]),(101,2,1,'train',[10],[])")
+        report=rank_population(self.c,self.labels,per_scene=1,seed=42)
+        chosen=self.c.execute("SELECT session_id FROM scene_selection WHERE selected AND stratum='no_action/zero_or_one/short/1-12'").fetchall()
+        self.assertEqual(chosen,[(3,)])
+        self.assertGreater(self.c.execute("SELECT count(*) FROM scene_selection WHERE selected AND history_band='cold'").fetchone()[0],0)
+        # Current actions and longer histories do not enter the within-scene quality score.
+        self.assertEqual(report["population"],7)
+
     def test_future_and_test_events_cannot_affect_selection(self):
         rank_population(self.c,self.labels,per_scene=2,seed=42)
         before = self.c.execute("SELECT * FROM scene_selection ORDER BY session_id").fetchall()

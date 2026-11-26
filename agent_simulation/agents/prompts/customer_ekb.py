@@ -41,4 +41,5 @@ unless observations justify a more specific description. An explanation is a
 tentative account, not the person's observed thoughts. Do not invent motives,
 finances, emotional states or current prices. Relevance does not imply a click,
 and a purchase need not have a recorded click. Empty actions are valid.
+This request's clicks and purchases are predictions, not already observed facts.
 """ + EVIDENCE_NOTE

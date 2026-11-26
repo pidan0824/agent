@@ -38,6 +38,9 @@ Use one short hypothesis, one or two concise evidence statements, and one short
 uncertainty statement. Cite an actual supplied evidence_id as [S...] in every
 evidence statement. Distinguish a stable quote from evidence of a price change.
 Sparse traffic or a correlation alone does not establish causal demand or elasticity.
+Exposure counts are traffic; zero clicks or purchases do not mean traffic is absent.
+One quote cannot establish price stability over time. Keep market medians and
+percentiles tied to the same reference pool and time window; do not mix them.
 Unknown costs, margins, current competitors and future outcomes must stay unknown.
 Do not restate all input records. A source citation does not prove your inference.
 """)

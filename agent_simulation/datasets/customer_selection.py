@@ -82,13 +82,13 @@ def rank_population(connection, labels, *, per_scene, seed):
         CREATE OR REPLACE TEMP TABLE selection_ranked AS
         WITH actors AS (
             SELECT *,row_number() OVER (
-                PARTITION BY stratum,actor_id ORDER BY title_coverage DESC,selection_hash,session_id
+                PARTITION BY stratum,actor_id ORDER BY title_coverage DESC,(prior_interactions>0) DESC,selection_hash,session_id
             ) AS actor_rank
             FROM selection_features WHERE exclusion_reason IS NULL
         )
         SELECT session_id,row_number() OVER (
             PARTITION BY stratum ORDER BY complete_titles DESC,actor_rank,
-            title_coverage DESC,selection_hash,session_id
+            title_coverage DESC,(prior_interactions>0) DESC,selection_hash,session_id
         ) AS scene_rank FROM actors
     """)
     connection.execute(f"""
@@ -173,7 +173,7 @@ def main(argv=None):
             labels_sha256=sha256(labels), selected_sha256=sha256(stage / "selected.parquet"),
             candidates_sha256=sha256(stage / "candidates.parquet"), seed=args.seed,
             per_scene=args.per_scene, source_sha256=sha256(Path(__file__)),
-            ranking="Complete exposure titles first, diverse users, title coverage, seeded tie break",
+            ranking="Complete exposure titles first, diverse users, title coverage, any strictly prior observed action, seeded tie break",
             scope="Input-quality scene candidates, not verified rationales or unbiased population samples",
             history="Strictly earlier Train requests only; cold/short history retained in separate strata",
             label_use="Observed behavior only stratifies Train; current targets never select visible history",
