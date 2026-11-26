@@ -9,7 +9,7 @@ Customer 作者式候选／干扰项构造、结构化 EKB 和强弱解释筛选
 ## 生成与筛选
 
 ```bash
-dataset=result/lite-5pct-quality-3k-20261112/release/sft
+dataset=result/lite-full-training-20261126/sft
 ./agent_simulation/python.sh -m agent_simulation.evaluation.trajectories \
   --dataset "$dataset" --output result/customer-trajectories \
   --role customer --split train --count 100 \
@@ -143,3 +143,24 @@ Customer 报告点击/购买 F1、分层结果和 Query 相似度；Seller 报�
 开发集诊断后，Customer 的通过检查还要求点击正例 F1 不降低、购买正例 F1 提高，
 以及存在 Query 对照时其相似度不降低；平均分提高本身不足以通过。
 这些检查在开启保留集之前确定，原始基线和第一轮结果保留。
+
+
+第二轮修正后，Customer 的开发集 Response 平均 F1 为 0.477，与 zero-shot 的 0.477 基本持平；
+点击正例 F1 为 0.026（基线 0.343），购买正例为 0.063（基线 0）。
+因此仍未通过上述检查，不能将监督实现修正写成效果已经提升。
+冷启动和有历史两组都出现点击退化；输入稀疏不是完整解释。
+
+固定的 8 条 Train 诊断中，第二轮仍未命中四条点击正例，购买正例命中一条。
+据此只追加一次固定拟合预算实验：从第二轮 adapter 起步，使用相同 265 条记录、
+学习率 5e-5、新 optimizer、再训练两轮；不增加 CoT 调用，不改变开发集或通过条件。
+这是 adapter warm-start，不是恢复 optimizer 状态的精确续训。
+该固定续训已完成：开发集 Query 相似度为 0.519（基线 0.451），
+Response 平均 F1 为 0.508（基线 0.477），但点击正例仍为 0.026、
+购买正例仍为 0.063，未通过 Customer 检查。8 条 Train 诊断仅一条点击正例有部分命中，
+四条购买正例均未命中；不再对这组小集合继续搜索轮数。
+监督缺陷确实存在，但修正和延长拟合预算尚未解决行为退化，不能声称找到了单一充分原因。
+
+Seller 首轮开发集的相对报价误差从 0.524 降至 0.495，方向 macro-F1 从 0.222 升至 0.492；
+价格误差改善的配对区间仍跨零，只是初步信号。两类角色尚未共同达标，保留集继续关闭。
+下一步应使用完整 Train 内按场景选出的更丰富、可追溯上下文，优先复用真实动作监督，
+而不是给旧小集合追加长 CoT；新的输入与数据方案须重新冻结并保留同条件 zero-shot 对照。
