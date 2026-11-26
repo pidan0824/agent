@@ -67,17 +67,86 @@ def attach_sources(context):
 
 
 FACT_LAYOUT = ["source_id", "field", "value", "extra_metadata_optional"]
+FACT_REFS_ENCODING = "derive-from-facts-v1"
+FACT_REFS_NOTE = (
+    "Fact references are indexed once in facts. For each history event or candidate, "
+    "derive its fact_refs by matching source_id or item_id and mapping field to the fact ID."
+)
+
+
+def _fact_ref_indexes(facts):
+    """Derive references without changing source metadata or action values."""
+    from agent_simulation.data.common import require
+    require(isinstance(facts, dict), "Invalid facts for derived references")
+    indexes = {"history_events": {}, "candidate_context": {}}
+    for key, fact in facts.items():
+        require(isinstance(key, str) and key and isinstance(fact, dict), "Invalid fact record")
+        kind = fact.get("kind")
+        if kind not in ("history", "product"):
+            continue
+        field = fact.get("field")
+        identity = fact.get("source_id" if kind == "history" else "item_id")
+        require(isinstance(field, str) and field and
+                (isinstance(identity, str) if kind == "history" else type(identity) is int),
+                "Invalid derived fact identity")
+        refs = indexes["history_events" if kind == "history" else "candidate_context"].setdefault(identity, {})
+        require(field not in refs, "Ambiguous derived fact reference")
+        refs[field] = key
+    return indexes
+
+
+def _fact_ref_rows(context, indexes, *, encoded):
+    """Only canonical, complete indexes can omit their repeated fact references."""
+    from agent_simulation.data.common import require
+    result = []
+    for collection, identity_key in (("history_events", "event_id"), ("candidate_context", "item_id")):
+        rows = context.get(collection)
+        require(isinstance(rows, list), "Invalid derived fact index")
+        seen = set()
+        for row in rows:
+            require(isinstance(row, dict), "Invalid derived fact index row")
+            identity = row.get(identity_key)
+            require(isinstance(identity, str) if identity_key == "event_id" else type(identity) is int,
+                    "Invalid derived fact index identity")
+            require(identity in indexes[collection] and identity not in seen, "Unknown or duplicate fact index identity")
+            refs = indexes[collection][identity]
+            require("fact_refs" not in row if encoded else row.get("fact_refs") == refs,
+                    "Conflicting derived fact references")
+            seen.add(identity)
+            result.append((row, refs))
+        require(seen == set(indexes[collection]), "Incomplete derived fact index")
+    return result
+
+
+def _compact_fact_refs(context):
+    try:
+        rows = _fact_ref_rows(context, _fact_ref_indexes(context["facts"]), encoded=False)
+    except ValueError:
+        return  # Preserve nonstandard or ambiguous indexes in the legacy format.
+    if not rows:
+        return
+    from agent_simulation.agents.prompts.context_format import compact_json, MIN_TABLE_SAVINGS
+    metadata = {"fact_refs_encoding": FACT_REFS_ENCODING, "fact_refs_note": FACT_REFS_NOTE}
+    # Each affected object keeps other fields: replacing braces with one comma
+    # gives the exact compact JSON size change, including both metadata fields.
+    removed_size = sum(len(compact_json({"fact_refs": refs})) - 1 for _, refs in rows)
+    if removed_size - (len(compact_json(metadata)) - 1) < MIN_TABLE_SAVINGS:
+        return
+    for row, _ in rows:
+        row.pop("fact_refs")
+    context.update(metadata)
 
 
 def compact_sources(context):
     """Lossless wire format: source metadata once, unchanged fact IDs and values."""
     from collections import defaultdict
     from agent_simulation.data.common import require
-    require("fact_layout" not in context and "fact_sources" not in context,
+    require(not {"fact_layout", "fact_sources", "fact_refs_encoding", "fact_refs_note"}.intersection(context),
             "Context is already encoded or uses reserved fact fields")
     result = deepcopy(context)
     if "facts" not in result:
         return result
+    _compact_fact_refs(result)
     grouped = defaultdict(list)
     for key, fact in result["facts"].items():
         grouped[fact["source_id"]].append((key, fact))
@@ -101,6 +170,11 @@ def compact_sources(context):
 def expand_sources(context):
     """Read both original transcripts and the reversible compact context format."""
     from agent_simulation.data.common import require
+    derived_refs = "fact_refs_encoding" in context or "fact_refs_note" in context
+    if derived_refs:
+        require(context.get("fact_refs_encoding") == FACT_REFS_ENCODING and
+                context.get("fact_refs_note") == FACT_REFS_NOTE and "fact_layout" in context,
+                "Invalid derived fact reference encoding")
     if "fact_layout" not in context:
         require("fact_sources" not in context, "Missing compact fact layout")
         return context
@@ -123,6 +197,11 @@ def expand_sources(context):
                 "Conflicting compact fact metadata")
         facts[key] = {**common, **extra, "source_id": source, "field": field, "value": value}
     result["facts"] = facts
+    if derived_refs:
+        for row, refs in _fact_ref_rows(result, _fact_ref_indexes(facts), encoded=True):
+            row["fact_refs"] = refs
+        result.pop("fact_refs_encoding")
+        result.pop("fact_refs_note")
     return result
 
 

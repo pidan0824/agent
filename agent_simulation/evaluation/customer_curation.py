@@ -11,6 +11,7 @@ from contextlib import ExitStack, closing
 from copy import copy, deepcopy
 import json
 from pathlib import Path
+import unicodedata
 import numpy as np
 
 from agent_simulation.agents.agentic import AgenticOptions
@@ -29,6 +30,7 @@ class CurationTools(FrozenSampleTools):
     def __init__(self, request, stage, *, mode, theory=True, history_limit=10):
         super().__init__(request, stage, theory=theory)
         require(mode in ("fixed", "autonomous"), "Unknown information mode")
+        require(type(history_limit) is int and history_limit >= 0, "Nonnegative integer history limit required")
         self.mode, self.history_limit = mode, history_limit
         if mode == "fixed":
             self.schemas = []
@@ -40,9 +42,30 @@ class CurationTools(FrozenSampleTools):
         if "candidate_protocol" in self.context:
             context["candidate_protocol"] = self.context["candidate_protocol"]
         if self.mode == "fixed":
-            context["observed_history"] = deepcopy(self.history[-self.history_limit:])
+            history = self.history[-self.history_limit:] if self.history_limit else []
             if self.stage == "response":
+                if len(self.history) > self.history_limit > 1:
+                    candidate_ids = {item["item_id"] for item in self.displayed}
+                    def query_key(value):
+                        return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
+                    query = query_key(self.context["query"])
+                    related = []
+                    for event in self.history[:-self.history_limit]:
+                        same_item = any(item.get("item_id") in candidate_ids
+                                        for field in ("clicked_items", "purchased_items")
+                                        for item in (event.get(field) or []))
+                        if same_item or (query and query_key(event.get("query", "")) == query):
+                            related.append((not same_item, -event["time_index"], event["session_id"], event))
+                    related.sort(key=lambda row: row[:3])
+                    recalled = [row[3] for row in related[:min(2, self.history_limit - 1)]]
+                    # Replace only the oldest recent events; always keep one recent event.
+                    history = sorted(recalled + history[len(recalled):],
+                                     key=lambda event: (event["time_index"], event["session_id"]))
                 context["displayed_items"] = deepcopy(self.displayed)
+                context["selected_history_events"] = len(history)
+                context["history_scope"] = (
+                    "Selected events from available history; unshown events may contain other actions.")
+            context["observed_history"] = deepcopy(history)
         from agent_simulation.evaluation.customer_evidence import attach_sources
         return attach_sources(context)
 

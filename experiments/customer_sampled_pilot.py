@@ -78,6 +78,9 @@ def prepare(args):
             source_sha256=sha256(Path(__file__)), population_sha256=sha256(candidates),
             sampler_source_sha256=sha256(Path("agent_simulation/datasets/customer_candidate_sampling.py")),
             scenes_source_sha256=sha256(Path("agent_simulation/datasets/customer_scenes.py")),
+            context_source_sha256={name: sha256(Path(name)) for name in (
+                "agent_simulation/evaluation/customer_curation.py",
+                "agent_simulation/evaluation/customer_evidence.py")},
             bge_device=args.bge_device,
             time_intervals_inclusive=intervals, requested_parent_counts=counts, seed=args.seed,
             input_limit=args.input_limit, methods=["random","content","collaborative"],

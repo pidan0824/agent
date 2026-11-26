@@ -71,6 +71,101 @@ class CurationTests(unittest.TestCase):
         self.assertNotIn("displayed_items",fixed.initial_context())
         self.assertEqual(fixed.cutoff,autonomous.cutoff)
 
+    @staticmethod
+    def history_request():
+        observed = request()
+        history = [{"session_id": i, "time_index": i, "query": f"unrelated {i}",
+                    "clicked_items": [], "purchased_items": []} for i in range(1, 14)]
+        for stage in ("query", "response"):
+            observed[stage + "_input"]["history_cutoff_exclusive"] = 20
+            observed[stage + "_input"]["short_term_memory"]["search_history"] = deepcopy(history)
+        return observed
+
+    def test_response_recalls_same_id_actions_before_newer_exact_query(self):
+        observed = self.history_request()
+        history = observed["response_input"]["short_term_memory"]["search_history"]
+        history[0]["clicked_items"] = [{"item_id": 4}]
+        history[1]["purchased_items"] = [{"item_id": 4}]
+        history[2]["query"] = observed["response_input"]["query"]
+        binding = CurationTools(observed, "response", mode="fixed")
+        context = binding.initial_context()
+        self.assertEqual([e["event_id"] for e in context["history_events"]],
+                         [f"history:{i}" for i in [1, 2, *range(6, 14)]])
+        self.assertEqual((context["selected_history_events"], context["available_history_events"]), (10, 13))
+        binding.guard()
+        self.assertEqual(binding.history, history)
+        changed = deepcopy(observed)
+        changed["response_target"] = {"clicked_item_ids": [], "purchased_item_ids": []}
+        self.assertEqual(context, CurationTools(changed, "response", mode="fixed").initial_context())
+        history[2]["clicked_items"] = [{"item_id": 4}]
+        newer = CurationTools(observed, "response", mode="fixed").initial_context()
+        self.assertEqual([e["event_id"] for e in newer["history_events"]],
+                         [f"history:{i}" for i in [2, 3, *range(6, 14)]])
+
+    def test_response_exact_query_normalization_retains_no_action_event(self):
+        observed = self.history_request()
+        observed["response_input"]["query"] = "cup STRASSE"
+        history = observed["response_input"]["short_term_memory"]["search_history"]
+        history[0]["query"] = "  ＣＵＰ　Straße\t "
+        context = CurationTools(observed, "response", mode="fixed").initial_context()
+        self.assertEqual([e["event_id"] for e in context["history_events"]],
+                         [f"history:{i}" for i in [1, *range(5, 14)]])
+        event = context["history_events"][0]
+        for field in ("clicked_items", "purchased_items"):
+            self.assertEqual(context["facts"][event["fact_refs"][field]]["value"], [])
+
+    def test_response_does_not_recall_same_title_or_partial_query(self):
+        observed = self.history_request()
+        history = observed["response_input"]["short_term_memory"]["search_history"]
+        history[0]["clicked_items"] = [{"item_id": 99, "item_title": "Cup"}]
+        history[0]["query"] = "SECRET"
+        context = CurationTools(observed, "response", mode="fixed").initial_context()
+        self.assertEqual([e["event_id"] for e in context["history_events"]],
+                         [f"history:{i}" for i in range(4, 14)])
+
+    def test_history_recall_preserves_foreign_actor_rejection(self):
+        observed = self.history_request()
+        event = observed["response_input"]["short_term_memory"]["search_history"][0]
+        event.update(user_id=8, clicked_items=[{"item_id": 4}])
+        with self.assertRaisesRegex(ValueError, "Foreign Customer history"):
+            CurationTools(observed, "response", mode="fixed").initial_context()
+
+    def test_history_budget_keeps_a_recent_event_and_disables_recall_below_two(self):
+        observed = self.history_request()
+        history = observed["response_input"]["short_term_memory"]["search_history"]
+        for event in history[:3]:
+            event["clicked_items"] = [{"item_id": 4}]
+        expected = {0: [], 1: [13], 2: [3, 13], 3: [2, 3, 13],
+                    10: [2, 3, *range(6, 14)], 20: list(range(1, 14))}
+        for limit, ids in expected.items():
+            with self.subTest(history_limit=limit):
+                context = CurationTools(observed, "response", mode="fixed", history_limit=limit).initial_context()
+                self.assertEqual([e["event_id"] for e in context["history_events"]],
+                                 [f"history:{i}" for i in ids])
+                self.assertEqual(context["selected_history_events"], len(ids))
+                self.assertLessEqual(len(ids), limit)
+
+    def test_query_keeps_recent_history_without_response_or_target_access(self):
+        observed = self.history_request()
+        observed["query_input"]["short_term_memory"]["search_history"][0]["clicked_items"] = [{"item_id": 4}]
+        query_only = {"query_input": deepcopy(observed["query_input"])}
+        context = CurationTools(query_only, "query", mode="fixed").initial_context()
+        self.assertEqual(context, CurationTools(observed, "query", mode="fixed").initial_context())
+        self.assertEqual([e["event_id"] for e in context["history_events"]],
+                         [f"history:{i}" for i in range(4, 14)])
+        self.assertNotIn("SECRET TARGET", json.dumps(context))
+        self.assertNotIn("query", context)
+        self.assertEqual(context["candidate_context"], [])
+
+    def test_history_recall_rejects_current_and_future_events(self):
+        for when in (20, 21):
+            with self.subTest(time_index=when):
+                observed = self.history_request()
+                event = observed["response_input"]["short_term_memory"]["search_history"][0]
+                event.update(time_index=when, clicked_items=[{"item_id": 4}])
+                with self.assertRaisesRegex(ValueError, "Non-prior history"):
+                    CurationTools(observed, "response", mode="fixed")
+
     def test_information_modes_have_distinct_trajectory_ids(self):
         import asyncio
         from agent_simulation.agents.agentic import AgenticOptions
