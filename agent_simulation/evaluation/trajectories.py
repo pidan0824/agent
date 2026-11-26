@@ -160,10 +160,14 @@ async def generate_trajectory(binding, model, *, role, actor_id, stage, record_i
               "trajectory_id": trajectory_id, "sample_index": sample_index,
               "seed": getattr(model, "seed", None), "theory": options.theory and stage != "query",
               "response_style": "direct" if direct else "ekb" if role == "customer" else "rationale",
-              "evaluation_protocol": "independent_behavior_prediction",
+              "evaluation_protocol": ("outcome_conditioned_single_positive"
+                  if stage == "response" and binding.context.get("response_action_mode") == "single_item"
+                  else "independent_behavior_prediction"),
               "action_mode": binding.context.get("response_action_mode", "multi_item") if stage == "response" else stage,
               "status": "running", "trace": trace}
 
+    if role == "customer" and stage == "response":
+        record["candidate_item_ids"] = [p["item_id"] for p in binding.displayed]
     if role == "seller":
         record["previous_prices"] = {str(p["item_id"]): p["last_valid_price_raw"]
                                       for p in binding.features["products"]}

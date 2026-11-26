@@ -62,29 +62,47 @@ def fixed_response_requests(response_input, *, history_limit=10):
     return binding.initial_context(), result
 
 
-def observed_action_rows(request, identity, split, dataset_identity):
-    """Full-exposure ground truth, independent of teacher success or shortlist labels."""
+def observed_action_rows(request, identity, split, dataset_identity, *, bundle=None, policies=None):
+    """Observed actions use prepared child scenes; explicit raw protocols keep full labels."""
     if split != "train":
         return []
     from agent_simulation.agents.schemas import validate_arguments
     from agent_simulation.agents.agentic import initial_agentic_request
+    policies = policies or (("sampled",) if bundle is not None else ("full",))
+    # Retrieved inputs can omit positives. Preserve their original full supervision;
+    # sampled inputs have explicitly projected child labels and must stay short.
+    observed_policies = tuple(dict.fromkeys("sampled" if p == "sampled" else "full" for p in policies))
     result = []
-    for stage in ("query", "response"):
-        binding = CurationTools(request, stage, mode="fixed", theory=False)
+    for stage, policy, adapted, candidate in generation_jobs(request, bundle=bundle, policies=observed_policies):
+        binding = CurationTools(adapted, stage, mode="fixed", theory=False)
         schemas, prompt = trajectory_messages(binding, role="customer", stage=stage, theory=False)
         prompt, _, _ = initial_agentic_request(prompt, [], AgenticOptions(max_model_calls=1, theory=False))
-        target = deepcopy(request[stage + "_target"])
+        target = deepcopy(adapted[stage + "_target"])
         validate_arguments(target, schemas[0])
         state_id = digest([dataset_identity, identity, stage, prompt])
-        result.append({"role": "customer", "actor_id": request[stage + "_input"]["profile"]["user_id"],
-            "stage": stage, "source_split": split, "source_request_id": identity,
-            "dataset_manifest_sha256": dataset_identity, "initial_state_id": state_id,
-            "scene_id": str(identity) + ":full", "trajectory_id": digest([state_id, target, "observed"]),
-            "tools": [], "messages": prompt + [{"role": "assistant", "content": encoded(target)}],
-            "target": target, "response_style": "direct",
-            "action_mode": "multi_item" if stage == "response" else "query",
-            "evaluation_protocol": "independent_behavior_prediction",
-            "behavior_source": "observed_action; full exposure; no generated rationale"})
+        single = stage == "response" and policy == "sampled"
+        scene_id = str(candidate.get("scene_id", identity)) if candidate else str(identity)
+        row = {"role": "customer", "actor_id": adapted[stage + "_input"]["profile"]["user_id"],
+               "stage": stage, "source_split": split, "source_request_id": identity,
+               "dataset_manifest_sha256": dataset_identity, "initial_state_id": state_id,
+               "scene_id": scene_id, "trajectory_id": digest([state_id, target, "observed"]),
+               "tools": [], "messages": prompt + [{"role": "assistant", "content": encoded(target)}],
+               "target": target, "response_style": "direct",
+               "action_mode": "single_item" if single else "multi_item" if stage == "response" else "query",
+               "evaluation_protocol": "outcome_conditioned_single_positive" if single else "independent_behavior_prediction",
+               "behavior_source": "observed_action; scene-aligned input; no generated rationale"}
+        if stage == "response":
+            row["candidate_item_ids"] = [p["item_id"] for p in binding.displayed]
+        if single:
+            require(candidate["source_request_id"] == identity and
+                    candidate["source_response_target"] == request["response_target"],
+                    "Sampled scene differs from original request")
+            chosen = candidate["target_item_id"]
+            projected = {f: [i for i in request["response_target"][f] if i == chosen]
+                         for f in ("clicked_item_ids", "purchased_item_ids")}
+            require(target == projected, "Sampled scene target differs from observed action")
+            row["source_response_target"] = deepcopy(request["response_target"])
+        result.append(row)
     return result
 
 
@@ -362,7 +380,9 @@ def main(argv=None):
                             output.write(encoded(row) + "\n"); output.flush()
                             records.append(row)
                 if not args.evaluation_only:
-                    observed.extend(observed_action_rows(request, identity, args.split, manifest["dataset_manifest_sha256"]))
+                    observed.extend(observed_action_rows(request, identity, args.split,
+                        manifest["dataset_manifest_sha256"], bundle=prepared.get(identity),
+                        policies=args.candidate_policies))
         if not args.evaluation_only:
             (args.output / "observed-actions.jsonl").write_text("".join(encoded(row) + "\n" for row in observed))
         exported = {} if args.evaluation_only else export_training(records,args.output,

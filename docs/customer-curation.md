@@ -135,17 +135,17 @@ Query 每个原请求只生成一组（每模型／每种信息模式各按 samp
 ```bash
 ./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
   --dataset "$dataset" --output result/customer-sft-only-NEW \
-  --split train --candidate-policies full --count 100 \
+  --split train --scenes result/customer-scenes --candidate-policies sampled \
   --modes fixed --samples 2 --sft-only
 ```
 
 `--sft-only` 只连接 strong 服务，不加载弱模型 tokenizer、不调用公共选项预测器、不构造 DPO；训练生成时不重复生成 Query，直接保存真实 Query。这个示例只描述运行方式，不表示已进行教师生成或正式训练。
 
-新的生成入口总会保存 `observed-actions.jsonl`：每个入选 Train 原请求一条真实 Query 和一条完整曝光真实 Response，与教师是否成功无关。真实动作前缀重新由固定事实和直接动作协议构造，不拼接失败解释或工具轨迹。目标商品必须属于原曝光，非法标签明确失败。Test/evaluation-only 不导出训练样本。
+新的生成入口总会保存 `observed-actions.jsonl`，与教师是否成功无关。默认 sampled 协议使用已冻结的短列表：每个启用 Query 的原请求只保留一条真实 Query，每个子场景保留一条对应候选列表的真实 Response；原请求多正例分别拆分，空动作保留空标签。显式 full/retrieved 运行仍保留原请求的完整曝光监督。真实动作前缀由固定事实和直接动作协议构造，不拼接失败解释或工具轨迹。目标商品必须属于当前场景的可见候选，非法标签明确失败。Test/evaluation-only 不导出训练样本。
 
 `sft.jsonl` 合并真实动作与合格依据增强轨迹。增强轨迹仅保留两个动作集合都完全匹配标签、通过现有证据检查的 EKB；不会把部分匹配的教师动作改写成真实动作。直接动作和 Query 教师轨迹由真实动作替代，原生成记录仍留在 records.jsonl。未人工审阅的依据仍标记 not_reviewed，不称为语义已验证。funnel 单列 observed_action_rows，原有生成轨迹漏斗不把真实动作伪装成教师通过样本。
 
-离线 customer_filtering 默认读取 records.jsonl 同目录的 observed-actions.jsonl，也可用 `--observed-actions` 明确指定。侧文件缺失时仍支持旧的纯轨迹导出，并在 sft_protocol 中区别标记；新实验应保留该文件及 manifest。离线 `--sft-only` 可跳过偏好配对。
+离线 customer_filtering 默认读取 records.jsonl 同目录的 observed-actions.jsonl，也可用 `--observed-actions` 明确指定。sampled 合并按原请求、阶段和子场景匹配，并要求候选顺序及目标动作一致；旧的“sampled 解释＋full 真实动作”侧文件需要重新生成，不能直接混合。侧文件缺失时仍支持旧的纯轨迹导出，并在 sft_protocol 中区别标记；新实验应保留该文件及 manifest。离线 `--sft-only` 可跳过偏好配对。
 
 ## 2. 生成 EKB 和信息获取轨迹
 

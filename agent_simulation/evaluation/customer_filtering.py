@@ -19,7 +19,7 @@ from agent_simulation.vendor.usermirrorer.filtering import behavior_sampling, da
 
 from agent_simulation.evaluation.customer_quality import FIELDS, assess_record, behavior_stratum
 from agent_simulation.evaluation.customer_evidence import check_evidence
-from agent_simulation.evaluation.customer_contract import single_item_actions, validate_request_splits
+from agent_simulation.evaluation.customer_contract import single_item_actions, single_item_schema, validate_request_splits
 
 
 def decode_states(ids, states):
@@ -409,10 +409,16 @@ def combine_observed_sft(selected, records, observed):
         require(context is not None, "Observed action lacks frozen facts")
         require(context.get("evidence_actor_id") == row["actor_id"], "Observed action actor mismatch")
         ids = [p["item_id"] for p in context.get("candidate_context", [])]
-        schema = action_output(row["stage"], displayed_ids=ids if row["stage"] == "response" else None)["final_schemas"][0]
+        single = row.get("action_mode") == "single_item"
+        schema = (single_item_schema(ids) if single else
+                  action_output(row["stage"], displayed_ids=ids if row["stage"] == "response" else None)["final_schemas"][0])
         validate_arguments(row["target"], schema)
-        key = (row.get("dataset_manifest_sha256"), row["source_request_id"], row["stage"])
-        require(key not in observed_keys, "Duplicate observed request/stage")
+        if single:
+            require(row["stage"] == "response" and row.get("scene_id") is not None
+                    and row.get("candidate_item_ids") == ids, "Invalid observed shortlist identity")
+        key = (row.get("dataset_manifest_sha256"), row["source_request_id"], row["stage"],
+               row["scene_id"] if single else None)
+        require(key not in observed_keys, "Duplicate observed request/stage/scene")
         observed_keys[key] = row
         require(row["trajectory_id"] not in identities, "Duplicate observed trajectory ID")
         identities.add(row["trajectory_id"])
@@ -421,11 +427,20 @@ def combine_observed_sft(selected, records, observed):
     for row in selected:
         source = by_id[row["trajectory_id"]]
         t = source["trajectory"]
-        key = (t.get("dataset_manifest_sha256"), t.get("source_request_id"), t["stage"])
-        require(key in observed_keys, "Rationale has no matching observed request/stage")
-        require(t["actor_id"] == observed_keys[key]["actor_id"], "Rationale actor differs from observed request")
-        if t["stage"] == "response":
-            require(all(set(t["target"][field]) <= set(observed_keys[key]["target"][field])
+        single = t.get("action_mode") == "single_item"
+        key = (t.get("dataset_manifest_sha256"), t.get("source_request_id"), t["stage"],
+               t.get("scene_id") if single else None)
+        require(key in observed_keys, "Rationale has no matching observed request/stage/scene")
+        observed_row = observed_keys[key]
+        require(t["actor_id"] == observed_row["actor_id"], "Rationale actor differs from observed request")
+        if single:
+            require(t.get("candidate_item_ids") == observed_row["candidate_item_ids"],
+                    "Rationale candidate list differs from observed scene")
+            require(all(set(t["target"][field]) == set(observed_row["target"][field])
+                        for field in ("clicked_item_ids", "purchased_item_ids")),
+                    "Rationale targets differ from observed scene")
+        elif t["stage"] == "response":
+            require(all(set(t["target"][field]) <= set(observed_row["target"][field])
                         for field in ("clicked_item_ids", "purchased_item_ids")),
                     "Rationale targets contradict observed actions")
         if (t["stage"] != "response" or t.get("response_style") != "ekb"
@@ -553,7 +568,7 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
         "pair_reasons": dict(Counter(d["stage"] + "/" + d["reason"] for d in pair_decisions)),
         "strata": list(strata.values()),
         "counting_note": "Row exclusion reasons can overlap; pair reasons count scenarios, not trajectories.",
-        "sft_protocol": ("Observed full-exposure actions plus exact, evidence-checked teacher rationales"
+        "sft_protocol": ("Observed scene-aligned actions plus exact, evidence-checked teacher rationales"
                          if observed_actions is not None else
                          "Strong original transcripts passing separate action and evidence gates; independent of DPO"),
         "response_dpo_protocol": pair_protocol,
