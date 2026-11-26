@@ -52,6 +52,41 @@ class AuthorCandidateTests(unittest.TestCase):
         self.assertEqual(original,before)
         self.assertEqual(json.loads(json.dumps(result,allow_nan=False))["candidate"]["candidate_item_ids"],ids)
 
+    def test_collaborative_shortlist_scores_match_global_formula_with_repeated_outside_history(self):
+        from unittest.mock import patch
+        import torch
+        from agent_simulation.vendor.usermirrorer import sampler as original
+        products, interactions = pool()
+        interactions.extend([
+            {"user_id": 1, "item_id": 2, "time_index": 4},
+            {"user_id": 1, "item_id": 12, "time_index": 5},
+            {"user_id": 1, "item_id": 4, "time_index": 30},
+        ])
+        builder = SampledCandidateBuilder(products, interactions, None,
+            methods=("collaborative",), min_items=5, max_items=8, fit_cutoff=10)
+        global_map = {p["item_id"]: i for i, p in enumerate(products)}
+        positions = torch.arange(len(products), dtype=torch.float32)
+        cf = torch.stack((positions / 100, torch.sin(positions / 3) / 5,
+                          torch.cos(positions / 5) / 3), dim=1)
+        builder._cf_cache[10] = (global_map, cf)
+        # Item 2 occurs twice; 1, 2, 3 are outside this exposure; future item 4 is absent.
+        history = torch.zeros((1, len(products)))
+        history[0, [global_map[i] for i in (1, 2, 3, 12)]] = 1
+        history[0, global_map[2]] = 2
+        candidate_indices = [global_map[i] for i in range(10, 22) if i != 11]
+        expected = torch.softmax(original.collaborative_predict(cf, history)[:, candidate_indices], dim=1)
+        with patch("agent_simulation.datasets.customer_candidate_sampling.original.topk_sampling",
+                   wraps=original.topk_sampling) as topk:
+            builder.build(request(), target_item_id=10)
+        topk.assert_called_once()
+        torch.testing.assert_close(topk.call_args.args[0], expected, rtol=1e-6, atol=1e-7)
+        deduplicated = history.clamp(max=1)
+        exposure_only = history.clone()
+        exposure_only[0, [global_map[i] for i in (1, 2, 3)]] = 0
+        for wrong in (deduplicated, exposure_only):
+            self.assertFalse(torch.allclose(expected,
+                torch.softmax(original.collaborative_predict(cf, wrong)[:, candidate_indices], dim=1)))
+
     def test_no_click_keeps_observed_negatives_and_inserts_nothing(self):
         result=self.builder(min_items=5,max_items=8).build(request({"clicked_item_ids":[],"purchased_item_ids":[]}))
         self.assertEqual(result["candidate"]["positive_count"],0)

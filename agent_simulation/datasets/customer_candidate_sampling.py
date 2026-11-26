@@ -153,12 +153,10 @@ class SampledCandidateBuilder:
                     cf = original.get_spectral_info(matrix, rank)[:len(global_ids)]
                     self._cf_cache[fit_cutoff] = (global_map, cf)
                 global_map, cf = self._cf_cache[fit_cutoff]
-                # User representation retains history outside this exposure pool.
-                history = torch.zeros((1, len(global_map)))
-                for row in owned:
-                    if row["item_id"] in global_map:
-                        history[0, global_map[row["item_id"]]] += 1
-                scores = original.collaborative_predict(cf, history)[:, [global_map[item] for item in ids]]
+                # Retain repeated interactions and history outside this exposure pool.
+                history_indices = [global_map[row["item_id"]] for row in owned if row["item_id"] in global_map]
+                user_embedding = cf[history_indices].sum(dim=0, keepdim=True)
+                scores = user_embedding @ cf[[global_map[item] for item in ids]].T
                 rankings.extend([[ids[i] for i in row] for row in original.topk_sampling(
                     torch.softmax(scores, dim=1), sample_num).tolist()])
             merged = original.merge_ranking_list(rankings)
