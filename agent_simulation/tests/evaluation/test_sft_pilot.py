@@ -165,5 +165,36 @@ class PilotTests(unittest.TestCase):
                     generate(args)
 
 
+    def test_invalid_query_is_scored_zero_without_embedding_empty_text(self):
+        from unittest.mock import patch
+        from experiments.cot_sft_pilot import write_json
+        from agent_simulation.evaluation.trajectories import digest
+        class Encoder:
+            def encode_many(self,texts):
+                if any(not text.strip() for text in texts):
+                    raise AssertionError("Empty embedding input")
+                return [[1.,0.] for text in texts]
+        with TemporaryDirectory() as d:
+            root=Path(d);c=case("query","dev")
+            (root/"cases.jsonl").write_text(dump(c)+"\n")
+            checksum=sha256(root/"cases.jsonl")
+            write_json(root/"manifest.json",dict(status="complete",cases_sha256=checksum))
+            identity=dict(style="direct",cases_sha256=checksum,ids=[c["case_id"]],
+                base_config_sha256="same",max_new_tokens=256,temperature=0,seed=42,partition="dev",model="fixture")
+            for name,status in (("zero","invalid"),("sft","ok")):
+                path=root/name;path.mkdir()
+                write_json(path/"manifest.json",identity)
+                row=dict(case_id=c["case_id"],status=status,request_sha256=digest(decision_request(c,"direct")))
+                if status=="ok":row["prediction"]=c["target"]
+                (path/"predictions.jsonl").write_text(dump(row)+"\n")
+            args=Namespace(cohorts=root,baseline=root/"zero",sft=root/"sft",output=root/"comparison.json")
+            with patch("agent_simulation.agents.retrieval.bge_encoder.bge_encoder",return_value=(Encoder(),"fixture")),redirect_stdout(io.StringIO()):
+                comparison(args)
+            report=json.loads(args.output.read_text())
+            self.assertEqual(report["customer_query_cosine"]["baseline_mean"],0.)
+            self.assertEqual(report["customer_query_cosine"]["sft_mean"],1.)
+            self.assertEqual(report["invalid"]["zero_shot"],1)
+
+
 if __name__=="__main__":
     unittest.main()

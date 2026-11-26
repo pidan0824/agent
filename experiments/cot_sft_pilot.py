@@ -447,11 +447,14 @@ def comparison(args):
         targets=np.asarray(encoder.encode_many([cases[k]["target"]["query"] for k in queries]),float)
         qvalues={}
         for name,records in predictions.items():
-            texts=[records[k]["prediction"]["query"] if records[k]["status"]=="ok" else "" for k in queries]
+            valid=[records[k]["status"]=="ok" and bool(records[k]["prediction"]["query"].strip()) for k in queries]
+            report["invalid"][name]+=sum(records[k]["status"]=="ok" and not ok for k,ok in zip(queries,valid))
+            # The encoder rejects empty strings. Placeholder embeddings are always masked to zero.
+            texts=[records[k]["prediction"]["query"] if ok else "invalid query output" for k,ok in zip(queries,valid)]
             embeddings=np.asarray(encoder.encode_many(texts),float)
             norms=np.linalg.norm(targets,axis=1)*np.linalg.norm(embeddings,axis=1)
             scores=np.sum(targets*embeddings,axis=1)/np.maximum(norms,1e-12)
-            qvalues[name]=[float(v) if records[k]["status"]=="ok" else 0. for k,v in zip(queries,scores)]
+            qvalues[name]=[float(v) if ok else 0. for ok,v in zip(valid,scores)]
         report["customer_query_cosine"]=paired(qvalues["zero_shot"],qvalues["sft"])
     seller=[k for k in predictions["sft"] if cases[k]["stage"]=="seller"]
     if seller:
