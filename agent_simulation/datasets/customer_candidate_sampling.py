@@ -141,22 +141,28 @@ class SampledCandidateBuilder:
                 fit_cutoff = self.fit_cutoff if self.fit_cutoff is not None else cutoff
                 require(fit_cutoff <= cutoff, "Collaborative snapshot exceeds decision cutoff")
                 if fit_cutoff not in self._cf_cache:
-                    global_ids = sorted(self.products)
+                    fit = [r for r in self.interactions if r["time_index"] < fit_cutoff and r["item_id"] in self.products]
+                    global_ids = sorted({r["item_id"] for r in fit})
                     global_map = {item: i for i, item in enumerate(global_ids)}
-                    fit = [r for r in self.interactions if r["time_index"] < fit_cutoff and r["item_id"] in global_map]
-                    users = {uid: i for i, uid in enumerate(sorted({r["user_id"] for r in fit} | {user}))}
-                    shape = (max(32, len(users)), max(32, len(global_ids)))
-                    indices = torch.tensor([[users[r["user_id"]] for r in fit],
-                                            [global_map[r["item_id"]] for r in fit]], dtype=torch.long)
-                    matrix = torch.sparse_coo_tensor(indices, torch.ones(len(fit)), shape).coalesce()
-                    rank = max(1, min(64, min(shape) // 4))
-                    cf = original.get_spectral_info(matrix, rank)[:len(global_ids)]
+                    if fit:
+                        users = {uid: i for i, uid in enumerate(sorted({r["user_id"] for r in fit} | {user}))}
+                        shape = (max(32, len(users)), max(32, len(global_ids)))
+                        indices = torch.tensor([[users[r["user_id"]] for r in fit],
+                                                [global_map[r["item_id"]] for r in fit]], dtype=torch.long)
+                        matrix = torch.sparse_coo_tensor(indices, torch.ones(len(fit)), shape).coalesce()
+                        rank = max(1, min(64, min(shape) // 4))
+                        cf = original.get_spectral_info(matrix, rank)[:len(global_ids)]
+                    else:
+                        cf = torch.empty((0, 0))
                     self._cf_cache[fit_cutoff] = (global_map, cf)
                 global_map, cf = self._cf_cache[fit_cutoff]
-                # Retain repeated interactions and history outside this exposure pool.
-                history_indices = [global_map[row["item_id"]] for row in owned if row["item_id"] in global_map]
-                user_embedding = cf[history_indices].sum(dim=0, keepdim=True)
-                scores = user_embedding @ cf[[global_map[item] for item in ids]].T
+                # Unseen candidates have no CF signal; retain all repeated known history.
+                scores = cf.new_zeros((1, len(ids)))
+                positions = [i for i, item in enumerate(ids) if item in global_map]
+                if positions:
+                    history_indices = [global_map[row["item_id"]] for row in owned if row["item_id"] in global_map]
+                    user_embedding = cf[history_indices].sum(dim=0, keepdim=True)
+                    scores[:, positions] = user_embedding @ cf[[global_map[ids[i]] for i in positions]].T
                 rankings.extend([[ids[i] for i in row] for row in original.topk_sampling(
                     torch.softmax(scores, dim=1), sample_num).tolist()])
             merged = original.merge_ranking_list(rankings)

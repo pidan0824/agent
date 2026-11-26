@@ -87,6 +87,59 @@ class AuthorCandidateTests(unittest.TestCase):
             self.assertFalse(torch.allclose(expected,
                 torch.softmax(original.collaborative_predict(cf, wrong)[:, candidate_indices], dim=1)))
 
+    def test_active_cf_columns_match_global_nonzero_spectrum_and_unseen_scores_are_zero(self):
+        from unittest.mock import patch
+        import torch
+        from agent_simulation.vendor.usermirrorer import sampler as original
+        products, _ = pool()
+        # Positive dense support plus distinct diagonal counts gives a separated,
+        # nonzero retained spectrum; the remaining catalog columns are all zero.
+        fit = [{"user_id": user, "item_id": item, "time_index": repeat + 1}
+               for user in range(1, 13) for item in range(1, 13)
+               for repeat in range(1 + (user if user == item else 0))]
+        interactions = fit + [{"user_id": 1, "item_id": 1, "time_index": time} for time in (150, 151)]
+        source = request({"clicked_item_ids": [10], "purchased_item_ids": []})
+        source["query_input"]["history_cutoff_exclusive"] = 200
+        source["response_input"]["history_cutoff_exclusive"] = 200
+        indices = torch.tensor([[r["user_id"] - 1 for r in fit], [r["item_id"] - 1 for r in fit]])
+        full_matrix = torch.sparse_coo_tensor(indices, torch.ones(len(fit)), (32, 40)).coalesce()
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(42)
+            full_cf = original.get_spectral_info(full_matrix, 8)
+        history = torch.zeros((1, 40))
+        for row in interactions:
+            if row["user_id"] == 1:
+                history[0, row["item_id"] - 1] += 1
+        expected = original.collaborative_predict(full_cf, history)[:, 9:21]
+        builder = SampledCandidateBuilder(products, interactions, None, methods=("collaborative",),
+                                           fit_cutoff=100, min_items=5, max_items=8)
+        with patch("agent_simulation.datasets.customer_candidate_sampling.torch.softmax",
+                   wraps=torch.softmax) as softmax:
+            builder.build(source, target_item_id=10)
+        softmax.assert_called_once()
+        scores = softmax.call_args.args[0]
+        self.assertEqual(set(builder._cf_cache[100][0]), set(range(1, 13)))
+        torch.testing.assert_close(scores, expected, rtol=1e-4, atol=2e-4)
+        self.assertTrue(torch.equal(scores[:, 3:], torch.zeros_like(scores[:, 3:])))
+        exposure_only = history.clone()
+        exposure_only[:, :9] = 0
+        self.assertFalse(torch.allclose(expected,
+            original.collaborative_predict(full_cf, exposure_only)[:, 9:21], rtol=1e-4, atol=2e-4))
+
+    def test_empty_cf_fit_skips_svd_and_uses_uniform_probabilities(self):
+        from unittest.mock import patch
+        import torch
+        from agent_simulation.vendor.usermirrorer import sampler as original
+        builder = self.builder(methods=("collaborative",), fit_cutoff=1)
+        with patch("agent_simulation.datasets.customer_candidate_sampling.original.get_spectral_info",
+                   side_effect=AssertionError("Empty fit must not run SVD")), \
+             patch("agent_simulation.datasets.customer_candidate_sampling.original.topk_sampling",
+                   wraps=original.topk_sampling) as topk:
+            builder.build(request(), target_item_id=10)
+        topk.assert_called_once()
+        torch.testing.assert_close(topk.call_args.args[0], torch.full((1, 11), 1 / 11))
+        self.assertEqual(builder._cf_cache[1][0], {})
+
     def test_no_click_keeps_observed_negatives_and_inserts_nothing(self):
         result=self.builder(min_items=5,max_items=8).build(request({"clicked_item_ids":[],"purchased_item_ids":[]}))
         self.assertEqual(result["candidate"]["positive_count"],0)
@@ -126,7 +179,12 @@ class AuthorCandidateTests(unittest.TestCase):
         c.executemany("INSERT INTO requests VALUES (?,?,?,?,?,?,?)",[(i,1,i,"train",list(range(1,41)),[i],[]) for i in range(1,4)])
         c.execute("CREATE TABLE ranking_observations(session_id BIGINT,item_id BIGINT,price_raw DOUBLE)")
         c.executemany("INSERT INTO ranking_observations VALUES (?,?,?)",[(3,i,50.) for i in range(1,41)])
-        scenes,skipped=prepare_scenes(SimpleNamespace(connection=c),[request()],Encoder(),min_items=8,max_items=8)
+        from unittest.mock import patch
+        with patch("agent_simulation.datasets.customer_scenes.SampledCandidateBuilder",
+                   wraps=SampledCandidateBuilder) as builder:
+            scenes,skipped=prepare_scenes(SimpleNamespace(connection=c),[request()],Encoder(),min_items=8,max_items=8)
+        self.assertEqual({p["item_id"] for p in builder.call_args.args[0]},
+                         {1, 2, 3} | set(range(10, 22)))
         self.assertFalse(skipped)
         self.assertEqual(len(scenes),1)
         self.assertEqual(len(scenes[0]["response_scenes"]),2)

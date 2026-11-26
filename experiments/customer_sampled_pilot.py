@@ -76,6 +76,9 @@ def prepare(args):
         require(len({r["session_id"] for r in plan}) == len(plan), "A parent crosses partitions")
         protocol = dict(schema="customer-sampled-sft-pilot-v1", dataset_manifest_sha256=identity,
             source_sha256=sha256(Path(__file__)), population_sha256=sha256(candidates),
+            sampler_source_sha256=sha256(Path("agent_simulation/datasets/customer_candidate_sampling.py")),
+            scenes_source_sha256=sha256(Path("agent_simulation/datasets/customer_scenes.py")),
+            bge_device=args.bge_device,
             time_intervals_inclusive=intervals, requested_parent_counts=counts, seed=args.seed,
             input_limit=args.input_limit, methods=["random","content","collaborative"],
             min_items=2, max_items=12, min_prior_interactions=3,
@@ -135,6 +138,8 @@ def prepare(args):
         print(dump({"phase": "sampling", "parents": len(source_requests), "exposure_items": len(ids)}), flush=True)
         encoder, _ = bge_encoder(args.bge_path, device=args.bge_device)
         scenes, skipped = prepare_scenes(catalog, source_requests, encoder, seed=args.seed)
+    print(dump({"phase":"filtering", "parents":len(scenes),
+                "response_scenes":sum(len(s["response_scenes"]) for s in scenes)}), flush=True)
     tokenizer = load_tokenizer(args.tokenizer, local_files_only=True)
     parent = {r["session_id"]: r for r in plan}
     scenes, cases, length_skipped = filter_sampled_cases(scenes, parent, identity, tokenizer, args.input_limit)

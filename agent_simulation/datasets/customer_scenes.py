@@ -39,15 +39,19 @@ def prepare_scenes(catalog, requests, encoder, *, min_items=2, max_items=12, see
                    min_history=3, methods=("random", "content", "collaborative")):
     require(bool(requests), "Empty request selection")
     cutoffs = [r["response_input"]["history_cutoff_exclusive"] for r in requests]
-    # Shared item facts support CF history; candidate eligibility is request-exposure-only.
-    # No per-user LLM summaries or hidden current action labels enter features.
-    products = rows(catalog.connection, """
-        WITH available AS (
-          SELECT item_id,min(time_index) AS first_seen_time_index FROM
-          (SELECT unnest(impressed_item_ids) AS item_id,time_index FROM requests WHERE time_index < ?)
-          GROUP BY item_id)
-        SELECT p.*,a.first_seen_time_index FROM products p JOIN available a USING(item_id)
+    interactions = rows(catalog.connection, """
+        SELECT user_id,unnest(list_distinct(list_concat(clicked_item_ids,purchased_item_ids))) AS item_id,
+               time_index FROM requests WHERE split='train' AND time_index < ?
     """, [max(cutoffs)])
+    fit_cutoff = min(cutoffs)
+    # Global fit history remains available, including items outside these exposures.
+    # Exposure eligibility is unchanged; unrelated historical impressions need no facts.
+    needed_ids = {r["item_id"] for r in interactions if r["time_index"] < fit_cutoff}
+    needed_ids.update(p["item_id"] for request in requests
+                      for p in request["response_input"]["displayed_items"])
+    products = rows(catalog.connection, """
+        SELECT * FROM products WHERE item_id IN (SELECT unnest(?::BIGINT[]))
+    """, [sorted(needed_ids)])
     by_id = {p["item_id"]: p for p in products}
     for request in requests:
         target_ids = {p["item_id"] for p in request["response_input"]["displayed_items"]}
@@ -55,13 +59,9 @@ def prepare_scenes(catalog, requests, encoder, *, min_items=2, max_items=12, see
             if product["item_id"] in target_ids and product["item_id"] not in by_id:
                 by_id[product["item_id"]] = {**deepcopy(product),
                     "first_seen_time_index": request["response_input"]["history_cutoff_exclusive"]}
-    interactions = rows(catalog.connection, """
-        SELECT user_id,unnest(list_distinct(list_concat(clicked_item_ids,purchased_item_ids))) AS item_id,
-               time_index FROM requests WHERE split='train' AND time_index < ?
-    """, [max(cutoffs)])
     builder = SampledCandidateBuilder(list(by_id.values()), interactions, encoder,
         min_items=min_items,max_items=max_items,seed=seed,min_history=min_history,methods=methods,
-        fit_cutoff=min(cutoffs))
+        fit_cutoff=fit_cutoff)
     scenes, skipped = [], []
     expected = {"insufficient_prior_interactions", "empty_available_item_pool",
                 "empty_constructed_list", "insufficient_distractors"}
