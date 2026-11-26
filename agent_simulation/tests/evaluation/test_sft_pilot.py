@@ -96,6 +96,7 @@ class PilotTests(unittest.TestCase):
             self.assertEqual(report["invalid"]["zero_shot"],1)
             self.assertEqual(report["customer_response"]["baseline_mean"],0)
             self.assertEqual(report["customer_response"]["sft_mean"],1)
+            self.assertIn("observed_positive",report["customer_response"]["by_head"]["purchased_item_ids"])
             identity["temperature"]=.7
             write_json(root/"sft/manifest.json",identity)
             with self.assertRaisesRegex(ValueError,"decoding"):
@@ -134,6 +135,34 @@ class PilotTests(unittest.TestCase):
         verdict=quality(c,c["target"],r,messages,"concise",{"verdict":"fail","reason":"Unsupported preference"})
         self.assertFalse(verdict["accepted"])
         self.assertIn("semantic_review_failed",verdict["evidence"]["reasons"])
+
+
+    def test_generation_resume_checks_prompt_and_needs_no_service_when_complete(self):
+        from unittest.mock import patch
+        from experiments.cot_sft_pilot import generate,write_json
+        from agent_simulation.evaluation.trajectories import digest
+        with TemporaryDirectory() as d:
+            root=Path(d);c=case()
+            (root/"cases.jsonl").write_text(dump(c)+"\n")
+            checksum=sha256(root/"cases.jsonl")
+            write_json(root/"manifest.json",dict(status="complete",cases_sha256=checksum))
+            tok=root/"tokenizer";tok.mkdir();(tok/"config.json").write_text("{}")
+            out=root/"generated";out.mkdir()
+            args=Namespace(cohorts=root,partition="fit",role="customer",stage="response",limit=0,
+                seed=42,style="concise",model="fixture",tokenizer=tok,output=out,
+                max_new_tokens=768,temperature=0,concurrency=1,url="unused")
+            identity=dict(requests_sha256=digest({c["case_id"]:decision_request(c,"concise")}),
+                cases_sha256=checksum,ids=[c["case_id"]],base_config_sha256=sha256(tok/"config.json"),
+                model="fixture",tokenizer=str(tok.resolve()),style="concise",partition="fit",
+                max_new_tokens=768,temperature=0,seed=42,concurrency=1)
+            write_json(out/"manifest.json",identity)
+            (out/"predictions.jsonl").write_text(dump(dict(case_id=c["case_id"],status="invalid"))+"\n")
+            with patch("experiments.cot_sft_pilot.AgenticClient",side_effect=AssertionError("No service needed")),redirect_stdout(io.StringIO()):
+                generate(args)
+            self.assertEqual(json.loads((out/"completed.json").read_text())["resumed_records"],1)
+            with patch("experiments.cot_sft_pilot.decision_request",return_value={"changed":"prompt"}):
+                with self.assertRaisesRegex(ValueError,"Resume identity mismatch"):
+                    generate(args)
 
 
 if __name__=="__main__":

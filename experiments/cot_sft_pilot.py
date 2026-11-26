@@ -265,7 +265,8 @@ def generate(args):
         cases=[values[depth] for depth in range(max(map(len,groups.values())))
                for _,values in sorted(groups.items()) if depth<len(values)][:args.limit]
     require(cases,"Empty generation selection")
-    identity={"cases_sha256":sha256(args.cohorts/"cases.jsonl"),"ids":[r["case_id"] for r in cases],
+    requests={case["case_id"]:decision_request(case,args.style) for case in cases}
+    identity={"requests_sha256":digest(requests),"cases_sha256":sha256(args.cohorts/"cases.jsonl"),"ids":[r["case_id"] for r in cases],
               "base_config_sha256":sha256(args.tokenizer/"config.json"),
               "model":args.model,"tokenizer":str(args.tokenizer.resolve()),"style":args.style,
               "partition":args.partition,"max_new_tokens":args.max_new_tokens,"temperature":args.temperature,
@@ -280,6 +281,12 @@ def generate(args):
     require(len({r["case_id"] for r in prior})==len(prior),"Duplicate completed predictions")
     completed={r["case_id"] for r in prior}
     require(completed<=set(identity["ids"]),"Unexpected resumed prediction")
+    if len(completed)==len(cases):
+        if not (args.output/"completed.json").exists():
+            write_json(args.output/"completed.json",{"status":"complete","records":len(cases),
+                       "wall_seconds_this_run":0,"resumed_records":len(prior)})
+        print("Already complete",len(cases),flush=True)
+        return
     tokenizer=load_tokenizer(args.tokenizer,local_files_only=True)
     with closing(AgenticClient(args.url,args.model,tokenizer,max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,seed=args.seed,timeout=300,context_limit=8192,stream=True,
@@ -289,7 +296,7 @@ def generate(args):
             semaphore=asyncio.Semaphore(args.concurrency)
             async def one(case):
                 async with semaphore:
-                    request=decision_request(case,args.style)
+                    request=requests[case["case_id"]]
                     row={k:case[k] for k in ("case_id","role","stage","partition","stratum","target")}
                     row.update(status="invalid",style=args.style,request_sha256=digest(request))
                     started=time.monotonic()
@@ -407,6 +414,7 @@ def comparison(args):
     response=[k for k in predictions["sft"] if cases[k]["stage"]=="response"]
     if response:
         values={name:{} for name in predictions}
+        head_values={name:defaultdict(dict) for name in predictions}
         for name,records in predictions.items():
             for key in response:
                 r=records[key]
@@ -414,9 +422,20 @@ def comparison(args):
                 for field in ("clicked_item_ids","purchased_item_ids"):
                     p=set(r["prediction"][field]) if r["status"]=="ok" else set()
                     t=set(cases[key]["target"][field])
-                    heads.append((2*len(p&t)/(len(p)+len(t)) if p or t else 1.) if r["status"]=="ok" else 0.)
+                    score=(2*len(p&t)/(len(p)+len(t)) if p or t else 1.) if r["status"]=="ok" else 0.
+                    heads.append(score)
+                    head_values[name][field][key]=score
                 values[name][key]=sum(heads)/2
         report["customer_response"]=paired([values["zero_shot"][k] for k in response],[values["sft"][k] for k in response])
+        report["customer_response"]["by_head"]={}
+        for field in ("clicked_item_ids","purchased_item_ids"):
+            head=paired([head_values["zero_shot"][field][k] for k in response],
+                        [head_values["sft"][field][k] for k in response])
+            for label,positive in (("observed_positive",True),("observed_empty",False)):
+                keys=[k for k in response if bool(cases[k]["target"][field])==positive]
+                head[label]=paired([head_values["zero_shot"][field][k] for k in keys],
+                                   [head_values["sft"][field][k] for k in keys]) if keys else None
+            report["customer_response"]["by_head"][field]=head
         report["customer_response"]["by_stratum"]={stratum:paired(
             [values["zero_shot"][k] for k in response if cases[k]["stratum"]==stratum],
             [values["sft"][k] for k in response if cases[k]["stratum"]==stratum])
