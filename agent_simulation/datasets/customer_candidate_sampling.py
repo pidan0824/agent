@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
 import json
+import math
 import random
 from threading import RLock
 from types import SimpleNamespace
@@ -33,6 +34,52 @@ def seeded(seed):
             yield
         finally:
             random.setstate(py); np.random.set_state(np_state)
+
+
+CANDIDATE_DEDUPLICATION = "same-shop-content-v1"
+_CONTENT_FIELDS = (
+    "item_title", "seller_id", "seller_name", "brand_id", "brand_name",
+    "category_level1_id", "category_level1_name",
+    "category_level2_id", "category_level2_name",
+    "category_level3_id", "category_level3_name",
+)
+
+
+def deduplicate_pool(ids, products, prices, history_ids, *, target_item_id, seed):
+    """Collapse complete, identical descriptions within one exposure pool only.
+
+    Prices must be the frozen strictly-prior observations used by the scene.
+    Observation timestamps remain attached to the retained ID, not in this key.
+    Any prior interaction with a member protects the entire group.
+    """
+    audit = {"protocol": CANDIDATE_DEDUPLICATION if prices is not None else None,
+             "removed_to_retained": [], "history_protected_groups": []}
+    if prices is None:
+        return ids, audit  # Legacy callers without frozen prices cannot compare them.
+    groups = {}
+    for item in ids:
+        product = products[item]
+        values = tuple(product.get(field) for field in _CONTENT_FIELDS)
+        if any(value is None or isinstance(value, str) and
+               value.strip().casefold() in ("", "unknown", "null") for value in values):
+            continue  # Missing metadata is not proof of identical content.
+        price = prices.get(item, (None, None))[0]
+        key = (*values, price, "observed" if price is not None else "unknown")
+        groups.setdefault(key, []).append(item)
+    removed = set()
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        if history_ids.intersection(group):
+            audit["history_protected_groups"].append(group)
+            continue
+        kept = target_item_id if target_item_id in group else min(
+            group, key=lambda item: hashlib.sha256(f"{seed}:{item}".encode()).digest())
+        for item in group:
+            if item != kept:
+                removed.add(item)
+                audit["removed_to_retained"].append({"removed": item, "retained": kept})
+    return [item for item in ids if item not in removed], audit
 
 
 class SampledCandidateBuilder:
@@ -65,12 +112,12 @@ class SampledCandidateBuilder:
                 self._vectors[item] = vector / np.linalg.norm(vector)
         return self._vectors
 
-    def build_all(self, request):
+    def build_all(self, request, *, price_observations=None):
         target = request["response_target"]
         positives = sorted(set(target["clicked_item_ids"]) | set(target["purchased_item_ids"]))
-        return [self.build(request, target_item_id=item) for item in (positives or [None])]
+        return [self.build(request, target_item_id=item, price_observations=price_observations) for item in (positives or [None])]
 
-    def build(self, request, *, target_item_id=None):
+    def build(self, request, *, target_item_id=None, price_observations=None):
         context = deepcopy(request["response_input"])
         source_target = request["response_target"]
         source_positives = sorted(set(source_target["clicked_item_ids"]) | set(source_target["purchased_item_ids"]))
@@ -89,6 +136,7 @@ class SampledCandidateBuilder:
         known = {(r["item_id"],r["time_index"]) for r in owned}
         for event in context["short_term_memory"]["search_history"]:
             require(event["time_index"] < cutoff, "Non-prior Customer history")
+            require(event.get("user_id", user) == user, "Foreign Customer history")
             for field in ("clicked_items","purchased_items"):
                 for product in event.get(field,[]):
                     key = (product["item_id"],event["time_index"])
@@ -108,6 +156,22 @@ class SampledCandidateBuilder:
         ids = sorted(observed - (set(source_positives) - set(positives)))
         scope = {"candidate_pool": "request_exposures", "exposure_pool_size": len(observed),
                  "sampling_pool_size": len(ids), "query_category_filter": False}
+        history_ids = {r["item_id"] for r in owned}
+        summary = context.get("behavioral_summary")
+        if summary is not None:
+            when = summary.get("observed_time_index")
+            require(type(when) is int and 0 <= when < cutoff, "Customer background is not strictly prior")
+            require(summary.get("user_id", user) == user, "Foreign Customer background")
+            for field in ("recent_clicked_item_ids", "recent_purchased_item_ids"):
+                history_ids.update(summary.get(field) or [])
+        if price_observations is not None:
+            require(all(item in observed and type(time) is int and 0 <= time < cutoff
+                        and math.isfinite(price) and price > 0
+                        for item, (price, time) in price_observations.items()),
+                    "Invalid strictly-prior candidate prices")
+        ids, deduplication = deduplicate_pool(ids, self.products, price_observations, history_ids,
+            target_item_id=target_item_id, seed=f"{self.seed}:{request['session_id']}")
+        scope.update(sampling_pool_size=len(ids), deduplication=deduplication)
         mapping = {item: i for i, item in enumerate(ids)}
         seen = sorted({r["item_id"] for r in owned})
         # No-click has no current positive: use prior interests, then the query.
@@ -169,7 +233,10 @@ class SampledCandidateBuilder:
             frame = pd.DataFrame([{"user_id": user, "impression_list": merged}])
             filtered = original.interaction_filtering(sf, frame).iloc[0].impression_list
             negatives = [item for item in filtered if item not in source_positives]
-            require(len(negatives) >= self.min_items - len(positives), "insufficient_distractors")
+            # Deduplication must not discard a real action just to meet a list-length target.
+            require(len(negatives) >= self.min_items - len(positives)
+                    or (deduplication["removed_to_retained"] and (negatives or positives)),
+                    "insufficient_distractors")
             size = random.randint(self.min_items, self.max_items)
             candidates = negatives[:max(0, size-len(positives))]
             for item in positives:

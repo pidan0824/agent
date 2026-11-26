@@ -8,23 +8,29 @@ from pathlib import Path
 
 from agent_simulation.data.catalog import Catalog
 from agent_simulation.data.common import require, rows, sha256
-from agent_simulation.datasets.customer_candidate_sampling import SampledCandidateBuilder
+from agent_simulation.datasets.customer_candidate_sampling import SampledCandidateBuilder, CANDIDATE_DEDUPLICATION
 from agent_simulation.datasets.labels import select_record_ids
 
 
-def freeze_prices(catalog, scene):
-    """Use the same strictly-prior price lookup for positives and distractors."""
-    request = scene["request"]
-    request["response_input"]["response_action_mode"] = "single_item"
-    cutoff = request["response_input"]["history_cutoff_exclusive"]
-    ids = scene["candidate"]["candidate_item_ids"]
+def prior_prices(catalog, ids, cutoff):
+    """One frozen price lookup per request, shared by deduplication and all children."""
     observations = catalog.connection.execute("""
         SELECT o.item_id, arg_max(o.price_raw,r.time_index) AS price_raw, max(r.time_index) AS observed_time_index
         FROM ranking_observations o JOIN requests r USING(session_id)
         WHERE r.time_index < ? AND o.item_id IN (SELECT unnest(?::BIGINT[]))
           AND isfinite(o.price_raw) AND o.price_raw > 0 GROUP BY o.item_id
     """, [cutoff,ids]).fetchall()
-    prices = {item:(price,time) for item,price,time in observations}
+    return {item:(price,time) for item,price,time in observations}
+
+
+def freeze_prices(catalog, scene, *, prices=None):
+    """Use the same strictly-prior price lookup for positives and distractors."""
+    request = scene["request"]
+    request["response_input"]["response_action_mode"] = "single_item"
+    cutoff = request["response_input"]["history_cutoff_exclusive"]
+    ids = scene["candidate"]["candidate_item_ids"]
+    if prices is None:
+        prices = prior_prices(catalog, ids, cutoff)
     for product in request["response_input"]["displayed_items"]:
         price,time = prices.get(product["item_id"],(None,None))
         product["price_raw"] = price
@@ -69,10 +75,13 @@ def prepare_scenes(catalog, requests, encoder, *, min_items=2, max_items=12, see
         bundle = {"request": deepcopy(request), "query_enabled": True, "response_scenes": []}
         target = request["response_target"]
         positives = sorted(set(target["clicked_item_ids"]) | set(target["purchased_item_ids"]))
+        prices = prior_prices(catalog,
+            [p["item_id"] for p in request["response_input"]["displayed_items"]],
+            request["response_input"]["history_cutoff_exclusive"])
         for item in positives or [None]:
             try:
-                scene = builder.build(request, target_item_id=item)
-                bundle["response_scenes"].append(freeze_prices(catalog, scene))
+                scene = builder.build(request, target_item_id=item, price_observations=prices)
+                bundle["response_scenes"].append(freeze_prices(catalog, scene, prices=prices))
             except ValueError as error:
                 if str(error) not in expected:
                     raise
@@ -126,6 +135,8 @@ def read_scenes(directory, *, dataset=None, split=None):
     directory=Path(directory)
     manifest=json.loads((directory/"manifest.json").read_text())
     require(manifest["schema"]=="customer-single-positive-scenes-v2", "Prepare scenes again: single-positive v2 required")
+    deduplication = manifest.get("candidate_deduplication")
+    require(deduplication in (None, CANDIDATE_DEDUPLICATION), "Unknown candidate deduplication policy")
     if dataset is not None:
         require(manifest["dataset_manifest_sha256"]==sha256(Path(dataset)/"manifest.json"), "Scene label release differs")
     if split is not None:
@@ -141,6 +152,9 @@ def read_scenes(directory, *, dataset=None, split=None):
         require(source["assigned_split"] == manifest["split"], "Source request split differs")
         positives = set(source["response_target"]["clicked_item_ids"]) | set(source["response_target"]["purchased_item_ids"])
         for child in bundle["response_scenes"]:
+            if deduplication is not None:
+                require(child["candidate"].get("scope", {}).get("deduplication", {}).get("protocol") == deduplication,
+                        "Child deduplication policy differs from scene manifest")
             require(child["request"]["session_id"] == source["session_id"], "Mixed source request")
             require(child["request"]["assigned_split"] == source["assigned_split"], "Child request crosses dataset splits")
             require(child["candidate"]["source_request_id"] == source["session_id"], "Mixed candidate source request")
@@ -213,6 +227,7 @@ def main(argv=None):
         "skip_reasons":dict(Counter(s["reason"] for s in skipped)),
         "protocol":"Outcome-conditioned shortlists sampled within recorded exposures, without Query/category gates; not full-exposure evaluation.",
         "candidate_pool":"request_exposures","query_category_filter":False,
+        "candidate_deduplication":CANDIDATE_DEDUPLICATION,
         "query":"Current Query target/exposures remain absent from query_input.",
         "collaborative_fit_cutoff_exclusive":min(r["response_input"]["history_cutoff_exclusive"] for r in requests),
         "author_provenance":json.loads((Path(__file__).parents[1]/"vendor/usermirrorer/PROVENANCE.json").read_text())}
