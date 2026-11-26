@@ -124,6 +124,7 @@ def parser():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--split", choices=["train", "test"], default="train")
     p.add_argument("--request-id", type=int, action="append")
+    p.add_argument("--selection", type=Path, help="Complete-Train scene selection; all selected IDs, no count truncation")
     p.add_argument("--count", type=int, default=0, help="Prepared scenes: 0 uses all; raw alternatives require an explicit positive count")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--sft-only", action="store_true", help="Generate strong teacher only; skip weak model, option predictor and DPO")
@@ -215,7 +216,14 @@ def main(argv=None):
         from agent_simulation.datasets.customer_scenes import read_scenes
         prepared, _ = read_scenes(args.scenes, dataset=args.dataset, split=args.split)
         require(prepared, "No prepared scenes survived; inspect skipped.jsonl")
-    require(prepared or args.count > 0, "Raw protocols require an explicit positive --count")
+    require(not (args.selection and (args.request_id or args.scenes)),
+            "Use selection, prepared scenes, or explicit request IDs separately")
+    selected_ids, selection_manifest = None, None
+    if args.selection:
+        from agent_simulation.datasets.customer_selection import read_selection
+        selected_ids, selection_manifest = read_selection(args.selection, dataset=args.dataset, split=args.split)
+        require(args.count == 0, "Selection already fixes the budget; omit --count")
+    require(prepared or selected_ids or args.count > 0, "Raw protocols require --selection or a positive --count")
     require(all(v is None for v in (args.predictor_url,args.predictor_model,args.predictor_tokenizer))
             or all(v is not None for v in (args.predictor_url,args.predictor_model,args.predictor_tokenizer)),
             "Supply predictor URL, model and tokenizer together")
@@ -228,7 +236,7 @@ def main(argv=None):
     records, coverage, observed = [], [], []
     with ExitStack() as resources:
         data = resources.enter_context(closing(SFTDataset(args.dataset, args.strong_tokenizer)))
-        ids = args.request_id or ((sorted(prepared)[:args.count] if args.count else sorted(prepared)) if prepared else select_record_ids(
+        ids = selected_ids or args.request_id or ((sorted(prepared)[:args.count] if args.count else sorted(prepared)) if prepared else select_record_ids(
             data.catalog.connection, args.dataset, "customer", args.split, args.count, args.seed))
         require(not prepared or set(ids) <= set(prepared), "Request missing from prepared scenes")
         require(ids and len(ids) == len(set(ids)), "Empty or duplicate request IDs")
@@ -264,6 +272,8 @@ def main(argv=None):
                         "evaluation/customer_curation.py", "evaluation/customer_filtering.py", "evaluation/customer_quality.py",
                         "evaluation/customer_evidence.py", "evaluation/customer_contract.py", "evaluation/trajectories.py",
                         "datasets/customer_candidates.py", "agents/prompts/customer_ekb.py", "inference/agentic.py")},
+                    "selection_manifest_sha256": sha256(args.selection / "manifest.json") if args.selection else None,
+                    "selection_population": selection_manifest["population"] if selection_manifest else None,
                     "evaluation_protocol": "A: independent Query; Response conditioned on recorded Query and frozen candidates. Not end-to-end simulation.",
                     "response_styles": styles, "evaluation_only": args.evaluation_only,
                     "author_provenance": json.loads((Path(__file__).parents[1] / "vendor/usermirrorer/PROVENANCE.json").read_text()),

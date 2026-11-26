@@ -11,6 +11,8 @@ EVIDENCE_NOTE = """
 Keep the original stimulus, knowledge and evaluation explanation. In evidence_refs,
 list only supplied fact IDs for each stage; use [] when evidence is unavailable.
 Never generate field paths, serialized values or copies of the facts.
+When fact_layout is present, each facts row follows those columns; fact_sources
+holds shared metadata and an optional row metadata object supplies other fields.
 Facts with clicked_items describe clicks, purchased_items describe purchases.
 A citation proves source availability, not that a preference inference is true.
 Mark tentative inferences and unknowns in ordinary EKB prose. Do not infer price
@@ -64,6 +66,71 @@ def attach_sources(context):
     return context
 
 
+FACT_LAYOUT = ["source_id", "field", "value", "extra_metadata_optional"]
+
+
+def compact_sources(context):
+    """Lossless wire format: source metadata once, unchanged fact IDs and values."""
+    from collections import defaultdict
+    from agent_simulation.data.common import require
+    require("fact_layout" not in context and "fact_sources" not in context,
+            "Context is already encoded or uses reserved fact fields")
+    result = deepcopy(context)
+    if "facts" not in result:
+        return result
+    grouped = defaultdict(list)
+    for key, fact in result["facts"].items():
+        grouped[fact["source_id"]].append((key, fact))
+    sources, packed = {}, {}
+    for source, entries in grouped.items():
+        first = entries[0][1]
+        common = {k: v for k, v in first.items()
+                  if k not in ("source_id", "field", "value")
+                  and all(k in f and f[k] == v for _, f in entries)}
+        sources[source] = common
+        for key, fact in entries:
+            extra = {k: v for k, v in fact.items()
+                     if k not in ("source_id", "field", "value") and k not in common}
+            packed[key] = [source, fact["field"], fact["value"]]
+            if extra:
+                packed[key].append(extra)
+    result.update(fact_layout=list(FACT_LAYOUT), fact_sources=sources, facts=packed)
+    return result
+
+
+def expand_sources(context):
+    """Read both original transcripts and the reversible compact context format."""
+    from agent_simulation.data.common import require
+    if "fact_layout" not in context:
+        require("fact_sources" not in context, "Missing compact fact layout")
+        return context
+    require(context["fact_layout"] == FACT_LAYOUT, "Unknown compact fact layout")
+    result = deepcopy(context)
+    sources = result.pop("fact_sources", None)
+    result.pop("fact_layout")
+    require(isinstance(sources, dict) and isinstance(result.get("facts"), dict),
+            "Invalid compact fact tables")
+    facts = {}
+    for key, row in result["facts"].items():
+        require(isinstance(row, list) and len(row) in (3, 4), "Invalid compact fact row")
+        source, field, value = row[:3]
+        require(isinstance(source, str) and source in sources and isinstance(field, str),
+                "Unknown compact fact source")
+        common, extra = sources[source], row[3] if len(row) == 4 else {}
+        require(isinstance(common, dict) and isinstance(extra, dict), "Invalid fact metadata")
+        require(not (set(common) & set(extra)) and
+                not ({"source_id", "field", "value"} & (set(common) | set(extra))),
+                "Conflicting compact fact metadata")
+        facts[key] = {**common, **extra, "source_id": source, "field": field, "value": value}
+    result["facts"] = facts
+    return result
+
+
+def encode_context(context):
+    return json.dumps(compact_sources(context), ensure_ascii=False, allow_nan=False,
+                      separators=(",", ":"))
+
+
 def check_evidence(trajectory):
     """Recompute from actual transcript; never trust a cached model quality verdict."""
     if trajectory.get("stage") != "response":
@@ -88,6 +155,7 @@ def check_evidence(trajectory):
     except ValueError:
         return {"accepted": False, "status": "failed", "reasons": ["invalid_evidence_refs"]}
     sources, cutoff, actor = {}, None, None
+    reasons = []
     for message in trajectory.get("messages", []):
         if message.get("role") not in ("user", "tool"):
             continue
@@ -96,11 +164,15 @@ def check_evidence(trajectory):
         except (ValueError, TypeError):
             continue
         if isinstance(obj, dict):
+            try:
+                obj = expand_sources(obj)
+            except ValueError:
+                reasons.append("invalid_fact_encoding")
+                continue
             sources.update(obj.get("facts", {}))
             actor = obj.get("evidence_actor_id", actor)
             if "history_cutoff_exclusive" in obj:
                 cutoff = obj["history_cutoff_exclusive"]
-    reasons = []
     final_messages = [m for m in trajectory.get("messages", [])
                       if m.get("role") == "assistant" and not m.get("tool_calls")]
     if final_messages:

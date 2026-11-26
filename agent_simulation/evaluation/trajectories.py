@@ -135,8 +135,10 @@ def trajectory_messages(binding, *, role, stage, theory):
             instructions += "\nPredict the next observed quote, rather than an unobserved profit-optimal price."
         output = teacher_output(schemas, customer_ekb=role == "customer" and theory)
         output_note = "Return the original explanation and action together. Schema: "
+    from agent_simulation.evaluation.customer_evidence import encode_context
+    context = binding.initial_context()
     messages = [{"role": "system", "content": instructions + "\n" + output_note + encoded(output)},
-                {"role": "user", "content": encoded(binding.initial_context())}]
+                {"role": "user", "content": encode_context(context) if role == "customer" else encoded(context)}]
     return schemas, messages
 
 

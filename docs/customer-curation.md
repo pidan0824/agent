@@ -23,10 +23,84 @@
 
 这属于作者式、结果条件化的离线选择题构造。真实目标参与题目构造是该协议的一部分；生成模型只看到候选事实，不能看到正例位置和当前动作标签。它与真实市场曝光下的行为评估是两个明确的协议。旧 `full`／`retrieved` 仅作为显式可选协议，默认使用准备好的 `sampled`（采样候选） 场景。
 
+## 完整 Lite Train 的生成前选样
+
+主实验候选池使用完整 Lite 官方 Train，不受旧 quality-3k 或 5% 时间窗口限制。
+标签、原始事实和历史仍完整保留；只选择本轮需要构造场景的请求。
+在项目目录下：
+
+```bash
+./agent_simulation/python.sh -m agent_simulation.datasets.labels build \
+  --catalog data/kuaisearch/lite/source/catalog \
+  --output result/lite-full-training-NEW/sft
+
+dataset=result/lite-full-training-NEW/sft
+./agent_simulation/python.sh -m agent_simulation.datasets.customer_selection \
+  --dataset "$dataset" --output result/customer-selection-NEW --per-scene 100
+```
+
+`--per-scene` 是可调的**每个行为/历史/曝光分层的原请求上限**，不是全局 3,000 条限制，
+也不是每个请求生成多少条 CoT。100 只是预算示例，不是验证过的最佳规模。
+选择器检查完整 Train 的 ID 集合，拒绝旧时间窗口；Test 不进入排序和历史质量计算。
+
+分层包括点击/购买四种组合、单/多正例、冷启动/短历史/较丰富历史，以及
+1–12、13–32、33–128、129+ 件曝光。层内优先曝光商品标题完整、覆盖不同用户的请求，
+再按标题覆盖率和固定种子打破平局。检查所有曝光，不能仅检查真实正例来构造有利上下文。
+历史仅计严格早于请求的 Train 事件；同一时刻、未来和 Test 记录不参与。
+冷启动、无交互和长列表分层保留，信息不足不能自动等同于错误行为。
+缺失标题仍可能以 partial 进入预算；全部曝光均无标题等无法支持该场景的记录列入排除原因。
+这是输入完整性代理和覆盖控制，不是自然语言、语义或行为真实性认证。
+
+输出 `candidates.parquet` 保留整个 Train 的统计、分层、排名、选择状态和排除原因；
+`selected.parquet` 保存本轮选中的 ID；manifest 保存数据版本、哈希、总量和每层覆盖。
+筛选改变训练分布，尤其不能把分层后的购买率当成自然购买率；原请求权重不自动校正此偏移。
+完整标签池未删改，可以独立用于直接动作训练。
+
+场景构造与生成入口直接读取同一清单，避免重新随机抽样：
+
+```bash
+./agent_simulation/python.sh -m agent_simulation.datasets.customer_scenes \
+  --dataset "$dataset" --selection result/customer-selection-NEW \
+  --output result/customer-scenes-NEW
+
+# 或在完整曝光协议下生成；尚未通过实际 token 预算检查的长请求仍可能超长。
+./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
+  --dataset "$dataset" --selection result/customer-selection-NEW \
+  --candidate-policies full --output result/customer-teacher-NEW \
+  --split train --modes fixed --samples 1 --sft-only
+```
+
+`--selection` 消费整个已选清单，不再加 `--count` 截取，否则会破坏各层配额。
+准备短列表时，历史不足等原有可构造性检查仍可能跳过 Response 子场景；Query 保持独立。
+生成前输入预算检查以及生成后的行为/证据筛选仍然需要执行。
+这些命令说明运行方式，不表示已启动模型生成或训练。
+
+## 紧凑事实上下文
+
+Customer 轨迹初始上下文共用 `encode_context`，覆盖场景长度检查、direct/EKB、
+真实动作 SFT 和 curation 对照评估。相同来源的公共元数据集中到 `fact_sources`；
+`facts` 的每行按 `fact_layout` 给出来源、字段、原值及可选的其他元数据。
+原引用 ID 不变，事实值、历史归属、时间、未知价格及“非当前报价”语义全部保留，
+没有通过删除商品、裁剪标签或改写历史来缩短输入。JSON 去掉非必要空白。
+证据检查能展开新格式，也能读取旧轨迹；旧结果文件不重写。
+这属于可逆的上下文表示优化，尚未声称等价模型效果或特定生成加速比。
+
+2026-11-26 在完整 Lite Train 上执行了 CPU 选样审计：539,012 个 Customer 请求、
+74 个非空分层；每层最多 100 个请求的示例选中 6,313 条，覆盖 5,995 位用户，
+包含 2,097 条冷启动和 1,348 条 129+ 曝光请求。此批标签通过了全部基础完整性检查，
+且曝光标题覆盖率均为 100%，所以该示例主要起分层与用户覆盖作用，不能宣传为已识别并剔除语义噪声。
+完整标签位于 result/lite-full-training-20261126/sft；
+候选审计与示例清单位于其同级 customer-scenes-100，均为不提交 Git 的本地数据产物。
+
+使用 Qwen3.5-9B tokenizer 对三条实际请求验证了紧凑格式可完整还原原事实：
+6/13/40 件曝光的上下文 token 分别由 5,234/9,884/19,240 降至 3,562/6,707/12,392，
+减少约 32%–36%。这里只统计事实上下文，未包含系统提示，三个例子不代表全量平均。
+没有运行教师生成或正式训练，也未验证模型行为效果。
+
 ## 1. 仅准备场景
 
 ```bash
-dataset=result/lite-5pct-quality-3k-20261112/release/sft
+dataset=result/lite-full-training-NEW/sft
 ./agent_simulation/python.sh -m agent_simulation.datasets.customer_scenes \
   --dataset "$dataset" --output result/customer-scenes \
   --split train --count 100 --min-items 2 --max-items 12

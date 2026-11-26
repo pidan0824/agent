@@ -160,8 +160,10 @@ def main(argv=None):
     p.add_argument("--dataset",type=Path,required=True)
     p.add_argument("--output",type=Path,required=True)
     p.add_argument("--split",choices=["train","test"],default="train")
-    p.add_argument("--request-id",type=int,action="append")
-    p.add_argument("--count",type=int,default=100)
+    selection = p.add_mutually_exclusive_group()
+    selection.add_argument("--request-id",type=int,action="append")
+    selection.add_argument("--selection",type=Path,help="Complete-Train scene selection directory; uses all selected IDs")
+    selection.add_argument("--count",type=int,default=100)
     p.add_argument("--seed",type=int,default=42)
     p.add_argument("--min-items",type=int,default=2)
     p.add_argument("--max-items",type=int,default=12)
@@ -176,7 +178,12 @@ def main(argv=None):
     release=json.loads((args.dataset/"manifest.json").read_text())
     with closing(Catalog(release["catalog"])) as catalog:
         require(sha256(catalog.directory/"manifest.json")==release["catalog_manifest_sha256"], "Catalog changed")
-        ids=args.request_id or select_record_ids(catalog.connection,args.dataset,"customer",args.split,args.count,args.seed)
+        selection_manifest = None
+        if args.selection:
+            from agent_simulation.datasets.customer_selection import read_selection
+            ids, selection_manifest = read_selection(args.selection, dataset=args.dataset, split=args.split)
+        else:
+            ids=args.request_id or select_record_ids(catalog.connection,args.dataset,"customer",args.split,args.count,args.seed)
         members={r[0] for r in catalog.connection.execute(
             "SELECT session_id FROM read_parquet(?) WHERE session_id IN (SELECT unnest(?::BIGINT[]))",
             [str(args.dataset/"customer"/args.split/"labels.parquet"),ids]).fetchall()}
@@ -198,6 +205,8 @@ def main(argv=None):
     manifest={"schema":"customer-single-positive-scenes-v2","dataset":str(args.dataset.resolve()),
         "dataset_manifest_sha256":sha256(args.dataset/"manifest.json"),"split":args.split,
         "args":{k:str(v) if isinstance(v,Path) else v for k,v in vars(args).items()},
+        "selection_manifest_sha256":sha256(args.selection/"manifest.json") if args.selection else None,
+        "selection_population":selection_manifest["population"] if selection_manifest else None,
         "scenes_sha256":sha256(args.output/"scenes.jsonl"),"prepared":len(scenes),"skipped":len(skipped),
         "query_scenes":sum(s["query_enabled"] for s in scenes),
         "response_scenes":sum(len(s["response_scenes"]) for s in scenes),
