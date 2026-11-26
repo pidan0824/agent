@@ -27,3 +27,17 @@ def agentic_seller_instructions(*, theory=True):
             + "\nIn each rationale.evidence entry cite at least one supplied evidence_id in square brackets, "
               "for example [S0123456789ab]. Cite only input or actual tool observations, not your own hypotheses. "
               "A citation identifies an available source, not proof of the inference.")
+
+
+def concise_seller_instructions():
+    """Short observed-quote rationale with the same source and uncertainty rules."""
+    return (FACT_RULES + """
+Predict the next observed quote for each requested product from strictly prior
+observations, not a profit-optimal price. Return the supplied rationale/action JSON.
+Use one short hypothesis, one or two concise evidence statements, and one short
+uncertainty statement. Cite an actual supplied evidence_id as [S...] in every
+evidence statement. Distinguish a stable quote from evidence of a price change.
+Sparse traffic or a correlation alone does not establish causal demand or elasticity.
+Unknown costs, margins, current competitors and future outcomes must stay unknown.
+Do not restate all input records. A source citation does not prove your inference.
+""")

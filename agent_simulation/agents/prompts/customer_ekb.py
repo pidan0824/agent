@@ -28,3 +28,17 @@ item across both fields; full-exposure decisions may contain multiple items.
 Both fields may be empty. Purchase need not imply a recorded click.
 Query generation is a separate direct-action task, outside this EKB contract.
 """ + EVIDENCE_NOTE
+
+
+def concise_ekb_instructions():
+    """Budgeted task adaptation; the original author template remains unchanged."""
+    return """Predict the user's recorded clicks and purchases from the supplied facts.
+Return the supplied rationale/action JSON. Keep stimulus, knowledge and evaluation
+to one short sentence each: current need, the most relevant observed comparison,
+and the resulting choice or abstention. Do not repeat the candidate list.
+Use zero to two supported factor labels per list. Use Unknown evaluation_style
+unless observations justify a more specific description. An explanation is a
+tentative account, not the person's observed thoughts. Do not invent motives,
+finances, emotional states or current prices. Relevance does not imply a click,
+and a purchase need not have a recorded click. Empty actions are valid.
+""" + EVIDENCE_NOTE
