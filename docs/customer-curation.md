@@ -818,3 +818,47 @@ Artifacts under `tmp/response-diagnosis-20261127/`: `native-probe/`,
 All newly started model processes/services were allowed to finish and only our
 own services were stopped. New 32B teacher CoT generation remains pending
 sufficient GPU headroom; it was not replaced with a different teacher.
+
+### Small fit-only teacher input preparation (2026-11-27)
+
+The next teacher diagnostic is frozen under `tmp/new-cot-fit-probe-20261127/`.
+It uses 8 distinct users/parents from the complete-Train selection (539,012
+parents; 6,313 selected), not the old 3,000-request subset. Selection is limited
+to the existing fit time interval [1, 655707], excludes parent IDs in existing
+dev/audit case files, and takes two parents from each observed behavior group.
+These are diagnostic strata, not an unbiased accuracy sample. This small batch
+uses established histories; it does not test cold-start performance.
+
+The current scene builder produced 11 Response children plus 8 Query rows in
+30.96 seconds on CPU, with no skipped scenes. Parent actions are recovered
+exactly by the union of child targets. Response children comprise 2 no-action,
+4 click-only, 3 purchase-only and 2 click-and-purchase cases. Two children have
+only one candidate: their real purchase supervision is retained, but they
+cannot measure discrimination between products.
+
+Offline audit uses the production history budget (2048), scene budget selector,
+prompt builder and both actual tokenizers. Each child retains 4–9 strictly prior
+history events; 5 have an exact-query history match, 1 has a candidate-item
+interaction match, and none has an unsupported identical-visible-product group.
+Changing current target labels leaves all teacher requests unchanged. The
+non-system messages match the paired observed-action inputs. History timestamps
+and feature cutoffs are checked, as is recovery of every parent's actions.
+
+| Input token count | Total over 11 calls | Range |
+| --- | ---: | ---: |
+| Short prompt, Qwen3-32B tokenizer | 46,577 | 3,274–5,595 |
+| Same context, original explanation instructions | 56,059 | 4,136–6,457 |
+| Short prompt, Qwen3.5-9B tokenizer | 46,319 | 3,263–5,568 |
+
+Short instructions reduce input tokens by 16.9% on this batch at the same
+history budget. Every input fits 8192 tokens with 768 reserved for output, using
+either tokenizer. Eleven one-sample calls cap output at 8,448 tokens; neither
+this cap nor input-token reduction proves wall-time savings or teacher quality.
+
+`selection.json`, `input-audit.json`, `teacher-requests.jsonl` and
+`generation-command.json` record the selection, input/source hashes and exact
+planned production command. Reproducible local drivers are
+`tmp/prepare_new_cot_fit_probe.py` and `tmp/audit_new_cot_fit_probe.py`.
+The teacher remains Qwen3-32B BF16. This preparation did not start teacher
+generation, update model parameters, or touch other GPU processes. Actual
+generation quality, latency and matched training remain unverified.
