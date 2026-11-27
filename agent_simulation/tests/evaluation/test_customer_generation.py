@@ -49,6 +49,8 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual((research.samples, research.temperature, research.max_new_tokens,
                           research.scene_concurrency), (10, .7, 2048, 1))
         light = options("--cot-preset", "lightweight", "--sft-only")
+        self.assertEqual(light.history_token_budget, 2048)
+        self.assertIsNone(research.history_token_budget)
         self.assertEqual((light.samples, light.temperature, light.max_new_tokens,
                           light.scene_concurrency), (1, 0., 768, 4))
         override = options("--cot-preset", "lightweight", "--sft-only",
@@ -173,7 +175,7 @@ class GenerationTests(unittest.TestCase):
                     (root / name).mkdir()
                     (root / name / "manifest.json").write_text("{}")
                 data = Mock()
-                data.tokenizer = object()
+                data.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: list(text))
                 data.catalog.connection.execute.return_value.fetchall.return_value = [(i,) for i in prepared]
                 stack.enter_context(patch.object(module, "SFTDataset", return_value=data))
                 stack.enter_context(patch.object(module, "load_tokenizer", return_value=object()))

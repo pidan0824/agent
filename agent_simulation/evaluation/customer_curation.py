@@ -26,18 +26,68 @@ from agent_simulation.inference.agentic import AgenticClient
 from agent_simulation.inference.requests import load_tokenizer, ContextCapacityError
 
 
+def budget_history(context, history, *, stage, tokenizer, budget, event_limit=None):
+    """Fit whole historical events; keep recent and relevant evidence, never labels."""
+    from agent_simulation.evaluation.customer_evidence import attach_sources, encode_context
+    def render(events):
+        value = deepcopy(context)
+        value["observed_history"] = sorted(events, key=lambda e: (e["time_index"], e["session_id"]))
+        value["selected_history_events"] = len(events)
+        value["history_token_budget"] = budget
+        return attach_sources(value)
+    empty = render([])
+    if not budget or not history:
+        return empty
+    def tokens(value):
+        return len(tokenizer.encode(encode_context(value), add_special_tokens=False))
+    baseline = tokens(empty)
+    complete = render(history)
+    if (event_limit is None or len(history) <= event_limit) and tokens(complete) - baseline <= budget:
+        return complete
+    def query_key(value):
+        return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
+    candidate_ids = {p["item_id"] for p in context.get("displayed_items", [])}
+    query = query_key(context.get("query")) if stage == "response" else ""
+    latest = max(history, key=lambda e: (e["time_index"], e["session_id"]))
+    def priority(event):
+        same_item = stage == "response" and any(p.get("item_id") in candidate_ids
+            for field in ("clicked_items", "purchased_items") for p in event.get(field, []))
+        same_query = bool(query) and query_key(event.get("query")) == query
+        return (event is not latest, not same_item, not same_query, -event["time_index"], event["session_id"])
+    selected, result = [], empty
+    for event in sorted(history, key=priority):
+        if event_limit is not None and len(selected) >= event_limit:
+            break
+        proposed = render([*selected, event])
+        if tokens(proposed) - baseline <= budget:
+            selected.append(event)
+            result = proposed
+    return result
+
+
 class CurationTools(FrozenSampleTools):
-    def __init__(self, request, stage, *, mode, theory=True, history_limit=10, concise=False):
+    def __init__(self, request, stage, *, mode, theory=True, history_limit=10, concise=False,
+                 history_token_budget=None, tokenizer=None):
         super().__init__(request, stage, theory=theory)
         require(mode in ("fixed", "autonomous"), "Unknown information mode")
         require(type(history_limit) is int and history_limit >= 0, "Nonnegative integer history limit required")
         self.mode, self.history_limit = mode, history_limit
+        require(history_token_budget is None or (type(history_token_budget) is int and history_token_budget >= 0),
+                "Nonnegative history token budget required")
+        require(history_token_budget is None or mode == "fixed", "History token budget requires fixed mode")
+        require(not history_token_budget or callable(getattr(tokenizer, "encode", None)),
+                "History token budget requires the model tokenizer")
+        self.history_token_budget, self.tokenizer = history_token_budget, tokenizer
+        self._budget_context = None
         self.concise = concise
         if mode == "fixed":
             self.schemas = []
             self.parameters = {}
 
     def initial_context(self):
+        if self._budget_context is not None:
+            self.guard()
+            return deepcopy(self._budget_context)
         context = super().initial_context()
         context["information_mode"] = self.mode
         if "candidate_protocol" in self.context:
@@ -59,26 +109,40 @@ class CurationTools(FrozenSampleTools):
                             related.append((not same_item, -event["time_index"], event["session_id"], event))
                     related.sort(key=lambda row: row[:3])
                     recalled = [row[3] for row in related[:min(2, self.history_limit - 1)]]
-                    # Replace only the oldest recent events; always keep one recent event.
-                    history = sorted(recalled + history[len(recalled):],
-                                     key=lambda event: (event["time_index"], event["session_id"]))
+                    if self.history_token_budget is not None:
+                        # Let the token budget choose among recent evidence and both
+                        # relevance routes, including exact-query events with no actions.
+                        query_events = [row[3] for row in related
+                                        if query and query_key(row[3].get("query", "")) == query]
+                        query_events.sort(key=lambda event: (-event["time_index"], event["session_id"]))
+                        candidates = {event["session_id"]: event for event in history + recalled + query_events[:2]}
+                        history = list(candidates.values())
+                    else:
+                        # Legacy count-only policy replaces the oldest recent events.
+                        history = sorted(recalled + history[len(recalled):],
+                                         key=lambda event: (event["time_index"], event["session_id"]))
                 context["displayed_items"] = deepcopy(self.displayed)
                 context["selected_history_events"] = len(history)
                 context["history_scope"] = (
                     "Selected events from available history; unshown events may contain other actions.")
             context["observed_history"] = deepcopy(history)
+        if self.history_token_budget is not None:
+            self._budget_context = budget_history(context, history, stage=self.stage,
+                tokenizer=self.tokenizer, budget=self.history_token_budget, event_limit=self.history_limit)
+            return deepcopy(self._budget_context)
         from agent_simulation.evaluation.customer_evidence import attach_sources
         return attach_sources(context)
 
 
-def fixed_response_requests(response_input, *, history_limit=10):
+def fixed_response_requests(response_input, *, history_limit=10, history_token_budget=None, tokenizer=None):
     """Use the exact fixed curation prompts and schemas in controlled evaluation."""
     from agent_simulation.agents.agentic import initial_agentic_request, teacher_output
     result = {}
     for style in ("direct", "ekb"):
         theory = style == "ekb"
         binding = CurationTools({"response_input": response_input}, "response",
-                               mode="fixed", theory=theory, history_limit=history_limit)
+                               mode="fixed", theory=theory, history_limit=history_limit,
+                               history_token_budget=history_token_budget, tokenizer=tokenizer)
         schemas, messages = trajectory_messages(binding, role="customer", stage="response", theory=theory)
         messages, tools, _ = initial_agentic_request(messages, [], AgenticOptions(max_model_calls=1, theory=theory))
         result[style] = {"messages": messages, "tools": tools,
@@ -86,7 +150,8 @@ def fixed_response_requests(response_input, *, history_limit=10):
     return binding.initial_context(), result
 
 
-def observed_action_rows(request, identity, split, dataset_identity, *, bundle=None, policies=None):
+def observed_action_rows(request, identity, split, dataset_identity, *, bundle=None, policies=None,
+                         history_token_budget=None, tokenizer=None):
     """Observed actions use prepared child scenes; explicit raw protocols keep full labels."""
     if split != "train":
         return []
@@ -98,7 +163,8 @@ def observed_action_rows(request, identity, split, dataset_identity, *, bundle=N
     observed_policies = tuple(dict.fromkeys("sampled" if p == "sampled" else "full" for p in policies))
     result = []
     for stage, policy, adapted, candidate in generation_jobs(request, bundle=bundle, policies=observed_policies):
-        binding = CurationTools(adapted, stage, mode="fixed", theory=False)
+        binding = CurationTools(adapted, stage, mode="fixed", theory=False,
+                               history_token_budget=history_token_budget, tokenizer=tokenizer)
         schemas, prompt = trajectory_messages(binding, role="customer", stage=stage, theory=False)
         prompt, _, _ = initial_agentic_request(prompt, [], AgenticOptions(max_model_calls=1, theory=False))
         target = deepcopy(adapted[stage + "_target"])
@@ -176,6 +242,8 @@ def parser():
     p.add_argument("--teacher-budget", type=int, help="Optional lightweight Train Response scene budget; raw supervision retained")
     p.add_argument("--samples", type=int)
     p.add_argument("--sample-concurrency", type=int, default=2)
+    p.add_argument("--history-token-budget", type=int,
+                   help="Fixed-mode history contribution token limit; lightweight defaults to 2048")
     p.add_argument("--scenes", type=Path, help="Prepared sampled scenes from datasets.customer_scenes")
     p.add_argument("--candidate-policies", nargs="+", choices=["sampled", "full", "retrieved"], default=["sampled"])
     p.add_argument("--candidate-count", type=int, default=10)
@@ -341,7 +409,8 @@ def main(argv=None):
                 if not args.evaluation_only:
                     observed.extend(observed_action_rows(request, identity, args.split,
                         manifest["dataset_manifest_sha256"], bundle=prepared.get(identity),
-                        policies=args.candidate_policies))
+                        policies=args.candidate_policies, history_token_budget=args.history_token_budget,
+                        tokenizer=data.tokenizer))
                 for stage, policy, adapted, candidate in generation_jobs(request,
                         bundle=prepared.get(identity), policies=args.candidate_policies,
                         limit=args.candidate_count, encoder=encoder):
@@ -356,7 +425,8 @@ def main(argv=None):
             scene_identity = candidate.get("scene_id", identity) if candidate else identity
             use_theory = stage == "response" and style == "ekb"
             binding = CurationTools(adapted, stage, mode=mode, theory=use_theory,
-                                   concise=args.cot_preset == "lightweight")
+                                   concise=args.cot_preset == "lightweight",
+                                   history_token_budget=args.history_token_budget, tokenizer=data.tokenizer)
             options = AgenticOptions(max_model_calls=1 if mode == "fixed" else args.max_model_calls,
                                      max_tool_calls=args.max_tool_calls, theory=use_theory)
             async def one(sample):
@@ -392,7 +462,8 @@ def main(argv=None):
         budget_report = None
         if args.teacher_budget is not None:
             with (args.output / "teacher-scene-evidence.jsonl").open("w") as audit:
-                jobs, budget_report = budget_scenes(jobs, args.teacher_budget, args.seed, audit)
+                jobs, budget_report = budget_scenes(jobs, args.teacher_budget, args.seed, audit,
+                    history_token_budget=args.history_token_budget, tokenizer=data.tokenizer)
             (args.output / "teacher-budget.json").write_text(encoded(budget_report) + "\n")
 
         with (args.output / "records.jsonl").open("w") as output:

@@ -11,8 +11,10 @@ def single_item_actions(ids):
     return actions
 
 
-def single_item_schema(ids):
-    return {"anyOf": [{"const": action} for action in single_item_actions(ids)]}
+def single_item_schema(ids, *, compact=False):
+    actions = single_item_actions(ids)
+    # Compact prompt notation; keep the existing decoder/validator contract by default.
+    return {"enum": actions} if compact else {"anyOf": [{"const": action} for action in actions]}
 
 
 def validate_request_splits(records):

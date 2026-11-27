@@ -75,10 +75,25 @@ class FrozenSellerSampleTools:
                 "item_id", "item_title", "brand_name", "category_level3_name",
                 "last_observed_price_raw", "last_observed_time_index", "last_valid_reference", "price_status",
             ) if key in product})
+            market = product.get("market_position")
+            if market is not None:
+                window = market.get("window")
+                require("recent" not in market or isinstance(window, dict), "Unqualified Seller market window")
+                if window is not None:
+                    require(type(window.get("start_inclusive")) is int
+                            and type(window.get("end_exclusive")) is int
+                            and 0 <= window["start_inclusive"] <= window["end_exclusive"] <= self.cutoff,
+                            "Future Seller market window")
+                # Reuse the precomputed public decision panel, omitting duplicate
+                # prose, simulation data and competitor retrieval bodies.
+                products[-1]["market_position"] = {key: deepcopy(market[key]) for key in
+                    ("status", "category_ids", "window", "recent") if key in market}
         return with_evidence_id({"profile": {key: value for key, value in self.context["profile"].items() if key != "seller_id"},
                 "history_cutoff_exclusive": self.cutoff, "owned_products": products,
                 "requested_price_item_ids": self.context["requested_price_item_ids"],
                 "behavior_features": self.features,
+                **({"market_semantics": self.context["market_semantics"]}
+                   if "market_semantics" in self.context else {}),
                 "memory_status": "No generated memories in the observed-data snapshot."})
 
     def guard(self):
@@ -135,6 +150,9 @@ def trajectory_messages(binding, *, role, stage, theory):
             instructions += "\nPredict the next observed quote, rather than an unobserved profit-optimal price."
         output = teacher_output(schemas, customer_ekb=role == "customer" and theory)
         output_note = "Return the original explanation and action together. Schema: "
+    if single:
+        compact = single_item_schema([p["item_id"] for p in binding.displayed], compact=True)
+        output = compact if direct else teacher_output([compact], customer_ekb=True)
     from agent_simulation.evaluation.customer_evidence import encode_context
     context = binding.initial_context()
     messages = [{"role": "system", "content": instructions + "\n" + output_note + encoded(output)},

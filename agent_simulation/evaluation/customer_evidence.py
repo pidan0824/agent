@@ -141,7 +141,7 @@ def compact_sources(context):
     """Lossless wire format: source metadata once, unchanged fact IDs and values."""
     from collections import defaultdict
     from agent_simulation.data.common import require
-    require(not {"fact_layout", "fact_sources", "fact_refs_encoding", "fact_refs_note"}.intersection(context),
+    require(not {"fact_layout", "fact_sources", "fact_refs_encoding", "fact_refs_note", "history_item_tables"}.intersection(context),
             "Context is already encoded or uses reserved fact fields")
     result = deepcopy(context)
     if "facts" not in result:
@@ -164,12 +164,34 @@ def compact_sources(context):
             if extra:
                 packed[key].append(extra)
     result.update(fact_layout=list(FACT_LAYOUT), fact_sources=sources, facts=packed)
+    # Reuse the shared table format inside multi-item historical action facts.
+    # Fact IDs, source metadata, action order and per-observation prices stay intact.
+    from agent_simulation.agents.prompts.context_format import pack, compact_json, MIN_TABLE_SAVINGS
+    from agent_simulation.agents.prompts.instructions import TABLE_NOTE
+    candidate = {**result, "facts": dict(packed)}
+    changed = False
+    for key, row in packed.items():
+        if row[1] in ("clicked_items", "purchased_items") and isinstance(row[2], list) and len(row[2]) > 1:
+            value = pack(row[2], table_paths=((),))
+            if isinstance(value, dict):
+                candidate["facts"][key] = [*row[:2], value, *row[3:]]
+                changed = True
+    if not changed:
+        return result
+    candidate["history_item_tables"] = TABLE_NOTE
+    if len(compact_json(result)) - len(compact_json(candidate)) >= MIN_TABLE_SAVINGS:
+        return candidate
     return result
 
 
 def expand_sources(context):
     """Read both original transcripts and the reversible compact context format."""
     from agent_simulation.data.common import require
+    from agent_simulation.agents.prompts.instructions import TABLE_NOTE
+    item_tables = "history_item_tables" in context
+    if item_tables:
+        require(context["history_item_tables"] == TABLE_NOTE and "fact_layout" in context,
+                "Invalid history item table encoding")
     derived_refs = "fact_refs_encoding" in context or "fact_refs_note" in context
     if derived_refs:
         require(context.get("fact_refs_encoding") == FACT_REFS_ENCODING and
@@ -182,6 +204,7 @@ def expand_sources(context):
     result = deepcopy(context)
     sources = result.pop("fact_sources", None)
     result.pop("fact_layout")
+    result.pop("history_item_tables", None)
     require(isinstance(sources, dict) and isinstance(result.get("facts"), dict),
             "Invalid compact fact tables")
     facts = {}
@@ -190,6 +213,21 @@ def expand_sources(context):
         source, field, value = row[:3]
         require(isinstance(source, str) and source in sources and isinstance(field, str),
                 "Unknown compact fact source")
+        if field in ("clicked_items", "purchased_items") and isinstance(value, dict):
+            require(item_tables, "Missing history item table encoding")
+            from agent_simulation.agents.prompts.context_format import unpack
+            require(set(value) == {"$table"} and isinstance(value["$table"], dict),
+                    "Invalid history item table")
+            table = value["$table"]
+            require(set(table) == {"columns", "shared", "rows"}
+                    and isinstance(table["columns"], list) and isinstance(table["shared"], dict)
+                    and isinstance(table["rows"], list), "Invalid history item table")
+            columns = table["columns"]
+            require(all(isinstance(k, str) for k in columns) and len(columns) == len(set(columns))
+                    and not set(columns).intersection(table["shared"])
+                    and all(isinstance(r, list) and len(r) == len(columns) for r in table["rows"]),
+                    "Conflicting history item table")
+            value = unpack(value)
         common, extra = sources[source], row[3] if len(row) == 4 else {}
         require(isinstance(common, dict) and isinstance(extra, dict), "Invalid fact metadata")
         require(not (set(common) & set(extra)) and

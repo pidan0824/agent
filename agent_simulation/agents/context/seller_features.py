@@ -26,11 +26,21 @@ def seller_behavior_features(records, *, seller_id, cutoff, item_ids=None):
                   and math.isfinite(r["price_raw"]) and r["price_raw"] > 0]
         pairs = list(zip(quotes, quotes[1:]))
         changes = [(b["price_raw"] - a["price_raw"]) / a["price_raw"] for a, b in pairs]
+        recent_changes = []
+        for before, after in reversed(pairs):
+            if before["price_raw"] != after["price_raw"]:
+                recent_changes.append({
+                    "before": {k: before[k] for k in ("time_index", "price_raw")},
+                    "after": {k: after[k] for k in ("time_index", "price_raw")}})
+                if len(recent_changes) == 2:
+                    break
         prices = [r["price_raw"] for r in quotes]
         exposure = sum(r.get("exposure_records", 0) for r in rows)
         products.append({"item_id": item, "observations": len(rows), "valid_quote_observations": len(quotes),
             "last_observed_index": rows[-1]["time_index"],
             "last_valid_price_raw": prices[-1] if prices else None,
+            "last_valid_quote_index": quotes[-1]["time_index"] if quotes else None,
+            "recent_quote_changes": list(reversed(recent_changes)),
             "median_price_raw": median(prices) if prices else None,
             "observed_quote_change_fraction": sum(c != 0 for c in changes) / len(changes) if changes else None,
             "observed_upward_pairs": sum(c > 0 for c in changes),

@@ -14,10 +14,14 @@ def resolve_generation_options(args):
     for name, default in (("samples", 1 if light else 10),
                           ("temperature", 0. if light else .7),
                           ("max_new_tokens", 768 if light else 2048),
-                          ("scene_concurrency", 4 if light else 1)):
+                          ("scene_concurrency", 4 if light else 1),
+                          ("history_token_budget", 2048 if light else None)):
         if getattr(args, name) is None:
             setattr(args, name, default)
     require(args.scene_concurrency > 0, "Positive scene concurrency required")
+    require(args.history_token_budget is None or
+            (args.history_token_budget >= 0 and args.modes == ["fixed"]),
+            "History token budget requires a nonnegative limit and fixed mode")
     if light:
         require(args.sft_only and args.modes == ["fixed"],
                 "Lightweight preset requires --sft-only and fixed mode")
@@ -92,7 +96,7 @@ def scene_evidence(binding):
             "identical_visible_groups": collisions, "unsupported_identical_groups": unresolved}
 
 
-def budget_scenes(jobs, budget, seed, audit):
+def budget_scenes(jobs, budget, seed, audit, *, history_token_budget=None, tokenizer=None):
     """Top evidence within behavior/domain strata, round-robin allocation.
 
     Labels are used only for coverage strata. Priority uses visible inputs only.
@@ -106,7 +110,8 @@ def budget_scenes(jobs, budget, seed, audit):
         identity, actor, stage, policy, adapted, candidate, mode, style = job
         require(stage == "response" and mode == "fixed" and style == "ekb",
                 "Teacher budget expects fixed Response EKB scenes")
-        features = scene_evidence(CurationTools(adapted, stage, mode=mode, concise=True))
+        features = scene_evidence(CurationTools(adapted, stage, mode=mode, concise=True,
+            history_token_budget=history_token_budget, tokenizer=tokenizer))
         scene_id = str(candidate.get("scene_id", identity))
         stratum = (candidate["domain"], behavior_stratum(adapted["response_target"]))
         priority = (features["has_query"] and features["complete_titles"],
