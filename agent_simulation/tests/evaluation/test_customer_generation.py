@@ -237,6 +237,8 @@ class GenerationTests(unittest.TestCase):
                 sft = [json.loads(line) for line in (root / "output/sft.jsonl").read_text().splitlines()]
                 self.assertTrue(all(row in sft for row in observed))
                 self.assertEqual((root / "output/preferences.jsonl").read_text(), "")
+                manifest = json.loads((root / "output/manifest.json").read_text())
+                self.assertIn("evaluation/customer_context.py", manifest["source_sha256"])
                 self.assertEqual(len(state.clients), 0 if budget == 0 else 1 if light else 2)
                 self.assertTrue(all(client.seed == 42 for client in state.clients))
 

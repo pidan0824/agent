@@ -10,21 +10,19 @@ from agent_simulation.evaluation.customer_quality import behavior_stratum
 
 
 def resolve_generation_options(args):
-    light = args.cot_preset == "lightweight"
+    from agent_simulation.evaluation.customer_context import resolve_context_options
+    context = resolve_context_options(args.cot_preset, args.modes, args.history_token_budget)
+    args.history_token_budget = context["history_token_budget"]
+    light = context["concise"]
     for name, default in (("samples", 1 if light else 10),
                           ("temperature", 0. if light else .7),
                           ("max_new_tokens", 768 if light else 2048),
-                          ("scene_concurrency", 4 if light else 1),
-                          ("history_token_budget", 2048 if light else None)):
+                          ("scene_concurrency", 4 if light else 1)):
         if getattr(args, name) is None:
             setattr(args, name, default)
     require(args.scene_concurrency > 0, "Positive scene concurrency required")
-    require(args.history_token_budget is None or
-            (args.history_token_budget >= 0 and args.modes == ["fixed"]),
-            "History token budget requires a nonnegative limit and fixed mode")
     if light:
-        require(args.sft_only and args.modes == ["fixed"],
-                "Lightweight preset requires --sft-only and fixed mode")
+        require(args.sft_only, "Lightweight preset requires --sft-only")
     if args.teacher_budget is not None:
         require(light and args.split == "train" and not args.evaluation_only
                 and args.teacher_budget >= 0 and args.response_styles in (None, ["ekb"])
@@ -74,22 +72,20 @@ def scene_evidence(binding):
                                      for identity, product in products.items()], include_shop=True)
     supported_ids = set()
     query_match = False
-    query = binding.context.get("query", "")
-    import unicodedata
-    def key(value):
-        return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
+    from agent_simulation.evaluation.customer_context import normalize_query
+    query = normalize_query(binding.context.get("query", ""))
     for fact in facts.values():
         if fact["kind"] != "history":
             continue
         if fact["field"] in ("clicked_items", "purchased_items"):
             supported_ids.update(p["item_id"] for p in fact["value"])
-        elif fact["field"] == "query" and key(query):
-            query_match |= key(fact["value"]) == key(query)
+        elif fact["field"] == "query" and query:
+            query_match |= normalize_query(fact["value"]) == query
     same_item = bool(supported_ids.intersection(products))
     # An identical pair remains unsupported if neither ID has visible interaction evidence.
     unresolved = [ids for ids in collisions if not supported_ids.intersection(ids)]
     complete = len(products) == len(binding.displayed) > 0 and all(str(p.get("item_title") or "").strip() for p in products.values())
-    return {"complete_titles": complete, "has_query": bool(key(query)),
+    return {"complete_titles": complete, "has_query": bool(query),
             "single_candidate": len(binding.displayed) == 1,
             "same_item_history": same_item, "exact_query_history": query_match,
             "identical_visible_groups": collisions, "unsupported_identical_groups": unresolved}
@@ -102,7 +98,7 @@ def budget_scenes(jobs, budget, seed, audit, *, history_token_budget=None, token
     Keep at most budget descriptors per stratum, not one asyncio task per scene.
     Raw observed rows are collected by the upstream iterator before selection.
     """
-    from agent_simulation.evaluation.customer_curation import CurationTools
+    from agent_simulation.evaluation.customer_context import CurationTools
     heaps = defaultdict(list)
     total = 0
     for order, job in enumerate(jobs):

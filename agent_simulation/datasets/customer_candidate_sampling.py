@@ -4,7 +4,8 @@ Offline, outcome-conditioned training scenes: sample distractors, insert one
 observed positive per scene, and retain no-click requests without inserting any target.
 No LLM inference or behavior evaluation is performed by this module.
 """
-from collections import Counter
+from bisect import bisect_left
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
@@ -91,8 +92,13 @@ class SampledCandidateBuilder:
         self.products = {p["item_id"]: deepcopy(p) for p in products}
         require(len(self.products) == len(products), "Duplicate candidate pool item")
         self.interactions = list(interactions)
-        require(all(type(r["time_index"]) is int and type(r["user_id"]) is int for r in interactions),
+        require(all(type(r["time_index"]) is int and type(r["user_id"]) is int for r in self.interactions),
                 "Interaction pool must have integer user/time IDs")
+        self._user_interactions = defaultdict(list)
+        for row in self.interactions:
+            self._user_interactions[row["user_id"]].append(row)
+        for history in self._user_interactions.values():
+            history.sort(key=lambda row: (row["time_index"], row["item_id"]))
         self.encoder, self.methods, self.seed = encoder, tuple(methods), seed
         self.min_items, self.max_items, self.min_history = min_items, max_items, min_history
         self._vectors = {}
@@ -131,8 +137,9 @@ class SampledCandidateBuilder:
         scene_id = f"{request['session_id']}:positive:{target_item_id}" if positives else f"{request['session_id']}:no_action"
         cutoff = context["history_cutoff_exclusive"]
         user = context["profile"]["user_id"]
-        prior = [r for r in self.interactions if r["time_index"] < cutoff]
-        owned = [r for r in prior if r["user_id"] == user]
+        history = self._user_interactions.get(user, ())
+        stop = bisect_left(history, cutoff, key=lambda row: row["time_index"])
+        owned = list(history[:stop])
         known = {(r["item_id"],r["time_index"]) for r in owned}
         for event in context["short_term_memory"]["search_history"]:
             require(event["time_index"] < cutoff, "Non-prior Customer history")
@@ -239,12 +246,10 @@ class SampledCandidateBuilder:
             # supervision. Keep any nonempty shortlist, including a lone positive.
             require(bool(negatives or positives), "insufficient_distractors")
             candidates = negatives[:max(0, size-len(positives))]
-            for item in positives:
-                if candidates:
-                    candidates, _ = original.add_gt_to_impression(candidates, item)
-                else:
-                    # Upstream gt_position requires a nonempty distractor list.
-                    candidates = [item]
+            if positives:
+                # Include the end slot; the upstream helper excludes it.
+                position = random.Random(f"{self.seed}:{scene_id}:target-position-v1")
+                candidates.insert(position.randrange(len(candidates) + 1), target_item_id)
         require(len(candidates) == len(set(candidates)), "Duplicate constructed candidate")
         require(set(positives) <= set(candidates), "Lost true multi-action label")
         require(candidates, "empty_constructed_list")
@@ -261,10 +266,10 @@ class SampledCandidateBuilder:
             "original_count": len(original_ids), "candidate_count": len(candidates),
             "domain": Counter(categories).most_common(1)[0][0], "methods": self.methods,
             "seed": seed, "target_size": size, "target_size_policy": "scene-seeded-v1",
+            "target_position_policy": "scene-seeded-uniform-v1",
             "prior_interactions": len(owned),
             "distractor_count": len(candidates)-len(positives), "positive_count": len(positives),
             "scope": scope, "pool_size": len(ids), "no_click_pool": "recorded_exposure_only" if not positives else None, "short_pool": len(candidates) < self.min_items,
-            "over_max_to_preserve_positives": len(candidates) > self.max_items,
             "target_positions": {name: [candidates.index(item) for item in target[name]]
                                  for name in ("clicked_item_ids", "purchased_item_ids")},
             "embedding_identity": getattr(self.encoder, "identity", None),

@@ -286,3 +286,74 @@ class ExposurePoolTests(unittest.TestCase):
             min_items=12, max_items=12).build(source)
         self.assertEqual(set(child["candidate"]["candidate_item_ids"]), set(range(10,22)))
         self.assertEqual(child["request"]["response_target"], source["response_target"])
+
+    def test_positive_insertion_can_reach_every_slot_including_last(self):
+        products, interactions = pool()
+        for size in (2, 3, 5):
+            positions = set()
+            for seed in range(64):
+                child = SampledCandidateBuilder(products, interactions, None,
+                    methods=("random",), min_items=size, max_items=size, seed=seed).build(
+                    request({"clicked_item_ids": [10], "purchased_item_ids": [10]}))
+                ids = child["candidate"]["candidate_item_ids"]
+                positions.add(ids.index(10))
+                self.assertEqual(len(ids), size)
+                self.assertEqual(child["candidate"]["target_position_policy"], "scene-seeded-uniform-v1")
+            self.assertEqual(positions, set(range(size)))
+
+    def test_indexed_history_is_strictly_prior_and_does_not_scan_global_rows(self):
+        products, interactions = pool()
+        interactions += [{"user_id": user, "item_id": item, "time_index": time}
+                         for user, item, time in ((1, 12, 19), (1, 13, 20), (1, 14, 21), (2, 15, 19))]
+        builder = SampledCandidateBuilder(products, list(reversed(interactions)), None,
+                                         methods=("random",), min_items=12, max_items=12)
+        class NoGlobalScan(list):
+            def __iter__(self):
+                raise AssertionError("Per-scene history must use the user index")
+        builder.interactions = NoGlobalScan(builder.interactions)
+        child = builder.build(request({"clicked_item_ids": [10], "purchased_item_ids": []}))
+        self.assertEqual(set(child["candidate"]["candidate_item_ids"]), set(range(10, 22)) - {12})
+        self.assertEqual(child["candidate"]["prior_interactions"], 4)
+
+    def test_lightweight_length_filter_matches_formal_prompt_and_exact_boundary(self):
+        from agent_simulation.datasets.customer_scenes import filter_lengths, freeze_prices
+        from agent_simulation.evaluation.customer_context import CurationTools
+        from agent_simulation.evaluation.trajectories import trajectory_messages
+        from agent_simulation.agents.agentic import initial_agentic_request, AgenticOptions
+        from agent_simulation.inference.requests import prompt_tokens
+        from agent_simulation.tests.inference.test_agentic import Tokenizer
+        class CountingTokenizer(Tokenizer):
+            def encode(self, text, **kwargs):
+                return list(text)
+        tokenizer = CountingTokenizer()
+        source = request({"clicked_item_ids": [10], "purchased_item_ids": []})
+        source["response_input"]["short_term_memory"]["search_history"] = [
+            {"session_id": i, "time_index": i, "query": "unrelated history " * 40,
+             "clicked_items": [], "purchased_items": []} for i in range(1, 14)]
+        products, interactions = pool()
+        child = freeze_prices(None, SampledCandidateBuilder(products, interactions, Encoder()).build(source), prices={})
+        bundle = {"request": source, "query_enabled": True, "response_scenes": [child]}
+        before = deepcopy(bundle)
+        for budget in (0, 2048):
+            binding = CurationTools(child["request"], "response", mode="fixed", concise=True,
+                                   history_token_budget=budget, tokenizer=tokenizer)
+            _, messages = trajectory_messages(binding, role="customer", stage="response", theory=True)
+            messages, tools, _ = initial_agentic_request(messages, [], AgenticOptions(max_model_calls=1, theory=True))
+            count = len(prompt_tokens(messages, tools, tokenizer))
+            kept, skipped = filter_lengths([bundle], tokenizer, count, cot_preset="lightweight",
+                                           history_token_budget=budget)
+            self.assertEqual(kept[0]["response_scenes"][0]["candidate"]["input_tokens"], {"fixed": count})
+            _, too_long = filter_lengths([bundle], tokenizer, count - 1, cot_preset="lightweight",
+                                        history_token_budget=budget)
+            self.assertTrue(any(s["stage"] == "response" for s in too_long))
+            _, old = filter_lengths([bundle], tokenizer, count, modes=("fixed",))
+            self.assertTrue(any(s["stage"] == "response" for s in old))
+        self.assertEqual(bundle, before)
+
+    def test_length_filter_rejects_incompatible_context_settings(self):
+        from agent_simulation.datasets.customer_scenes import filter_lengths
+        for options in ({"cot_preset": "lightweight", "modes": ("autonomous",)},
+                        {"history_token_budget": 100, "modes": ("fixed", "autonomous")},
+                        {"modes": ()}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                filter_lengths([], None, 100, **options)

@@ -244,9 +244,18 @@ class CandidateDeduplicationTests(unittest.TestCase):
                 "catalog": str(catalog.directory),
                 "catalog_manifest_sha256": sha256(catalog.directory / "manifest.json")}))
             output = root / "scenes"
-            with patch.object(customer_scenes, "Catalog", return_value=catalog), redirect_stdout(io.StringIO()):
+            from agent_simulation.tests.inference.test_agentic import Tokenizer
+            tokenizer = Tokenizer()
+            tokenizer.encode = lambda text, **kwargs: list(text)
+            with patch.object(customer_scenes, "Catalog", return_value=catalog), \
+                 patch("agent_simulation.inference.requests.load_tokenizer", return_value=tokenizer), \
+                 patch.object(customer_scenes, "filter_lengths", wraps=customer_scenes.filter_lengths) as lengths, \
+                 redirect_stdout(io.StringIO()):
                 customer_scenes.main(["--dataset", str(dataset), "--output", str(output),
-                                      "--request-id", "100", "--methods", "random"])
+                                      "--request-id", "100", "--methods", "random",
+                                      "--cot-preset", "lightweight", "--max-input-tokens", "100000"])
+            self.assertEqual(lengths.call_args.kwargs,
+                {"modes": ["fixed"], "cot_preset": "lightweight", "history_token_budget": 2048})
             loaded, manifest = customer_scenes.read_scenes(output, dataset=dataset, split="train")
             self.assertEqual(manifest["candidate_deduplication"], CANDIDATE_DEDUPLICATION)
             child = loaded[100]["response_scenes"][0]

@@ -51,7 +51,8 @@ class FrozenSampleTools:
         self.parameters = {tool["function"]["name"]: tool["function"]["parameters"] for tool in self.schemas}
         self.fingerprint = hashlib.sha256(_json(self.context).encode()).hexdigest()
 
-    def initial_context(self):
+    def _base_context(self):
+        """Unencoded facts shared by the fixed and tool-using adapters."""
         profile = self.context["profile"]
         result = {
             "profile": {key: value for key, value in profile.items() if key != "user_id"},
@@ -67,8 +68,11 @@ class FrozenSampleTools:
             result.update(query=self.context["query"], displayed_items=[
                 {key: product.get(key) for key in ("item_id", "item_title", "price_raw")}
                 for product in self.displayed])
+        return result
+
+    def initial_context(self):
         from agent_simulation.evaluation.customer_evidence import attach_sources
-        return attach_sources(result)
+        return attach_sources(self._base_context())
 
     def guard(self):
         require(hashlib.sha256(_json(self.context).encode()).hexdigest() == self.fingerprint,

@@ -60,9 +60,8 @@ def prepare_scenes(catalog, requests, encoder, *, min_items=2, max_items=12, see
     """, [sorted(needed_ids)])
     by_id = {p["item_id"]: p for p in products}
     for request in requests:
-        target_ids = {p["item_id"] for p in request["response_input"]["displayed_items"]}
         for product in request["response_input"]["displayed_items"]:
-            if product["item_id"] in target_ids and product["item_id"] not in by_id:
+            if product["item_id"] not in by_id:
                 by_id[product["item_id"]] = {**deepcopy(product),
                     "first_seen_time_index": request["response_input"]["history_cutoff_exclusive"]}
     builder = SampledCandidateBuilder(list(by_id.values()), interactions, encoder,
@@ -92,19 +91,22 @@ def prepare_scenes(catalog, requests, encoder, *, min_items=2, max_items=12, see
     return scenes, skipped
 
 
-def filter_lengths(scenes, tokenizer, limit, *, modes=("fixed","autonomous")):
+def filter_lengths(scenes, tokenizer, limit, *, modes=None, cot_preset="original", history_token_budget=None):
     """Count the actual generation prompt/schema/tools, without model inference."""
     from agent_simulation.agents.agentic import initial_agentic_request, AgenticOptions
-    from agent_simulation.evaluation.customer_curation import CurationTools
+    from agent_simulation.evaluation.customer_context import CurationTools, resolve_context_options
     from agent_simulation.evaluation.trajectories import trajectory_messages
     from agent_simulation.inference.requests import prompt_tokens
     require(limit>0, "Length limit must be positive")
+    if modes is None:
+        modes = ("fixed",) if cot_preset == "lightweight" else ("fixed", "autonomous")
+    context_options = resolve_context_options(cot_preset, modes, history_token_budget)
     kept,skipped=[],[]
     for bundle in deepcopy(scenes):
         def counts_for(request, stage):
             counts = {}
             for mode in modes:
-                binding = CurationTools(request, stage, mode=mode)
+                binding = CurationTools(request, stage, mode=mode, tokenizer=tokenizer, **context_options)
                 _, messages = trajectory_messages(binding, role="customer", stage=stage, theory=True)
                 options = AgenticOptions(max_model_calls=1 if mode=="fixed" else 3)
                 initial, tools, _ = initial_agentic_request(messages, binding.schemas, options)
@@ -187,7 +189,17 @@ def main(argv=None):
     p.add_argument("--bge-device",default="cuda",help="Embedding device, e.g. cuda, cuda:1 or cpu; honor CUDA_VISIBLE_DEVICES")
     p.add_argument("--max-input-tokens",type=int,default=0,help="Optional actual-prompt length filter; 0 disables")
     p.add_argument("--tokenizer",type=Path,default=Path("models/Qwen3-32B"))
+    p.add_argument("--cot-preset", choices=["original", "lightweight"], default="original",
+                   help="Match the generation preset when filtering input lengths")
+    p.add_argument("--modes", nargs="+", choices=["fixed", "autonomous"],
+                   help="Length-filter modes: lightweight defaults to fixed; original to both")
+    p.add_argument("--history-token-budget", type=int, help="Match the generation history budget")
     args=p.parse_args(argv)
+    from agent_simulation.evaluation.customer_context import resolve_context_options
+    if args.modes is None:
+        args.modes = ["fixed"] if args.cot_preset == "lightweight" else ["fixed", "autonomous"]
+    args.history_token_budget = resolve_context_options(
+        args.cot_preset, args.modes, args.history_token_budget)["history_token_budget"]
     require(args.count>0 and not args.output.exists(), "Use a positive count and new output directory")
     release=json.loads((args.dataset/"manifest.json").read_text())
     with closing(Catalog(release["catalog"])) as catalog:
@@ -211,7 +223,9 @@ def main(argv=None):
             seed=args.seed,min_history=args.min_history,methods=args.methods)
     if args.max_input_tokens:
         from agent_simulation.inference.requests import load_tokenizer
-        scenes,length_skipped=filter_lengths(scenes,load_tokenizer(args.tokenizer,local_files_only=True),args.max_input_tokens)
+        scenes,length_skipped=filter_lengths(scenes,load_tokenizer(args.tokenizer,local_files_only=True),
+            args.max_input_tokens, modes=args.modes, cot_preset=args.cot_preset,
+            history_token_budget=args.history_token_budget)
         skipped.extend(length_skipped)
     args.output.mkdir(parents=True)
     (args.output/"scenes.jsonl").write_text("".join(json.dumps(s,ensure_ascii=False,allow_nan=False)+"\n" for s in scenes))
