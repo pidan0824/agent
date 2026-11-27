@@ -55,6 +55,30 @@ class FilteringTests(unittest.TestCase):
         self.assertGreater(two["teacher_data_uncertainty"], 0.)
         self.assertAlmostEqual(two["student_data_uncertainty"], 0.)
 
+    def test_strict_export_requires_transcript_bound_review_for_sft_and_dpo(self):
+        from agent_simulation.evaluation.customer_filtering import apply_reviews
+        from agent_simulation.evaluation.trajectories import digest
+        rows = self.pair_rows()
+        with TemporaryDirectory() as directory:
+            report = export_training(rows, Path(directory), require_semantic_review=True)
+            self.assertEqual(report["response_sft"], 0)
+            self.assertEqual((Path(directory) / "preferences.jsonl").read_text(), "")
+        good = rows[0]["trajectory"]
+        review = {"trajectory_id": good["trajectory_id"], "messages_sha256": digest(good["messages"]),
+                  "verdict": "pass", "reason": "Checked the original facts", "reviewer": "fixture reviewer"}
+        apply_reviews(rows, [review])
+        with TemporaryDirectory() as directory:
+            report = export_training(rows, Path(directory), require_semantic_review=True)
+            self.assertEqual(report["response_sft"], 1)
+            self.assertEqual(len((Path(directory) / "preferences.jsonl").read_text().splitlines()), 1)
+        stale = {**review, "messages_sha256": "changed"}
+        with self.assertRaisesRegex(ValueError, "Review transcript"):
+            apply_reviews(rows, [stale])
+        with self.assertRaisesRegex(ValueError, "Duplicate review"):
+            apply_reviews(rows, [review, review])
+        apply_reviews(rows, [])  # Saved annotations cannot silently count as external review.
+        self.assertNotIn("semantic_review", rows[0]["trajectory"])
+
     def test_export_checks_each_response_once_and_rechecks_next_export(self):
         from agent_simulation.evaluation import customer_filtering as module
         for sft_only in (True, False):

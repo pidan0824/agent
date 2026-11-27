@@ -155,7 +155,7 @@ class OptionPredictor:
         return probabilities
 
 
-def _evidence_checker():
+def _evidence_checker(*, require_semantic_review=False):
     """Reuse checks only inside one synchronous selection/export of stable records.
 
     Never read serialized evidence_quality: changed transcripts/reviews are checked
@@ -166,7 +166,20 @@ def _evidence_checker():
     def check(trajectory):
         key = id(trajectory)
         if key not in checked:
-            checked[key] = (trajectory, check_evidence(trajectory))
+            result = check_evidence(trajectory)
+            if (require_semantic_review and trajectory.get("stage") == "response"
+                    and trajectory.get("response_style") != "direct"):
+                from agent_simulation.evaluation.trajectories import digest
+                review = trajectory.get("semantic_review", {})
+                approved = (review.get("verdict") == "pass"
+                            and review.get("messages_sha256") == digest(trajectory.get("messages"))
+                            and bool(str(review.get("reason", "")).strip())
+                            and bool(str(review.get("reviewer", "")).strip()))
+                if not approved:
+                    result = {**result, "accepted": False,
+                              "status": "failed" if result["status"] == "failed" else "unverified",
+                              "reasons": sorted(set(result["reasons"] + ["semantic_review_not_passed"]))}
+            checked[key] = (trajectory, result)
         return checked[key][1]
 
     return check
@@ -478,7 +491,8 @@ def combine_observed_sft(selected, records, observed):
 def export_training(records, output, *, max_pairs=10000, filter_column="diff_model_uncertainty",
                     sampling_column="entropy", ascending=False, query_min=None, response_min=None,
                     click_min=None, purchase_min=None, pair_protocol="logloss",
-                    logloss_min_gap=.05, action_min_gap=.05, observed_actions=None, sft_only=False):
+                    logloss_min_gap=.05, action_min_gap=.05, observed_actions=None, sft_only=False,
+                    require_semantic_review=False):
     """Offline replay with row-level gates, scene-level pair reasons and coverage."""
     from collections import Counter, defaultdict
     from pathlib import Path
@@ -489,7 +503,7 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
     output = Path(output)
     records = deepcopy(records)
     validate_request_splits(records)
-    check = _evidence_checker()
+    check = _evidence_checker(require_semantic_review=require_semantic_review)
     decisions, groups, response = [], defaultdict(list), []
     for row in records:
         t = row["trajectory"]
@@ -596,6 +610,7 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
                          if observed_actions is not None else
                          "Strong original transcripts passing separate action and evidence gates; independent of DPO"),
         "response_dpo_protocol": pair_protocol,
+        "require_reviewed_response_rationales": require_semantic_review,
         "thresholds": {"query_min": query_min, "response_min": response_min,
             "click_min": click_min, "purchase_min": purchase_min,
             "logloss_min_gap_bits": logloss_min_gap, "action_min_gap": action_min_gap},
@@ -612,6 +627,25 @@ def add_filter_arguments(parser):
     parser.add_argument("--action-min-gap", type=float, default=.05)
 
 
+def apply_reviews(records, reviews):
+    """Attach external verdicts only to the exact original transcript."""
+    from agent_simulation.evaluation.trajectories import digest
+    indexed = {row["trajectory"]["trajectory_id"]: row["trajectory"] for row in records}
+    require(len(indexed) == len(records), "Duplicate trajectory IDs")
+    require(len({r["trajectory_id"] for r in reviews}) == len(reviews), "Duplicate review IDs")
+    for trajectory in indexed.values():
+        trajectory.pop("semantic_review", None)
+    for review in reviews:
+        require(review["trajectory_id"] in indexed, "Review has no matching trajectory")
+        trajectory = indexed[review["trajectory_id"]]
+        require(review.get("messages_sha256") == digest(trajectory["messages"]), "Review transcript mismatch")
+        require(review.get("verdict") in ("pass", "fail", "pending"), "Unknown review verdict")
+        if review["verdict"] != "pending":
+            require(bool(str(review.get("reason", "")).strip()) and
+                    bool(str(review.get("reviewer", "")).strip()), "Review requires reason and reviewer")
+        trajectory["semantic_review"] = deepcopy(review)
+
+
 def main(argv=None):
     import argparse
     from pathlib import Path
@@ -621,6 +655,9 @@ def main(argv=None):
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--observed-actions", type=Path, help="Frozen original action pool; defaults to input sibling when present")
     p.add_argument("--sft-only", action="store_true")
+    p.add_argument("--reviews", type=Path, help="External semantic verdicts bound to original message hashes")
+    p.add_argument("--require-reviewed-rationales", action="store_true",
+                   help="Require a semantic pass for Response rationale SFT and DPO chosen")
     p.add_argument("--query-min", type=float)
     p.add_argument("--response-min", type=float)
     p.add_argument("--max-pairs", type=int, default=10000)
@@ -634,6 +671,10 @@ def main(argv=None):
         logloss_min_gap=args.logloss_min_gap, action_min_gap=args.action_min_gap)
     require(not args.output.exists(), "Use a new filtering output directory")
     records = [json.loads(s) for s in args.input.read_text().splitlines() if s.strip()]
+    if args.reviews or args.require_reviewed_rationales:
+        reviews = ([json.loads(line) for line in args.reviews.read_text().splitlines() if line.strip()]
+                   if args.reviews else [])
+        apply_reviews(records, reviews)
     observed_path = args.observed_actions or args.input.with_name("observed-actions.jsonl")
     require(args.observed_actions is None or observed_path.is_file(), "Missing observed action pool")
     observed = ([json.loads(s) for s in observed_path.read_text().splitlines() if s.strip()]
@@ -645,10 +686,13 @@ def main(argv=None):
         sampling_column=args.sampling_column, ascending=args.ascending,
         query_min=args.query_min, response_min=args.response_min,
         click_min=args.click_min, purchase_min=args.purchase_min,
-        pair_protocol=args.pair_protocol, logloss_min_gap=args.logloss_min_gap, action_min_gap=args.action_min_gap)
+        pair_protocol=args.pair_protocol, logloss_min_gap=args.logloss_min_gap, action_min_gap=args.action_min_gap,
+        require_semantic_review=args.require_reviewed_rationales or args.reviews is not None)
     (args.output / "manifest.json").write_text(json.dumps({"schema": "customer-filter-export-v2",
         "input": str(args.input.resolve()), "input_sha256": sha256(args.input),
         "observed_actions_sha256": sha256(observed_path) if observed is not None else None,
+        "reviews_sha256": sha256(args.reviews) if args.reviews else None,
+        "require_reviewed_response_rationales": report["require_reviewed_response_rationales"],
         "filter_column": args.filter_column, "sampling_column": args.sampling_column,
         "ascending": args.ascending, "pair_protocol": args.pair_protocol,
         "thresholds": report["thresholds"]}, indent=2) + "\n")

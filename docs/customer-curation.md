@@ -255,7 +255,7 @@ sampled_match 是显式可选作者采样对照，也执行 chosen 原始动作�
 3. 不把 temperature=0 的旧输出混入非零温度样本来凑采样数，也不只对动作正确的解释计算不确定性；否则估计的分布已被正确性筛选改变。报告全部尝试、有效配对数及重复解释。选项打分虽只输出一个 token，仍需完整输入预填充，不能当作零成本。需要更多采样时保留既有结果，新增等量双边样本，而不是重跑整个集合。
 4. DPO 等 CoT-SFT 对照后再推进。优先复用相同提示下已有的真实错误分支，不额外调用大模型编造 rejected。chosen 必须动作精确匹配且通过语义审查；仅有低熵、较低 NLL 或较长解释都不够。没有可信 chosen/rejected 时保留合格 SFT 样本，不强制造对。答案条件修正另设实验；给过真实动作的生成提示不能伪装成普通未见答案的轨迹。
 
-分阶段生成／离线概率评分现已接入，见下方恢复与分阶段运行说明；原在线路径继续保留。当前 lightweight 预设仍限定 sft-only，完整强弱路径使用 original 配置。短提示强弱采样以及将新 CoT 语义审查按原文哈希接到 DPO chosen 仍待后续实现；机械检查不能代替语义审查。此次不改变原公式、筛选阈值及 vendor 代码。
+分阶段生成／离线概率评分现已接入，见下方恢复与分阶段运行说明；原在线路径继续保留。lightweight 现可用于 sft-only 或 defer-probabilities：分阶段强弱生成复用同一短提示与历史预算，重复采样显式设置非零温度。新离线评分入口默认要求 Response 解释通过原文哈希绑定的语义审查，才进入解释 SFT 或成为 DPO chosen；机械检查不能代替语义审查。此次不改变原公式、筛选阈值及 vendor 代码。
 
 离线审计：tmp/uncertainty-cost-audit-20261127/report.json 与 historical-metrics.json；驱动 tmp/audit_uncertainty_cost.py。该驱动比较修改前后公式输出，新增字段单测同时覆盖单对、多对和未配对分支。
 
@@ -313,12 +313,12 @@ completed.json 只在整个阶段完成后写入；中断运行的部分 records
 ~~~bash
 ./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
   --dataset <release> --scenes <frozen-fit-scenes> --output <strong-run> \
-  --defer-probabilities --generation-variants strong \
+  --cot-preset lightweight --defer-probabilities --generation-variants strong \
   --samples 3 --temperature 0.7 --max-new-tokens 768 --bge-device cpu
 
 ./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
   --dataset <release> --scenes <frozen-fit-scenes> --output <weak-run> \
-  --defer-probabilities --generation-variants weak \
+  --cot-preset lightweight --defer-probabilities --generation-variants weak \
   --samples 3 --temperature 0.7 --max-new-tokens 768 --bge-device cpu
 
 ./agent_simulation/python.sh -m agent_simulation.evaluation.customer_scoring \
@@ -327,7 +327,20 @@ completed.json 只在整个阶段完成后写入；中断运行的部分 records
   --predictor-tokenizer models/Qwen3.5-9B --concurrency 4
 ~~~
 
-实际运行时分别配置对应的 --strong-url/--weak-url；只检查被选中的生成器服务。生成阶段不创建概率预测器，也不导出训练文件；保留原始监督、生成轨迹与 label-free probability_context。评分入口只加载预测器 tokenizer、连接一个预测器服务，校验上下文哈希、原始提示和候选顺序；观察标签和生成动作不进入预测器。不同分支文件须同配置、同场景且无重复任务才可合并；不完整或变更的生成结果拒绝评分。评分运行也支持 --resume，复用已完成概率，无须重跑教师。评分成功后沿用原筛选和导出规则，不表示已经训练或通过语义审查。服务权重仍须按既有流程核对；服务模型名不等于远端权重验证。
+实际运行时分别配置对应的 --strong-url/--weak-url；只检查被选中的生成器服务。生成阶段不创建概率预测器，也不导出训练文件；保留原始监督、生成轨迹与 label-free probability_context。评分入口只加载预测器 tokenizer、连接一个预测器服务，校验上下文哈希、原始提示和候选顺序；观察标签和生成动作不进入预测器。不同分支文件须同配置、同场景且无重复任务才可合并；不完整或变更的生成结果拒绝评分。评分运行也支持 --resume，复用已完成概率，无须重跑教师。评分后先输出 response-review.jsonl 审查队列，并保留原始动作监督；没有经外部确认的语义 pass 时，Response 解释不进入解释 SFT 或 DPO chosen。审查后用 customer_filtering 离线导出，无须重新生成或重新打分；原在线研究路径的默认机械筛选规则保留。服务权重仍须按既有流程核对；服务模型名不等于远端权重验证。
+
+语义审查只在队列副本中填写 verdict、reason、reviewer，保留 trajectory_id、messages_sha256：
+
+~~~bash
+./agent_simulation/python.sh -m agent_simulation.evaluation.customer_filtering \
+  --input <scored-run>/records.jsonl --observed-actions <scored-run>/observed-actions.jsonl \
+  --reviews <reviewed-response-review.jsonl> --require-reviewed-rationales \
+  --output <new-reviewed-export>
+~~~
+
+解释审查优先检查：当前需求／历史偏好是否对应具体候选属性，是否说明相对其他候选的选择理由，以及点击／购买解释是否与动作一致。允许合理、明确为推测的模拟动机，不以心理状态不可观测本身判失败。仅有类目兴趣或复述历史记为 weak_decision_support；不能区分候选时允许表达不确定性，不将其自动认定为原始行为日志有噪声。同时保留商品 ID、原始属性、历史行为和价格的必要核对；动作是否匹配真实标签仍由独立门槛判断。
+
+--reviews 会自动启用严格语义门槛；原文哈希不符、未知或重复审查 ID 会报错。严格模式要求 Response 解释的 pass 同时具有正确原文哈希、原因和审查人；保存记录中的旧 semantic_review 不会自动算作外部审查。该门槛同时作用于解释 SFT 和 DPO chosen，direct 动作监督不需要解释审查。未通过解释不会导致原始行为监督丢失。
 
 复核使用 3 个真实 Train 父请求、5 个 Response 子场景和 8 条原始监督，CPU 离线回放历史输出并注入生成/评分中断，两阶段分别复用已完成的 2 条任务；16 个最终分支的原始轨迹、概率及采样结果与在线路径一致，全部父请求行为保留，历史窗口未变。此次概率使用测试分布、没有真实模型调用，不能用于判断新 CoT 质量或蒸馏效果。记录：tmp/customer-recovery-real-20261127/verification.json；驱动：tmp/verify_customer_recovery_real.py。
 
@@ -358,7 +371,7 @@ entry point uses a simplified EKB prompt and never exports SFT/DPO data.
 | max-new-tokens | 2048 | 768 |
 | scene-concurrency | 1 | 4 |
 | EKB 提示 | 原始 EKB | 复用已审计的 concise EKB |
-| 模式与模型 | 原有 fixed/autonomous、强弱模型协议 | fixed、仅 strong，须显式 sft-only |
+| 模式与模型 | 原有 fixed/autonomous、强弱模型协议 | fixed；sft-only 仅 strong，或 defer-probabilities 分阶段强弱生成 |
 
 上述数值可被显式参数覆盖；重复采样仍要求非零 temperature。轻量预设保留相同 EKB schema、事实上下文、证据检查和原始生成动作，不在失败后改写答案。Train Query 仍直接用原始监督，不调用 teacher。短解释不等于已通过语义审阅。
 
@@ -911,3 +924,24 @@ planned production command. Reproducible local drivers are
 The teacher remains Qwen3-32B BF16. This preparation did not start teacher
 generation, update model parameters, or touch other GPU processes. Actual
 generation quality, latency and matched training remain unverified.
+
+### 候选属性与用户偏好的映射：本轮质量诊断
+
+本轮优先修正解释的判别能力，不要求模拟动机都是可观测事实。允许将合理动机明确写成推测；核心是将当前需求／历史偏好映射到具体候选属性，并解释相比最有竞争力的另一候选为何更合适。泛泛的类目兴趣、复述历史、仅列商品属性，都不能单独完成这一步。普通与 lightweight EKB 共用该要求，保留原 schema；轻量版只将 knowledge/evaluation 放宽为各 1–2 句，输出预算仍为 768，不增加 PRM、逐商品调用或第二个审查模型。
+
+不能区分近似候选时可以表达不确定性，但不能把不确定性直接等同于不点击／不购买；缺少同商品历史购买不意味着本次不会购买。购买和点击分别解释。只有一个候选时不虚构对照商品，判断该候选与需求的关系及行为类型。审查关注解释是否提供选择依据，不因合理的假设性心情而单独拒绝；商品属性、实际历史与价格仍不能改写。
+
+论文对比（不同协议的数值不能直接横比）：
+
+- [Mirroring Users](https://arxiv.org/html/2508.18142v1)：固定 5 候选单选、5 次随机输出取平均 Accuracy；除 MIND 外采用混合策略构造曝光。原 EKB Knowledge 已要求候选属性与偏好关联，示例包含具体候选比较。Table 2 的随机数据对照，有解释／无解释在 MIND 为 31.4%／25.7%，合成曝光为 53.9%／48.3%；这是该训练流程的总体收益，不能证明每条解释都有区分力或本项目已获益。
+- [Agent4Rec](https://arxiv.org/html/2310.10108v3)：MovieLens、Amazon-Book、Steam，1000 个 agent 各 20 个候选的偏好二分类，报告 Accuracy/Precision/Recall/F1；另评估评分分布、社会特征及交互反馈。MovieLens 正负比从 1:1 到 1:9 时，F1 从 0.6982 降至 0.3232。未交互项作为负例，不等于已曝光但拒绝的商品。
+- [SimUSER](https://arxiv.org/html/2504.12722v1)：同类 20 候选偏好分类，并报告评分 RMSE/MAE、交互指标及 55 次真实 A/B 测试中模拟／实际业务指标的 Spearman 相关性。MovieLens F1 在 1:1 为 0.7771、1:9 为 0.4972。相关性、评分误差与逐次点击／购买准确率是不同任务。
+- [RecAgent](https://arxiv.org/html/2306.02552v3)：20 名 MovieLens 用户的后续 a 件真实商品与 b 件负例混合，要求选择 a 件，以命中重合比例评估；另有人类对行为序列的真假偏好判断、聊天／广播 1–5 分可信度与信息茧房熵。预先给定选择数量简化了行为数量判断，主观可信度也不等于精确预测命中率。
+
+本项目仍需保留真实不行动样本和点击／购买区分，分别报告正例行为表现、空动作误报与原请求聚合；不能为追求论文式高分删除困难评估样本。候选质量筛选用于训练数据预算分配，不把“老师没选对”当作原始日志有错。当前尚未完成同数据／同上下文的 CoT 训练收益验证。
+
+本轮真实复核：原短提示的 11 个 fit 子场景（8 个原请求）全部输出合法且通过机械引用检查，但动作精确匹配仅 2/11，均为空动作；9 个有行为场景无一完全匹配，点击 TP/FP/FN=0/6/6，购买 TP/FP/FN=0/0/5。正式 CoT 暂存报告明确列出 9 条 action_mismatch、2 条 semantic_review_pending，不导出零解释训练。问题已在生成阶段出现，不能归因于筛选删掉了大量好解释。产物 tmp/short-cot-live-20261127/quality-audit.json。
+
+修订提示后，复用鞋和手机壳两个原场景及正式 AgenticClient，模型、BF16、温度 0、种子、768-token 上限及非 system 消息不变。两条开始比较具体候选，但动作均仍错误且均漏购买；鞋例将一次点击推为低价偏好，手机壳例将缺少品牌偏好推为无品牌优势，仍不足以支持选择。鞋例原基线使用同步 CPU offload，本次为异步 prefetch；这只是定性诊断，不是严格性能 A/B。不宣称质量或准确率已改善，不将这两条纳入 CoT 训练。产物 tmp/choice-mapping-probe-20261127/report.json、逐请求 calls/result.json。
+
+冻结的 11 条真实输入仅 system 提示改变，每条增加 177 tokens（总输入 46,577 → 48,524）；候选、历史和 action schema 完全一致，均满足 8192 上下文并预留 768 输出。80 项相关单测通过，日志 tmp/choice-mapping-regression.log。所有本轮自建推理服务均在小规模试跑后退出，无训练、概率打分或其他进程操作。下一步先验证候选属性的清晰呈现和可区分场景选择；不因比较句式出现就直接扩大生成或启动强弱模型多采样。

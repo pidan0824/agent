@@ -177,6 +177,23 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(state.score_calls, 9)  # Eight Response scores plus one failed request.
                 self.assertEqual(original, (root / "run/records.jsonl").read_bytes())
 
+    def test_lightweight_can_generate_weak_branch_without_teacher_or_query_calls(self):
+        from agent_simulation.agents.prompts.customer_ekb import concise_ekb_instructions
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with fixture(root) as state:
+                curation.main(argv(root, "weak", "--defer-probabilities",
+                                   "--generation-variants", "weak", "--cot-preset", "lightweight",
+                                   "--history-token-budget", "0", "--temperature", ".3"))
+                result = rows(root / "weak/records.jsonl")
+                self.assertEqual(state.checks, ["Qwen3.5-9B"])
+                self.assertEqual(state.calls, 4)
+                self.assertEqual(state.score_calls, 0)
+                self.assertTrue(all(r["stage"] == "response" for r in result))
+                self.assertTrue(all(concise_ekb_instructions() in r["trajectory"]["prompt"][0]["content"]
+                                    for r in result))
+                self.assertEqual(len(rows(root / "weak/observed-actions.jsonl")), 4)
+
     def test_staged_scoring_rejects_incomplete_runs_and_changed_snapshots(self):
         from agent_simulation.evaluation.customer_run import FrozenPredictionBinding
         with TemporaryDirectory() as temp:

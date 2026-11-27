@@ -9,13 +9,13 @@ import time
 
 from agent_simulation.data.common import require, sha256, write_json_atomic
 from agent_simulation.evaluation.customer_curation import encoded, summarize
-from agent_simulation.evaluation.customer_filtering import OptionPredictor, export_training
+from agent_simulation.evaluation.customer_filtering import OptionPredictor, export_training, apply_reviews
 from agent_simulation.evaluation.customer_generation import bounded_map
 from agent_simulation.evaluation.customer_request_metrics import request_metrics
 from agent_simulation.evaluation.customer_run import (
     RowJournal, run_lock, task_key, sample_probabilities, FrozenPredictionBinding, predictor_trajectory,
 )
-from agent_simulation.evaluation.trajectories import OutcomeScorer
+from agent_simulation.evaluation.trajectories import OutcomeScorer, digest
 from agent_simulation.inference.agentic import AgenticClient
 from agent_simulation.inference.requests import load_tokenizer, ContextCapacityError
 
@@ -72,6 +72,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     require(args.concurrency > 0, "Positive scoring concurrency required")
     records, observed, generation, sources = load_runs(args.run)
+    # Saved annotations are not an external semantic review of this scoring release.
+    apply_reviews(records, [])
     identity = {"schema": "customer-offline-probabilities-v1", "sources": sources,
                 "predictor": {"url": args.predictor_url, "model": args.predictor_model,
                               "tokenizer_config_sha256": sha256(args.predictor_tokenizer / "tokenizer_config.json"),
@@ -131,6 +133,12 @@ def main(argv=None):
         scored.sort(key=lambda row: (row["cid"], row["variant"], row["tid"]))
         (args.output / "records.jsonl").write_text("".join(encoded(r) + "\n" for r in scored))
         (args.output / "observed-actions.jsonl").write_text("".join(encoded(r) + "\n" for r in observed))
+        queue = [{"trajectory_id": r["trajectory"]["trajectory_id"],
+                  "messages_sha256": digest(r["trajectory"]["messages"]),
+                  "messages": r["trajectory"]["messages"], "verdict": "pending", "reason": "", "reviewer": ""}
+                 for r in scored if r["stage"] == "response" and r["trajectory"]["status"] == "ok"
+                 and r["trajectory"].get("response_style") != "direct"]
+        (args.output / "response-review.jsonl").write_text("".join(encoded(r) + "\n" for r in queue))
         exported = {} if generation["evaluation_only"] else export_training(
             scored, args.output, observed_actions=observed, sft_only=False,
             max_pairs=generation["max_pairs"], filter_column=generation["filter_column"],
@@ -138,7 +146,7 @@ def main(argv=None):
             query_min=generation["query_min"], response_min=generation["response_min"],
             click_min=generation["click_min"], purchase_min=generation["purchase_min"],
             pair_protocol=generation["pair_protocol"], logloss_min_gap=generation["logloss_min_gap"],
-            action_min_gap=generation["action_min_gap"])
+            action_min_gap=generation["action_min_gap"], require_semantic_review=True)
         write_json_atomic(args.output / "report.json", {**summarize(scored, []), **exported})
         write_json_atomic(args.output / "request-metrics.json", request_metrics(scored))
         write_json_atomic(args.output / "completed.json", {

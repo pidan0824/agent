@@ -125,7 +125,7 @@ def parser():
     p.add_argument("--cot-sft", action="store_true",
                    help="Stage fixed teacher outputs for reviewed CoT/action-only comparison; no automatic SFT export")
     p.add_argument("--cot-preset", choices=["original", "lightweight"], default="original",
-                   help="Lightweight: fixed SFT only, concise EKB, one sample, 768 tokens, temperature 0")
+                   help="Lightweight: fixed concise EKB, one sample, 768 tokens, temperature 0; SFT-only or deferred scoring")
     p.add_argument("--scene-concurrency", type=int, help="Bounded concurrent scene arms; default 1, lightweight 4")
     p.add_argument("--teacher-budget", type=int, help="Optional lightweight Train Response scene budget; raw supervision retained")
     p.add_argument("--samples", type=int)
@@ -334,7 +334,8 @@ def main(argv=None):
                 for stage, policy, adapted, candidate in generation_jobs(request,
                         bundle=prepared.get(identity), policies=args.candidate_policies,
                         limit=args.candidate_count, encoder=encoder):
-                    if args.sft_only and args.split == "train" and not args.evaluation_only and stage == "query":
+                    if (args.sft_only or (args.defer_probabilities and args.cot_preset == "lightweight")) \
+                            and args.split == "train" and not args.evaluation_only and stage == "query":
                         continue  # Retain raw Query without paying for a teacher call.
                     for mode in args.modes:
                         for style in styles if stage == "response" else ["direct"]:

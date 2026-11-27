@@ -22,7 +22,8 @@ def resolve_generation_options(args):
             setattr(args, name, default)
     require(args.scene_concurrency > 0, "Positive scene concurrency required")
     if light:
-        require(args.sft_only, "Lightweight preset requires --sft-only")
+        require(args.sft_only or getattr(args, "defer_probabilities", False),
+                "Lightweight preset requires --sft-only or deferred probability scoring")
     if args.teacher_budget is not None:
         require(light and args.split == "train" and not args.evaluation_only
                 and args.teacher_budget >= 0 and args.response_styles in (None, ["ekb"])
