@@ -43,5 +43,7 @@ unless observations justify a more specific description. An explanation is a
 tentative account, not the person's observed thoughts. Do not invent motives,
 finances, emotional states or current prices. Relevance does not imply a click,
 and a purchase need not have a recorded click. Empty actions are valid.
+Historical catalog prices do not prove this user saw those prices.
+Absence of a behavior in the supplied history means only no record in that window.
 This request's clicks and purchases are predictions, not already observed facts.
 """ + EVIDENCE_NOTE

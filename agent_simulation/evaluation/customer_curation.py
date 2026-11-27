@@ -168,6 +168,7 @@ def summarize(records, candidate_records):
                 behavior_stratum(row["trajectory"].get("source_response_target", row["trajectory"]["target"]))
                     if row["stage"] == "response" else "query")].append(row)
     result = []
+    response_groups = defaultdict(list)
     for key, rows in groups.items():
         valid = [r for r in rows if r["trajectory"]["status"] == "ok"]
         item = dict(zip(["stage", "mode", "policy", "variant", "response_style", "domain", "candidate_count", "behavior_group", "source_behavior_group"], key))
@@ -184,9 +185,22 @@ def summarize(records, candidate_records):
         item["no_click_count"] = len(empty)
         item["no_click_accuracy_all_attempts"] = (sum(r["trajectory"]["status"] == "ok" and
             not r["trajectory"]["final_action"]["clicked_item_ids"] for r in empty) / len(empty)) if empty else None
+        if key[0] == "response":
+            from agent_simulation.evaluation.customer_request_metrics import response_with_baseline
+            response_groups[(key[1], key[2], key[3], key[4], key[5])].extend(rows)
+            item["response_metrics"] = response_with_baseline(
+                {"target": r["trajectory"]["target"], "prediction": r["trajectory"].get("final_action"),
+                 "status": r["trajectory"]["status"]} for r in rows)
         item["evidence_passed"] = sum(r["trajectory"].get("evidence_quality", {}).get("accepted", False) for r in valid)
         result.append(item)
-    return {"arms": result, "candidate_coverage": candidate_records,
+    global_response = []
+    for key, rows in response_groups.items():
+        item = dict(zip(["mode", "policy", "variant", "response_style", "domain"], key))
+        item.update(response_with_baseline(
+            {"target": r["trajectory"]["target"], "prediction": r["trajectory"].get("final_action"),
+             "status": r["trajectory"]["status"]} for r in rows))
+        global_response.append(item)
+    return {"arms": result, "response_metrics": global_response, "candidate_coverage": candidate_records,
             "interpretation": "Frozen-scene generation and retention diagnostics; this entry point constructs training trajectories.",
             "entropy_protocol": "One common predictor: sampled single-item lists use joint 1+3N actions "
                 "(bits/decision); full/retrieved use factorized four-state item marginals (bits/item). "

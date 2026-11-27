@@ -563,3 +563,105 @@ Seller 的共享行为特征补充最近有效报价的时间点和最近两次�
 action_only.jsonl 使用同一编码入口、同一长度阈值，去掉 --require-rationales。若一臂超长，应回到同一场景集合共同处理，不能分别删样本或截断。后续训练固定相同底座/初始化、种子、epoch、batch、梯度累积、学习率、动作及父请求权重；只改变解释监督与相应输出指令。两臂样本数和优化步数匹配，CoT 的 token/耗时会更多，需单独报告。用完全相同且未参与筛选的 dev/audit 场景和 direct-action 提示比较两模型的 Query、点击、购买、无动作、正例及父请求等权指标；额外 CoT 解码评估另列，不能与 direct 指标混算。
 
 本轮离线检查使用已有 32 条真实教师输出及对应 63 条原始监督，保留历史审查通过的 2 条，两臂均为 63 条、输入/标签/顺序/父请求权重一致。实际 Qwen3.5-9B tokenizer 编码得到 action_only 为 0、cot 为 732 个 rationale token；最低数量设为 3 时导出停止。这里 2 条仅用于验证链路，不作为正式 CoT 实验的充分数据。审计保存在 tmp/cot-chain-real-audit-20261127/，原始输入未修改。本次 174 项相关测试通过（含离线 mock、编码和 CPU 微型夹具）；没有启动服务器上的真实教师服务、生成或训练任务。
+
+
+### Response diagnosis and low-cost CoT follow-up (2026-11-27)
+
+The generation report now includes `response_metrics` pooled within each
+mode/policy/model/style/domain, plus the same metrics within existing strata.
+The pilot comparison uses the same helper. Click and purchase each report item
+TP/FP/FN, micro precision/recall/F1, scene macro F1, positive-scene macro F1,
+false-action rate **among empty-target scenes**, and predicted-action rate among
+all attempts. Every arm includes an always-no-action baseline on identical
+targets. Undefined ratios are null. Invalid outputs remain in denominators,
+receive no empty-match credit, and contribute missing positive items as FN;
+they are reported separately rather than counted as false actions.
+
+Historical parent-weighted mean F1 remains explicitly labeled as legacy:
+empty/empty earns one, child scores are averaged within each parent, then parents
+receive equal weight. Its bootstrap samples parents. Adding baseline reporting
+does not alter any existing metric or interval (separate RNG). The pilot gate
+now also requires the legacy improvement interval to exclude zero, beating the
+no-action legacy score, and improving pooled action micro-F1. This conservative
+pilot screen is not a significance test for micro-F1 or a claim of generalization.
+Parent reconstruction reports complete/incomplete coverage; metrics over complete
+parents are separately labeled and do not establish full-exposure performance.
+
+Offline replay of the frozen Train-internal temporal audit (115 child scenes,
+78 parents; this is not official Test):
+
+| Metric | Zero-shot | Action-only SFT |
+| --- | ---: | ---: |
+| Click micro recall | 3/83 = 0.0361 | 4/83 = 0.0482 |
+| Purchase micro recall | 0/17 = 0 | 2/17 = 0.1176 |
+| Click micro-F1 | 0.0674 | 0.0825 |
+| Purchase micro-F1 | 0 | 0.1600 |
+| Click false-action rate on empty targets | 2/32 = 0.0625 | 2/32 = 0.0625 |
+| Purchase false-action rate on empty targets | 0/98 = 0 | 5/98 = 0.0510 |
+| Any-action prediction rate | 6/115 | 14/115 |
+
+Legacy F1 is 0.616239 -> 0.618162; always-no-action is 0.620513.
+Its paired improvement interval crosses zero. The new conservative pilot gate
+therefore fails. There are 59 complete and 19 incomplete parents (115 of 150
+expected children). The old child metric cannot demonstrate complete multi-click
+or multi-purchase recovery. Do not tune models/thresholds on this frozen audit.
+
+The actual 596-row training input hash matches the saved config. It contains
+247 Query and 349 Response rows, with zero rationale tokens. Of Response rows,
+82 are empty, 228 click-only, 35 click+purchase, and 4 purchase-only. Although
+empty rows are 23.5% of examples, their share after the existing parent/scene
+weighting is 40%; positive responses retain 60%. Purchase-positive weight is
+14.51%. This is not simply an overwhelmingly empty training set.
+
+Using the actual tokenizer and supervised masks, under normalized action loss
+the coefficient on a head's first ID-or-close token is row_weight / action_tokens.
+The summed coefficient is empty/positive = 36.5474/15.4803 for click and
+49.4213/2.6065 for purchase. Short empty arrays concentrate coefficients on this
+decision more than longer IDs. These are **coefficients, not measured losses or
+gradients**; other action tokens remain supervised. The saved logs lack classwise
+loss/gradient measurements. Keep loss/learning-rate settings fixed until a
+bounded model diagnostic can test this hypothesis. The optional existing
+Response decision auxiliary loss is a candidate for a separate future ablation,
+not a change made in this replay.
+
+Replaying current mechanical checks and checking original review hashes gives:
+64 old attempts -> 13 exact actions -> 11 mechanically eligible -> 9 reviewed
+passes; 32 sampled attempts -> 11 exact -> 8 mechanically eligible -> 2 passes.
+These are historical outputs, not a measurement of the newer Chinese short-CoT
+prompt. Their errors include mistranslation, confusing catalog prices with user
+exposure, conflating equal-title IDs, unbounded claims from a finite history,
+overgeneralizing candidate relevance, and an unsupported Habitual style.
+The short prompt now also explicitly limits price provenance and absence claims.
+Fact-reference existence remains weaker than semantic entailment.
+
+Next bounded diagnostic, once compute is available:
+
+1. Freeze a small stratified **dev** subset before viewing new outputs. Compare
+   the saved base and SFT on identical original prompts and original action schema;
+   no optimizer steps. Record native JSON action continuation log probabilities,
+   relevant empty-vs-ID decision scores, predicted selections and actual targets.
+   If scores are normalized over a finite menu, label them as conditional menu
+   probabilities, not calibrated real-world behavior probabilities. The existing
+   OptionPredictor changes the prompt to option labels and cannot alone diagnose
+   the original JSON decoder.
+2. On the same dev cases, ablate historical events together with all historical
+   facts/derived summaries that expose them, preserving current query/candidates.
+   Recheck differences to ensure the history did not leak through another field.
+   Compare matched base/SFT accuracy as well as probability changes. Do not use
+   audit cases to choose context, decoding or thresholds.
+3. Use a small fixed **fit** batch for the current short EKB teacher, one attempt
+   per scene, 768 output tokens and bounded concurrency. Record all attempts,
+   exact-action yield, mechanical yield, semantic yield, tokens and latency.
+   Review hard factual errors separately from weak interpretations. Prefer this
+   measurement before adding more sampling, PRM, strong/weak entropy passes or DPO.
+   Repair, if later tested, gets at most one targeted retry and separate provenance;
+   answer-conditioned repair must be a separate experimental arm.
+4. CoT-SFT remains a later authorized experiment. Both arms receive the same
+   context at inference; the explanation is generated output supervision, never
+   a gold rationale appended to inference input. Keep rows, labels, initialization,
+   steps and evaluation fixed, and require nonzero reviewed rationale supervision.
+
+Local replay artifacts: `tmp/response-metrics-replay-20261127.json` and
+`tmp/response-diagnosis-20261127/{training-supervision,training-decision-masks,cot-audit}.json`.
+No new Customer model inference, CoT generation or training was run for this
+diagnosis; the available GPUs were occupied by other work.

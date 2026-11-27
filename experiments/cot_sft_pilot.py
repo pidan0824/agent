@@ -429,7 +429,7 @@ def comparison(args):
                 "Evaluation input or schema changed")
         require(cases[key]["partition"] in ("dev","audit"),"No training-set success claims")
     rng=np.random.default_rng(20261126)
-    def paired(left,right,larger=True,groups=None):
+    def paired(left,right,larger=True,groups=None,bootstrap_rng=None):
         detail = {}
         if groups is not None:
             require(len(groups)==len(left)==len(right), "Parent grouping differs from scores")
@@ -442,7 +442,8 @@ def comparison(args):
         a=np.asarray(left,float)
         b=np.asarray(right,float)
         delta=b-a if larger else a-b
-        samples=[float(delta[rng.integers(0,len(delta),len(delta))].mean()) for _ in range(2000)]
+        sample_rng = rng if bootstrap_rng is None else bootstrap_rng
+        samples=[float(delta[sample_rng.integers(0,len(delta),len(delta))].mean()) for _ in range(2000)]
         return {**detail,"n":len(delta),"baseline_mean":float(a.mean()),"sft_mean":float(b.mean()),
                 "improvement":float(delta.mean()),"paired_bootstrap_95pct":np.quantile(samples,[.025,.975]).tolist()}
     report={"protocol":"paired fixed inputs, same base family, same output budget; conditional behavior pilot",
@@ -467,6 +468,36 @@ def comparison(args):
                     head_values[name][field][key]=score
                 values[name][key]=sum(heads)/2
         report["customer_response"]=paired([values["zero_shot"][k] for k in response],[values["sft"][k] for k in response],groups=response_groups(response))
+        from agent_simulation.evaluation.customer_request_metrics import response_with_baseline, request_metrics
+        response_report = report["customer_response"]
+        response_report["legacy_metric"] = "Mean head F1 (empty-empty=1); then mean child score per parent"
+        response_report["action_metrics"] = {}
+        response_report["parent_coverage"] = {}
+        for name, records in predictions.items():
+            response_report["action_metrics"][name] = response_with_baseline(
+                {"target": cases[k]["target"], "prediction": records[k].get("prediction"),
+                 "status": records[k]["status"]} for k in response)
+            reconstructed = request_metrics([
+                {"stage": "response", "variant": name,
+                 "policy": "sampled" if cases[k].get("action_mode") == "single_item" else "full",
+                 "trajectory": {**cases[k], "status": records[k]["status"],
+                                "final_action": records[k].get("prediction"),
+                                "scene_id": cases[k].get("scene_id", k)}} for k in response])
+            complete = [r for r in reconstructed if r["complete"]]
+            response_report["parent_coverage"][name] = {
+                "parents": len(reconstructed), "complete_parents": len(complete),
+                "incomplete_parents": len(reconstructed) - len(complete),
+                "expected_scenes": sum(r["expected_scenes"] for r in reconstructed),
+                "observed_scenes": len(response),
+                "complete_parent_metrics": response_with_baseline(
+                    {"target": r["target"], "prediction": r["prediction"], "status": "ok"}
+                    for r in complete),
+                "scope": "Only complete reconstructed parents; not an independent full-exposure evaluation"}
+        empty_scores = {k: sum(not cases[k]["target"][f] for f in
+                        ("clicked_item_ids", "purchased_item_ids")) / 2 for k in response}
+        response_report["always_no_action_legacy"] = paired(
+            [empty_scores[k] for k in response], [values["sft"][k] for k in response],
+            groups=response_groups(response), bootstrap_rng=np.random.default_rng(20261127))
         report["customer_response"]["by_head"]={}
         for field in ("clicked_item_ids","purchased_item_ids"):
             head=paired([head_values["zero_shot"][field][k] for k in response],
@@ -529,7 +560,14 @@ def comparison(args):
     report["pilot_gate"]={}
     if response:
         response_report=report["customer_response"]
+        action_metrics = response_report["action_metrics"]
         checks={"response_mean_improved":response_report["improvement"]>0}
+        # A legacy mean improvement is insufficient when abstention beats the model.
+        checks["legacy_improvement_ci_excludes_zero"] = response_report["paired_bootstrap_95pct"][0] > 0
+        checks["beats_no_action_legacy"] = response_report["always_no_action_legacy"]["improvement"] > 0
+        checks["action_micro_f1_improved"] = (
+            (action_metrics["sft"]["model"]["pooled_action_micro_f1"] or 0) >
+            (action_metrics["zero_shot"]["model"]["pooled_action_micro_f1"] or 0))
         for field,name,strict in (("clicked_item_ids","positive_click_f1_not_lower",False),
                                   ("purchased_item_ids","positive_purchase_f1_improved",True)):
             positive=response_report["by_head"][field]["observed_positive"]

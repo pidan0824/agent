@@ -152,6 +152,10 @@ class PilotTests(unittest.TestCase):
             self.assertEqual(report["invalid"]["zero_shot"],1)
             self.assertEqual(report["customer_response"]["baseline_mean"],0)
             self.assertEqual(report["customer_response"]["sft_mean"],1)
+            metrics=report["customer_response"]["action_metrics"]
+            self.assertEqual(metrics["zero_shot"]["model"]["invalid"],1)
+            self.assertEqual(metrics["sft"]["model"]["pooled_action_micro_f1"],1)
+            self.assertEqual(metrics["sft"]["always_no_action"]["pooled_action_micro_f1"],0)
             self.assertIn("observed_positive",report["customer_response"]["by_head"]["purchased_item_ids"])
             identity["temperature"]=.7
             write_json(root/"sft/manifest.json",identity)
