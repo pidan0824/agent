@@ -24,6 +24,72 @@ class CharacterTokenizer:
 
 
 class ContextOptimizationTests(unittest.TestCase):
+    def test_shared_context_reuses_inputs_across_styles_but_not_labels(self):
+        from agent_simulation.evaluation import customer_context as module
+        cache = module.ContextCache()
+        source = request()
+        tokenizer = CharacterTokenizer()
+        def binding(value, **kwargs):
+            return CurationTools(value, "response", mode="fixed", tokenizer=tokenizer,
+                                 history_token_budget=2048, context_cache=cache, **kwargs)
+        with patch.object(module, "budget_history", wraps=budget_history) as fit:
+            expected = binding(source, theory=False).initial_context()
+            changed = deepcopy(source)
+            changed["response_target"] = {"clicked_item_ids": [], "purchased_item_ids": []}
+            teacher = binding(changed, theory=True, concise=True)
+            actual = teacher.initial_context()
+            self.assertEqual(actual, expected)
+            actual["facts"].clear()
+            self.assertEqual(binding(source).initial_context(), expected)
+            self.assertEqual(fit.call_count, 1)
+            teacher.context["query"] = "changed"
+            with self.assertRaisesRegex(ValueError, "snapshot changed"):
+                teacher.initial_context()
+
+    def test_shared_cache_separates_snapshot_stage_budget_limit_and_tokenizer(self):
+        from agent_simulation.evaluation import customer_context as module
+        cache = module.ContextCache()
+        source = request()
+        tokenizer = CharacterTokenizer()
+        configs = [
+            (source, "response", {}),
+            (source, "query", {}),
+            (source, "response", {"history_limit": 0}),
+            (source, "response", {"history_token_budget": 0}),
+            (source, "response", {"tokenizer": CharacterTokenizer()}),
+        ]
+        for field, value in (("query", "different query"), ("history_cutoff_exclusive", 9),
+                             ("profile", {"user_id": 8}),
+                             ("displayed_items", [{"item_id": 4, "item_title": "New", "price_raw": 10}])):
+            changed = deepcopy(source)
+            changed["response_input"][field] = value
+            configs.append((changed, "response", {}))
+        for value, stage, override in configs:
+            kwargs = {"mode": "fixed", "history_token_budget": 2048, "tokenizer": tokenizer, **override}
+            expected = CurationTools(value, stage, **kwargs).initial_context()
+            self.assertEqual(CurationTools(value, stage, context_cache=cache, **kwargs).initial_context(), expected)
+        self.assertEqual(len(cache._contexts), len(configs))
+
+    def test_shared_cache_eviction_recomputes_and_preserves_history_guards(self):
+        from agent_simulation.evaluation import customer_context as module
+        cache = module.ContextCache(maxsize=1)
+        source, other = request(), request()
+        other["response_input"]["query"] = "other"
+        def context(value):
+            return CurationTools(value, "response", mode="fixed", history_token_budget=0,
+                                 context_cache=cache).initial_context()
+        with patch.object(module, "budget_history", wraps=budget_history) as fit:
+            expected = context(source)
+            context(other)
+            self.assertEqual(context(source), expected)
+            self.assertEqual(fit.call_count, 3)
+            self.assertEqual(len(cache._contexts), 1)
+        for field, value in (("time_index", 10), ("user_id", 999)):
+            changed = deepcopy(source)
+            changed["response_input"]["short_term_memory"]["search_history"][0][field] = value
+            with self.assertRaises(ValueError):
+                context(changed)
+
     def test_history_budget_preserves_recent_related_and_same_query_no_action(self):
         context = {"evidence_actor_id": 7, "history_cutoff_exclusive": 20,
                    "query": "cup", "displayed_items": [{"item_id": 4, "item_title": "cup"}]}

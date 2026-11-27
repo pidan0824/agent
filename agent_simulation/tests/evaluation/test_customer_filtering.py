@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 import numpy as np
 
 from agent_simulation.evaluation.customer_filtering import (
@@ -34,6 +35,38 @@ class FilteringTests(unittest.TestCase):
         return [
             record("good", "strong", target, target, [[.01,.97,.01,.01],[.01,.01,.01,.97]]),
             record("bad", "weak", action(), target, [[.8,.1,.05,.05],[.8,.05,.05,.1]])]
+
+    def test_export_checks_each_response_once_and_rechecks_next_export(self):
+        from agent_simulation.evaluation import customer_filtering as module
+        for sft_only in (True, False):
+            rows = self.pair_rows()
+            before = deepcopy(rows)
+            with TemporaryDirectory() as directory:
+                with patch.object(module, "check_evidence", wraps=module.check_evidence) as check:
+                    report = export_training(rows, Path(directory), sft_only=sft_only)
+                    self.assertEqual(check.call_count, len(rows))
+                    self.assertEqual(report["response_sft"], 1)
+                    export_training(rows, Path(directory), sft_only=sft_only)
+                    self.assertEqual(check.call_count, 2 * len(rows))
+            np.testing.assert_equal(rows, before)
+
+    def test_standalone_sft_rechecks_changed_evidence_and_ignores_saved_pass(self):
+        from agent_simulation.evaluation import customer_filtering as module
+        row = self.pair_rows()[0]
+        with patch.object(module, "check_evidence", wraps=module.check_evidence) as check:
+            selected = select_sft([row])
+            self.assertEqual(len(selected), 1)
+            self.assertEqual(check.call_count, 1)
+            row["trajectory"]["evidence_quality"] = deepcopy(selected[0]["evidence_quality"])
+            row["trajectory"]["messages"][-1]["content"] = "{}"
+            self.assertEqual(select_sft([row]), [])
+            self.assertEqual(check.call_count, 2)
+
+    def test_semantic_review_change_is_rechecked_on_next_selection(self):
+        row = self.pair_rows()[0]
+        self.assertEqual(len(select_sft([row])), 1)
+        row["trajectory"]["semantic_review"] = {"verdict": "fail"}
+        self.assertEqual(select_sft([row]), [])
 
     def test_logloss_preserves_original_transcripts_even_if_predictor_sample_disagrees(self):
         rows = self.pair_rows()

@@ -155,23 +155,43 @@ class OptionPredictor:
         return probabilities
 
 
+def _evidence_checker():
+    """Reuse checks only inside one synchronous selection/export of stable records.
 
-def select_sft(records, *, variants=("strong",)):
+    Never read serialized evidence_quality: changed transcripts/reviews are checked
+    again on every public call. Holding each object also prevents id reuse.
+    """
+    checked = {}
+
+    def check(trajectory):
+        key = id(trajectory)
+        if key not in checked:
+            checked[key] = (trajectory, check_evidence(trajectory))
+        return checked[key][1]
+
+    return check
+
+
+def select_sft(records, *, variants=("strong",), _check_evidence=None):
     """Keep original outcome-accepted transcripts independently of predictor/DPO."""
     validate_request_splits(records)
+    check = _check_evidence or _evidence_checker()
     selected = {}
     for row in records:
         t = row["trajectory"]
         quality = assess_record(row)
         if (row["source_split"] != "train" or t["source_split"] != "train"
-            or row["variant"] not in variants or not quality["accepted"] or not check_evidence(t)["accepted"]
+            or row["variant"] not in variants or not quality["accepted"]
             or not row.get("reachable", True)):
+            continue
+        evidence = check(t)
+        if not evidence["accepted"]:
             continue
         meta = {key: t[key] for key in ("role", "actor_id", "stage", "initial_state_id", "source_split")}
         meta.update({key: deepcopy(t[key]) for key in ("source_request_id", "scene_id", "source_response_target", "dataset_manifest_sha256", "response_style", "action_mode", "evaluation_protocol") if key in t})
         value = {**meta, "trajectory_id": t["trajectory_id"], "tools": deepcopy(t["tools"]),
                  "messages": deepcopy(t["messages"]), "score": quality["metrics"]["score"],
-                 "quality": quality, "evidence_quality": check_evidence(t),
+                 "quality": quality, "evidence_quality": evidence,
                  "behavior_source": "generator_final_action; no predictor resampling"}
         # Do not collapse distinct actors/scenes just because their text matches.
         key = json.dumps([meta, value["messages"], value["tools"]], sort_keys=True)
@@ -248,7 +268,7 @@ def _pair(good, bad, *, protocol, selection_metric, selection_value):
 
 def select_preferences(records, *, max_pairs=10000, filter_column="diff_model_uncertainty",
                        sampling_column="entropy", ascending=False, pair_protocol="logloss",
-                       logloss_min_gap=.05, action_min_gap=.05, diagnostics=None):
+                       logloss_min_gap=.05, action_min_gap=.05, diagnostics=None, _check_evidence=None):
     """Rank scenarios by uncertainty; pair original actions and explanations.
 
     logloss: chosen matches both action heads exactly and passes provenance checks.
@@ -262,7 +282,8 @@ def select_preferences(records, *, max_pairs=10000, filter_column="diff_model_un
     require(pair_protocol in ("logloss", "sampled_match"), "Unknown pair protocol")
     require(all(math.isfinite(v) and v > 0 for v in (logloss_min_gap, action_min_gap)),
             "Pair gaps must be positive and finite")
-    sft_rows = select_sft(records)
+    check = _check_evidence or _evidence_checker()
+    sft_rows = select_sft(records, _check_evidence=check)
     groups = defaultdict(list)
     for row in records:
         groups[(row.get("dataset", "unknown"), row.get("cid", row["trajectory"]["trajectory_id"]))].append(row)
@@ -277,7 +298,7 @@ def select_preferences(records, *, max_pairs=10000, filter_column="diff_model_un
             if row.get("prob") is not None and row.get("logloss") is not None and math.isfinite(row["logloss"]):
                 quality = assess_record(row)
                 if "score" in quality["metrics"]:
-                    usable.append({**row, "_quality": quality, "_evidence": check_evidence(row["trajectory"])})
+                    usable.append({**row, "_quality": quality, "_evidence": check(row["trajectory"])})
         statuses[key] = "no_eligible_train_trajectory" if not valid else "missing_probabilities"
     metrics = _uncertainty_metrics(usable)
     metric_map = {(r["dataset"], r["cid"]): r for r in metrics}
@@ -466,6 +487,7 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
     output = Path(output)
     records = deepcopy(records)
     validate_request_splits(records)
+    check = _evidence_checker()
     decisions, groups, response = [], defaultdict(list), []
     for row in records:
         t = row["trajectory"]
@@ -482,7 +504,7 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
         if not row.get("reachable", True):
             reasons.append("target_unreachable")
         reasons.extend(quality["reasons"])
-        evidence = check_evidence(t)
+        evidence = check(t)
         reasons.extend(evidence["reasons"])
         stratum = ("query" if row["stage"] == "query" else
                    behavior_stratum(t["target"]) if "target" in t else "unknown")
@@ -509,14 +531,14 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
         pair_decisions.append({"stage": "query", "dataset": dataset, "cid": cid, "reason": reason})
     response_decisions = []
     if sft_only:
-        response_sft, response_pairs, metrics = select_sft(response), [], []
+        response_sft, response_pairs, metrics = select_sft(response, _check_evidence=check), [], []
     else:
         response_sft, response_pairs, metrics = select_preferences(response, max_pairs=max_pairs,
             filter_column=filter_column, sampling_column=sampling_column, ascending=ascending,
             pair_protocol=pair_protocol, logloss_min_gap=logloss_min_gap,
-            action_min_gap=action_min_gap, diagnostics=response_decisions)
+            action_min_gap=action_min_gap, diagnostics=response_decisions, _check_evidence=check)
     pair_decisions.extend({"stage": "response", **item} for item in response_decisions)
-    sft = select_sft([r for r in records if r["stage"] == "query"]) + response_sft
+    sft = select_sft([r for r in records if r["stage"] == "query"], _check_evidence=check) + response_sft
     pairs = list({digest([r["initial_state_id"], r["actor_id"], r["stage"], r["prompt"],
                           r["tools"], r["chosen"], r["rejected"]]): r
                   for r in query_pairs + response_pairs}.values())

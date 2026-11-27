@@ -20,7 +20,7 @@ from agent_simulation.datasets.labels import SFTDataset, select_record_ids
 from agent_simulation.evaluation.customer_filtering import OptionPredictor, probability_record, export_training, add_filter_arguments, validate_filter_options
 # Re-export established helpers for existing evaluation callers.
 from agent_simulation.evaluation.customer_context import (
-    CurationTools, budget_history, fixed_response_requests, history_relevance,
+    ContextCache, CurationTools, budget_history, fixed_response_requests, history_relevance,
 )
 from agent_simulation.evaluation.trajectories import generate_trajectory, trajectory_messages, OutcomeScorer, score_group, digest
 from agent_simulation.evaluation.customer_quality import behavior_stratum
@@ -29,7 +29,7 @@ from agent_simulation.inference.requests import load_tokenizer, ContextCapacityE
 
 
 def observed_action_rows(request, identity, split, dataset_identity, *, bundle=None, policies=None,
-                         history_token_budget=None, tokenizer=None):
+                         history_token_budget=None, tokenizer=None, context_cache=None):
     """Observed actions use prepared child scenes; explicit raw protocols keep full labels."""
     if split != "train":
         return []
@@ -42,7 +42,7 @@ def observed_action_rows(request, identity, split, dataset_identity, *, bundle=N
     result = []
     for stage, policy, adapted, candidate in generation_jobs(request, bundle=bundle, policies=observed_policies):
         binding = CurationTools(adapted, stage, mode="fixed", theory=False,
-                               history_token_budget=history_token_budget, tokenizer=tokenizer)
+                               history_token_budget=history_token_budget, tokenizer=tokenizer, context_cache=context_cache)
         schemas, prompt = trajectory_messages(binding, role="customer", stage=stage, theory=False)
         prompt, _, _ = initial_agentic_request(prompt, [], AgenticOptions(max_model_calls=1, theory=False))
         target = deepcopy(adapted[stage + "_target"])
@@ -280,6 +280,8 @@ def main(argv=None):
             if isinstance(obj, Path): return str(obj)
             raise TypeError(type(obj).__name__)
         (args.output / "manifest.json").write_text(json.dumps(manifest, default=path_json, ensure_ascii=False, indent=2)+"\n")
+        context_cache = ContextCache()
+
         def scene_jobs():
             for identity in ids:
                 request = prepared[identity]["request"] if prepared else data.catalog.request(identity, all_prior=True)
@@ -288,7 +290,7 @@ def main(argv=None):
                     observed.extend(observed_action_rows(request, identity, args.split,
                         manifest["dataset_manifest_sha256"], bundle=prepared.get(identity),
                         policies=args.candidate_policies, history_token_budget=args.history_token_budget,
-                        tokenizer=data.tokenizer))
+                        tokenizer=data.tokenizer, context_cache=context_cache))
                 for stage, policy, adapted, candidate in generation_jobs(request,
                         bundle=prepared.get(identity), policies=args.candidate_policies,
                         limit=args.candidate_count, encoder=encoder):
@@ -304,7 +306,8 @@ def main(argv=None):
             use_theory = stage == "response" and style == "ekb"
             binding = CurationTools(adapted, stage, mode=mode, theory=use_theory,
                                    concise=args.cot_preset == "lightweight",
-                                   history_token_budget=args.history_token_budget, tokenizer=data.tokenizer)
+                                   history_token_budget=args.history_token_budget, tokenizer=data.tokenizer,
+                                   context_cache=context_cache)
             options = AgenticOptions(max_model_calls=1 if mode == "fixed" else args.max_model_calls,
                                      max_tool_calls=args.max_tool_calls, theory=use_theory)
             async def one(sample):
@@ -334,6 +337,9 @@ def main(argv=None):
             samples = ((variant, model, index) for variant, model in models.items()
                        for index in range(args.samples))
             pending = [row async for row in bounded_map(one, samples, args.sample_concurrency)]
+            # Completion order must not change within-scene duplicate/tie selection.
+            variant_order = {variant: order for order, variant in enumerate(models)}
+            pending.sort(key=lambda row: (variant_order[row["variant"]], row["tid"]))
             return job, pending
 
         jobs = scene_jobs()
@@ -341,7 +347,8 @@ def main(argv=None):
         if args.teacher_budget is not None:
             with (args.output / "teacher-scene-evidence.jsonl").open("w") as audit:
                 jobs, budget_report = budget_scenes(jobs, args.teacher_budget, args.seed, audit,
-                    history_token_budget=args.history_token_budget, tokenizer=data.tokenizer)
+                    history_token_budget=args.history_token_budget, tokenizer=data.tokenizer,
+                    context_cache=context_cache)
             (args.output / "teacher-budget.json").write_text(encoded(budget_report) + "\n")
 
         with (args.output / "records.jsonl").open("w") as output:

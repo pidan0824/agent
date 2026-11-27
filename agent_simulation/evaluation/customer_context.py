@@ -1,4 +1,5 @@
 """Shared frozen Customer contexts for scene previews, evaluation and generation."""
+from collections import OrderedDict
 from copy import deepcopy
 from typing import NamedTuple
 import unicodedata
@@ -136,9 +137,31 @@ def select_history(history, limit, relevance, *, budgeted):
     return list(candidates.values())
 
 
+class ContextCache:
+    """Run-local bounded cache of input-only contexts, shared across curation stages."""
+    def __init__(self, maxsize=128):
+        require(type(maxsize) is int and maxsize > 0, "Positive context cache size required")
+        self.maxsize = maxsize
+        self._contexts = OrderedDict()
+
+    def get(self, key, tokenizer):
+        entry = self._contexts.get(key)
+        if entry is None or entry[0] is not tokenizer:
+            return None
+        self._contexts.move_to_end(key)
+        return deepcopy(entry[1])
+
+    def put(self, key, tokenizer, context):
+        # Keep the tokenizer alive so its object identity cannot be recycled.
+        self._contexts[key] = (tokenizer, deepcopy(context))
+        self._contexts.move_to_end(key)
+        while len(self._contexts) > self.maxsize:
+            self._contexts.popitem(last=False)
+
+
 class CurationTools(FrozenSampleTools):
     def __init__(self, request, stage, *, mode, theory=True, history_limit=10, concise=False,
-                 history_token_budget=None, tokenizer=None):
+                 history_token_budget=None, tokenizer=None, context_cache=None):
         super().__init__(request, stage, theory=theory)
         require(mode in ("fixed", "autonomous"), "Unknown information mode")
         require(type(history_limit) is int and history_limit >= 0, "Nonnegative integer history limit required")
@@ -150,6 +173,9 @@ class CurationTools(FrozenSampleTools):
                 "History token budget requires the model tokenizer")
         self.history_token_budget, self.tokenizer = history_token_budget, tokenizer
         self._budget_context = None
+        self._context_cache = context_cache if mode == "fixed" else None
+        self._context_key = (self.fingerprint, stage, mode, history_limit,
+                             history_token_budget, id(tokenizer))
         self.concise = concise
         if mode == "fixed":
             self.schemas = []
@@ -159,6 +185,12 @@ class CurationTools(FrozenSampleTools):
         if self._budget_context is not None:
             self.guard()
             return deepcopy(self._budget_context)
+        if self._context_cache is not None:
+            self.guard()
+            cached = self._context_cache.get(self._context_key, self.tokenizer)
+            if cached is not None:
+                self._budget_context = cached
+                return deepcopy(cached)
         context = self._base_context()
         relevance = None
         context["information_mode"] = self.mode
@@ -176,12 +208,18 @@ class CurationTools(FrozenSampleTools):
                     "Selected events from available history; unshown events may contain other actions.")
             context["observed_history"] = deepcopy(history)
         if self.history_token_budget is not None:
-            self._budget_context = budget_history(context, history, stage=self.stage,
+            context = budget_history(context, history, stage=self.stage,
                 tokenizer=self.tokenizer, budget=self.history_token_budget, event_limit=self.history_limit,
                 relevance=relevance)
-            return deepcopy(self._budget_context)
-        from agent_simulation.evaluation.customer_evidence import attach_sources
-        return attach_sources(context)
+        else:
+            from agent_simulation.evaluation.customer_evidence import attach_sources
+            context = attach_sources(context)
+        if self.history_token_budget is not None or self._context_cache is not None:
+            self._budget_context = context
+            if self._context_cache is not None:
+                self._context_cache.put(self._context_key, self.tokenizer, context)
+            return deepcopy(context)
+        return context
 
 
 def fixed_response_requests(response_input, *, history_limit=10, history_token_budget=None, tokenizer=None):

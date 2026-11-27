@@ -115,7 +115,7 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(selected, [])
         self.assertEqual(report["selected"], 0)
 
-    def test_scheduler_is_concurrent_bounded_lazy_and_ordered(self):
+    def test_scheduler_is_concurrent_bounded_and_lazy(self):
         async def run():
             active = peak = consumed = 0
             ready = asyncio.Event()
@@ -139,8 +139,47 @@ class GenerationTests(unittest.TestCase):
             async for result in bounded_map(task, items(), 3):
                 self.assertLessEqual(consumed - len(results), 3)
                 results.append(result)
-            self.assertEqual(results, list(range(9)))
+            self.assertCountEqual(results, list(range(9)))
             self.assertEqual(peak, 3)
+        asyncio.run(run())
+
+    def test_scheduler_refills_before_slow_first_finishes(self):
+        async def run():
+            later_started = asyncio.Event()
+            async def task(i):
+                if i == 0:
+                    await asyncio.wait_for(later_started.wait(), 1)
+                elif i == 2:
+                    later_started.set()
+                return i
+            results = [r async for r in bounded_map(task, range(4), 2)]
+            self.assertEqual(results[0], 1)
+            self.assertCountEqual(results, range(4))
+        asyncio.run(run())
+
+    def test_scheduler_close_cancels_pending_without_consuming_more(self):
+        async def run():
+            started = asyncio.Event()
+            cancelled = []
+            consumed = []
+            def items():
+                for i in range(10):
+                    consumed.append(i)
+                    yield i
+            async def task(i):
+                if i == 0:
+                    await started.wait()
+                    return i
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.append(i)
+            stream = bounded_map(task, items(), 2)
+            self.assertEqual(await anext(stream), 0)
+            await stream.aclose()
+            self.assertEqual(consumed, [0, 1])
+            self.assertEqual(cancelled, [1])
         asyncio.run(run())
 
     def test_scheduler_cancels_other_tasks_on_failure(self):
@@ -205,7 +244,7 @@ class GenerationTests(unittest.TestCase):
                         outer.assertIn(self.seed, range(42, 42 + samples))
                         outer.assertEqual(concise_ekb_instructions() in value["messages"][0]["content"], light)
                         outer.assertNotIn("source_response_target", json.dumps(value))
-                        await asyncio.sleep(.01)
+                        await asyncio.sleep(.01 if self.seed == 42 else .001)
                         state.active -= 1
                         if "query" in value["final_schema"].get("properties", {}):
                             return {"role": "assistant", "content": json.dumps({"query": "SECRET TARGET"}), "tool_calls": []}
@@ -218,8 +257,12 @@ class GenerationTests(unittest.TestCase):
                 argv += ["--sft-only", "--cot-preset", "lightweight"] if light else ["--samples", "2"]
                 if budget is not None:
                     argv += ["--teacher-budget", str(budget)]
-                with redirect_stdout(io.StringIO()):
-                    main(argv)
+                from agent_simulation.evaluation import customer_context
+                with patch.object(customer_context, "budget_history", wraps=customer_context.budget_history) as fit:
+                    with redirect_stdout(io.StringIO()):
+                        main(argv)
+                    # Fixtures share one Query and two distinct Response input snapshots.
+                    self.assertEqual(fit.call_count, 3 if light else 0)
                 expected = (3 if budget is None else budget) * samples * (1 if light else 4)
                 self.assertEqual(state.calls, expected)
                 self.assertEqual(state.peak, min(2 if light else 4, expected))
@@ -228,10 +271,16 @@ class GenerationTests(unittest.TestCase):
                 else:
                     self.assertEqual(predictor.return_value.score.call_count, expected // 2)
                 rows = [json.loads(line) for line in (root / "output/records.jsonl").read_text().splitlines()]
-                self.assertEqual([r["trajectory"]["source_request_id"] for r in rows],
+                self.assertCountEqual([r["trajectory"]["source_request_id"] for r in rows],
                                  [i for i in ([11, 12, 13] if budget is None else [12, 13] if budget else [])
                                   for _ in range(samples * (1 if light else 4))])
                 self.assertTrue(all(r["trajectory"]["status"] == "ok" for r in rows))
+                arms = {}
+                for row in rows:
+                    arms.setdefault((row["stage"], row["cid"]), []).append((row["variant"], row["tid"]))
+                expected_order = [(variant, index) for variant in (["strong"] if light else ["strong", "weak"])
+                                  for index in range(samples)]
+                self.assertTrue(all(order == expected_order for order in arms.values()))
                 observed = [json.loads(line) for line in (root / "output/observed-actions.jsonl").read_text().splitlines()]
                 self.assertEqual(len(observed), 6)
                 sft = [json.loads(line) for line in (root / "output/sft.jsonl").read_text().splitlines()]

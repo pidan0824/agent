@@ -31,27 +31,29 @@ def resolve_generation_options(args):
 
 
 async def bounded_map(function, items, concurrency):
-    """Lazy ordered results, at most concurrency scene tasks (including completed)."""
+    """Lazy completion-order results with bounded work and consumer backpressure."""
     require(concurrency > 0, "Positive scene concurrency required")
-    pending = deque()
-    iterator = iter(items)
+    pending = {}
+    iterator = enumerate(items)
+
+    def refill():
+        try:
+            order, item = next(iterator)
+        except StopIteration:
+            return
+        pending[asyncio.create_task(function(item))] = order
+
     try:
         for _ in range(concurrency):
-            try:
-                item = next(iterator)
-            except StopIteration:
-                break
-            pending.append(asyncio.create_task(function(item)))
+            refill()
         while pending:
-            task = pending[0]
-            result = await task
-            pending.popleft()
-            yield result
-            try:
-                item = next(iterator)
-            except StopIteration:
-                continue
-            pending.append(asyncio.create_task(function(item)))
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            # Stable ties only; a slow earlier task never blocks a completed one.
+            for task in sorted(done, key=pending.__getitem__):
+                result = task.result()
+                del pending[task]
+                yield result
+                refill()
     finally:
         for task in pending:
             task.cancel()
@@ -91,7 +93,7 @@ def scene_evidence(binding):
             "identical_visible_groups": collisions, "unsupported_identical_groups": unresolved}
 
 
-def budget_scenes(jobs, budget, seed, audit, *, history_token_budget=None, tokenizer=None):
+def budget_scenes(jobs, budget, seed, audit, *, history_token_budget=None, tokenizer=None, context_cache=None):
     """Top evidence within behavior/domain strata, round-robin allocation.
 
     Labels are used only for coverage strata. Priority uses visible inputs only.
@@ -106,7 +108,7 @@ def budget_scenes(jobs, budget, seed, audit, *, history_token_budget=None, token
         require(stage == "response" and mode == "fixed" and style == "ekb",
                 "Teacher budget expects fixed Response EKB scenes")
         features = scene_evidence(CurationTools(adapted, stage, mode=mode, concise=True,
-            history_token_budget=history_token_budget, tokenizer=tokenizer))
+            history_token_budget=history_token_budget, tokenizer=tokenizer, context_cache=context_cache))
         scene_id = str(candidate.get("scene_id", identity))
         stratum = (candidate["domain"], behavior_stratum(adapted["response_target"]))
         priority = (not features["single_candidate"],
