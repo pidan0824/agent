@@ -10,20 +10,24 @@ from collections import defaultdict
 from contextlib import ExitStack, closing
 from copy import copy, deepcopy
 import json
+import time
 from pathlib import Path
 import numpy as np
 
 from agent_simulation.agents.agentic import AgenticOptions
-from agent_simulation.data.common import require, sha256
+from agent_simulation.data.common import require, sha256, write_json_atomic
 from agent_simulation.datasets.customer_candidates import construct_candidates, candidate_coverage
 from agent_simulation.datasets.labels import SFTDataset, select_record_ids
-from agent_simulation.evaluation.customer_filtering import OptionPredictor, probability_record, export_training, add_filter_arguments, validate_filter_options
+from agent_simulation.evaluation.customer_filtering import OptionPredictor, export_training, add_filter_arguments, validate_filter_options
 # Re-export established helpers for existing evaluation callers.
 from agent_simulation.evaluation.customer_context import (
     ContextCache, CurationTools, budget_history, fixed_response_requests, history_relevance,
 )
 from agent_simulation.evaluation.trajectories import generate_trajectory, trajectory_messages, OutcomeScorer, score_group, digest
 from agent_simulation.evaluation.customer_quality import behavior_stratum
+from agent_simulation.evaluation.customer_run import (
+    RowJournal, run_lock, task_key, sample_probabilities,
+)
 from agent_simulation.inference.agentic import AgenticClient
 from agent_simulation.inference.requests import load_tokenizer, ContextCapacityError
 
@@ -113,6 +117,10 @@ def parser():
     p.add_argument("--selection", type=Path, help="Complete-Train scene selection; all selected IDs, no count truncation")
     p.add_argument("--count", type=int, default=0, help="Prepared scenes: 0 uses all; raw alternatives require an explicit positive count")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--resume", action="store_true", help="Reuse completed samples under the same run identity")
+    p.add_argument("--defer-probabilities", action="store_true", help="Save predictor inputs; score later with customer_scoring")
+    p.add_argument("--generation-variants", nargs="+", choices=["strong", "weak"],
+                   help="Generate selected branches without requiring the other generator service")
     p.add_argument("--sft-only", action="store_true", help="Generate strong teacher only; skip weak model, option predictor and DPO")
     p.add_argument("--cot-sft", action="store_true",
                    help="Stage fixed teacher outputs for reviewed CoT/action-only comparison; no automatic SFT export")
@@ -224,7 +232,13 @@ def main(argv=None):
     require(args.samples > 0 and args.sample_concurrency > 0 and args.count >= 0 and args.candidate_count > 0, "Positive sample/list counts required")
     require(args.samples == 1 or args.temperature > 0, "Repeated sampling requires nonzero temperature")
     require(len(set(args.modes)) == len(args.modes) and len(set(args.candidate_policies)) == len(args.candidate_policies), "Duplicate comparison arms")
-    require(not args.output.exists(), "Use a new output directory")
+    require(args.output.exists() if args.resume else not args.output.exists(),
+            "Resume needs an existing run; new runs need a new output directory")
+    require(not (args.defer_probabilities and args.sft_only), "Deferred scoring is for the full strong/weak path")
+    require(not args.generation_variants or
+            (len(set(args.generation_variants)) == len(args.generation_variants)
+             and args.defer_probabilities and not args.sft_only),
+            "Separate generator branches require deferred probabilities without --sft-only")
     prepared = {}
     if "sampled" in args.candidate_policies:
         require(args.scenes is not None, "Prepare sampled scenes first: python -m agent_simulation.datasets.customer_scenes")
@@ -242,14 +256,14 @@ def main(argv=None):
     require(all(v is None for v in (args.predictor_url,args.predictor_model,args.predictor_tokenizer))
             or all(v is not None for v in (args.predictor_url,args.predictor_model,args.predictor_tokenizer)),
             "Supply predictor URL, model and tokenizer together")
-    args.output.mkdir(parents=True)
+    args.output.mkdir(parents=True, exist_ok=args.resume)
     require(0 <= args.query_min <= 1 and 0 <= args.response_min <= 1, "Quality thresholds must be in [0,1]")
     scorer = OutcomeScorer(args.bge_path, bge_device=args.bge_device)
-    rng = np.random.default_rng(args.seed)
     styles = args.response_styles or (["ekb"] if args.theory else ["direct"])
     require(len(set(styles)) == len(styles), "Duplicate response styles")
     records, coverage, observed = [], [], []
     with ExitStack() as resources:
+        resources.enter_context(run_lock(args.output))
         data = resources.enter_context(closing(SFTDataset(args.dataset, args.strong_tokenizer)))
         ids = selected_ids or args.request_id or ((sorted(prepared)[:args.count] if args.count else sorted(prepared)) if prepared else select_record_ids(
             data.catalog.connection, args.dataset, "customer", args.split, args.count, args.seed))
@@ -260,35 +274,37 @@ def main(argv=None):
             [str(args.dataset / "customer" / args.split / "labels.parquet"), ids]).fetchall()}
         require(members == set(ids), "Request not in selected release split")
         models = {}
+        checked_models = set()
         model_specs = [("strong", args.strong_url, args.strong_model, args.strong_tokenizer),
                        ("weak", args.weak_url, args.weak_model, args.weak_tokenizer)]
         active_specs = [] if args.teacher_budget == 0 else model_specs[:1] if args.sft_only else model_specs
+        if args.generation_variants:
+            active_specs = [spec for spec in active_specs if spec[0] in args.generation_variants]
         for variant, url, name, path in active_specs:
             models[variant] = resources.enter_context(closing(AgenticClient(url, name,
                 data.tokenizer if variant == "strong" else load_tokenizer(path, local_files_only=True),
                 temperature=args.temperature, max_new_tokens=args.max_new_tokens, seed=args.seed,
                 context_limit=args.context_limit, stream=args.stream_timing,
-                log_path=args.output / (variant + "-calls.jsonl"))))
-            models[variant].check_models()
+                log_path=args.output / (variant + "-calls-" + str(time.time_ns()) + ".jsonl"))))
         predictor_client = models.get("weak")
-        if not args.sft_only and args.predictor_model is not None:
+        if not args.sft_only and not args.defer_probabilities and args.predictor_model is not None:
             predictor_client = resources.enter_context(closing(AgenticClient(args.predictor_url,args.predictor_model,
                 load_tokenizer(args.predictor_tokenizer,local_files_only=True), context_limit=args.context_limit,
                 max_new_tokens=1)))
-            predictor_client.check_models()
-        predictor = OptionPredictor(predictor_client, context_limit=args.context_limit) if not args.sft_only else None
+        predictor = OptionPredictor(predictor_client, context_limit=args.context_limit) if not args.sft_only and not args.defer_probabilities else None
         encoder = None
         if "retrieved" in args.candidate_policies:
             from agent_simulation.agents.retrieval.bge_encoder import bge_encoder
             encoder, _ = bge_encoder(args.bge_path, device=args.bge_device)
-        manifest = {"schema": "customer-usermirrorer-curation-v2", "args": vars(args), "request_ids": ids,
+        manifest = {"schema": "customer-usermirrorer-curation-v3", "args": {k:v for k,v in vars(args).items() if k not in ("resume", "scene_concurrency", "sample_concurrency")}, "request_ids": ids,
                     "dataset_manifest_sha256": sha256(args.dataset / "manifest.json"),
                     "scenes_manifest_sha256": sha256(args.scenes / "manifest.json") if prepared else None,
                     "source_sha256": {name: sha256(Path(__file__).parents[1] / name) for name in (
                         "evaluation/customer_curation.py", "evaluation/customer_generation.py", "evaluation/customer_context.py", "evaluation/customer_cot.py",
                         "agents/prompts/customer_agentic.py", "evaluation/customer_filtering.py", "evaluation/customer_quality.py",
                         "evaluation/customer_evidence.py", "evaluation/customer_contract.py", "evaluation/trajectories.py",
-                        "datasets/customer_candidates.py", "agents/prompts/customer_ekb.py", "inference/agentic.py")},
+                        "datasets/customer_candidates.py", "agents/prompts/customer_ekb.py", "inference/agentic.py",
+                        "inference/vllm.py", "evaluation/customer_run.py")},
                     "selection_manifest_sha256": sha256(args.selection / "manifest.json") if args.selection else None,
                     "selection_population": selection_manifest["population"] if selection_manifest else None,
                     "evaluation_protocol": "A: independent Query; Response conditioned on recorded Query and frozen candidates. Not end-to-end simulation.",
@@ -300,18 +316,21 @@ def main(argv=None):
         def path_json(obj):
             if isinstance(obj, Path): return str(obj)
             raise TypeError(type(obj).__name__)
-        (args.output / "manifest.json").write_text(json.dumps(manifest, default=path_json, ensure_ascii=False, indent=2)+"\n")
+        manifest = json.loads(json.dumps(manifest, default=path_json))
+        manifest_path = args.output / "manifest.json"
+        if args.resume:
+            require(json.loads(manifest_path.read_text()) == manifest, "Resume identity mismatch")
+        else:
+            write_json_atomic(manifest_path, manifest)
+        generated = resources.enter_context(closing(RowJournal(args.output / "generated.jsonl")))
+        probabilities = resources.enter_context(closing(RowJournal(args.output / "probabilities.jsonl")))
+        (args.output / "completed.json").unlink(missing_ok=True)
         context_cache = ContextCache()
 
         def scene_jobs():
             for identity in ids:
                 request = prepared[identity]["request"] if prepared else data.catalog.request(identity, all_prior=True)
                 actor = request["query_input"]["profile"]["user_id"]
-                if not args.evaluation_only:
-                    observed.extend(observed_action_rows(request, identity, args.split,
-                        manifest["dataset_manifest_sha256"], bundle=prepared.get(identity),
-                        policies=args.candidate_policies, history_token_budget=args.history_token_budget,
-                        tokenizer=data.tokenizer, context_cache=context_cache))
                 for stage, policy, adapted, candidate in generation_jobs(request,
                         bundle=prepared.get(identity), policies=args.candidate_policies,
                         limit=args.candidate_count, encoder=encoder):
@@ -337,22 +356,45 @@ def main(argv=None):
                 # be shared, but the mutable seed must never be shared.
                 sampled_model = copy(model)
                 sampled_model.seed = args.seed + index
-                trajectory = await generate_trajectory(binding, sampled_model, role="customer",
-                    actor_id=actor, stage=stage, record_id=scene_identity, source_split=args.split,
-                    catalog_identity=manifest["dataset_manifest_sha256"], options=options, sample_index=index)
-                trajectory["source_request_id"] = identity
-                trajectory["dataset_manifest_sha256"] = manifest["dataset_manifest_sha256"]
-                trajectory["scene_id"] = str(scene_identity)
-                row = {"stage": stage, "mode": mode, "policy": policy, "variant": variant, "tid": index,
+                header = {"stage": stage, "mode": mode, "policy": policy, "variant": variant, "tid": index,
                     "cid": digest([scene_identity, mode, policy, style, binding.fingerprint]),
                     "response_style": style, "evaluation_protocol": "independent_behavior_prediction",
                     "dataset": "KuaiSearch/" + (candidate["domain"] if candidate else "Query"),
-                    "source_split": args.split, "trajectory": trajectory, "prob": None}
+                    "source_split": args.split, "prob": None}
+                key = task_key(header)
+                saved = generated.get(key)
+                if saved is None:
+                    if variant not in checked_models:
+                        model.check_models()
+                        checked_models.add(variant)
+                    trajectory = await generate_trajectory(binding, sampled_model, role="customer",
+                        actor_id=actor, stage=stage, record_id=scene_identity, source_split=args.split,
+                        catalog_identity=manifest["dataset_manifest_sha256"], options=options, sample_index=index)
+                    trajectory["source_request_id"] = identity
+                    trajectory["dataset_manifest_sha256"] = manifest["dataset_manifest_sha256"]
+                    trajectory["scene_id"] = str(scene_identity)
+                    row = {**header, "task_id": key, "trajectory": trajectory}
+                    if args.defer_probabilities and stage == "response":
+                        row["probability_context"] = binding.initial_context()
+                        row["probability_context_sha256"] = digest(row["probability_context"])
+                    # Save before predictor calls/group scoring so failures never discard generation.
+                    generated.append(row)
+                else:
+                    row = saved
+                    trajectory = row["trajectory"]
                 if predictor is not None and stage == "response" and trajectory["status"] == "ok":
-                    try:
-                        row["raw_item_probabilities"] = await asyncio.to_thread(predictor.score, binding, trajectory)
-                    except ContextCapacityError as error:
-                        row["probability_error"] = str(error)
+                    cached = probabilities.get(key)
+                    if cached is None:
+                        cached = {"task_id": key}
+                        try:
+                            if "predictor" not in checked_models:
+                                predictor_client.check_models()
+                                checked_models.add("predictor")
+                            cached["raw_item_probabilities"] = await asyncio.to_thread(predictor.score, binding, trajectory)
+                        except ContextCapacityError as error:
+                            cached["probability_error"] = str(error)
+                        probabilities.append(cached)
+                    row.update(cached)
                 print(identity, stage, policy, mode, variant, index, trajectory["status"], flush=True)
                 return row
             samples = ((variant, model, index) for variant, model in models.items()
@@ -363,6 +405,21 @@ def main(argv=None):
             pending.sort(key=lambda row: (variant_order[row["variant"]], row["tid"]))
             return job, pending
 
+        if not args.evaluation_only:
+            for identity in ids:
+                request = prepared[identity]["request"] if prepared else data.catalog.request(identity, all_prior=True)
+                observed.extend(observed_action_rows(request, identity, args.split,
+                    manifest["dataset_manifest_sha256"], bundle=prepared.get(identity),
+                    policies=args.candidate_policies, history_token_budget=args.history_token_budget,
+                    tokenizer=data.tokenizer, context_cache=context_cache))
+            observed_text = "".join(encoded(row) + "\n" for row in observed)
+            observed_path = args.output / "observed-actions.jsonl"
+            if observed_path.exists():
+                require(observed_path.read_text() == observed_text, "Observed supervision changed on resume")
+            else:
+                temporary = observed_path.with_suffix(".tmp")
+                temporary.write_text(observed_text)
+                temporary.replace(observed_path)
         jobs = scene_jobs()
         budget_report = None
         if args.teacher_budget is not None:
@@ -402,20 +459,17 @@ def main(argv=None):
                             row.update(reachable=status["reachable"], behavior_group=status["behavior_group"],
                                        choice_cnt=candidate["candidate_count"])
                             if row.get("raw_item_probabilities"):
-                                values = probability_record(row.pop("raw_item_probabilities"), candidate["candidate_item_ids"], target, rng=rng)
-                                row.update(values)
-                                for name in ("argmax", "sampled"):
-                                    row[name+"_score"] = scorer.score(stage, row[name+"_action"], target)["score"]
+                                sample_probabilities(row, row.pop("raw_item_probabilities"), args.seed, scorer)
                         output.write(encoded(row) + "\n"); output.flush()
                         records.append(row)
             asyncio.run(generate_all())
-        if not args.evaluation_only:
-            (args.output / "observed-actions.jsonl").write_text("".join(encoded(row) + "\n" for row in observed))
+        records.sort(key=lambda row: (row["cid"], row["variant"], row["tid"]))
+        (args.output / "records.jsonl").write_text("".join(encoded(row) + "\n" for row in records))
         if args.cot_sft:
             from agent_simulation.evaluation.customer_cot import write_review_audit
             exported = {"cot_sft": write_review_audit(records, observed, args.output)}
         else:
-            exported = {} if args.evaluation_only else export_training(records,args.output,
+            exported = {} if args.evaluation_only or args.defer_probabilities else export_training(records,args.output,
                 observed_actions=observed, sft_only=args.sft_only, max_pairs=args.max_pairs,filter_column=args.filter_column,
                 sampling_column=args.sampling_column,ascending=args.ascending,
                 query_min=args.query_min,response_min=args.response_min,click_min=args.click_min,purchase_min=args.purchase_min,
@@ -442,6 +496,9 @@ def main(argv=None):
             "groups":["domain","candidate_count","observed_behavior_group"],"all_raw_rows_retained":True,
             "test_training_export":False})
         (args.output / "report.json").write_text(encoded(report)+"\n")
+        write_json_atomic(args.output / "completed.json", {
+            "status": "generated_pending_probabilities" if args.defer_probabilities else "complete",
+            "records": len(records), "records_sha256": sha256(args.output / "records.jsonl")})
         print(encoded({k:v for k,v in report.items() if k != "candidate_coverage"}), flush=True)
 
 

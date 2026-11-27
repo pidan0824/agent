@@ -255,7 +255,7 @@ sampled_match 是显式可选作者采样对照，也执行 chosen 原始动作�
 3. 不把 temperature=0 的旧输出混入非零温度样本来凑采样数，也不只对动作正确的解释计算不确定性；否则估计的分布已被正确性筛选改变。报告全部尝试、有效配对数及重复解释。选项打分虽只输出一个 token，仍需完整输入预填充，不能当作零成本。需要更多采样时保留既有结果，新增等量双边样本，而不是重跑整个集合。
 4. DPO 等 CoT-SFT 对照后再推进。优先复用相同提示下已有的真实错误分支，不额外调用大模型编造 rejected。chosen 必须动作精确匹配且通过语义审查；仅有低熵、较低 NLL 或较长解释都不够。没有可信 chosen/rejected 时保留合格 SFT 样本，不强制造对。答案条件修正另设实验；给过真实动作的生成提示不能伪装成普通未见答案的轨迹。
 
-接入仍有两处工作，不能把方案写成已实现：当前 lightweight 预设限定 sft-only，完整强弱路径仍使用 original 配置；当前完整路径也在线交错调用生成器/预测器。后续需要在保留相同输入的前提下接入短提示的强弱采样，并允许先分别生成、再用固定预测器离线评分，从而顺序驻留 32B 和 9B。新 CoT 的语义审查结果也须按原文哈希接到 DPO chosen，现有机械检查不能代替它。本轮没有扩大运行入口或改变原公式、筛选阈值及 vendor 代码。
+分阶段生成／离线概率评分现已接入，见下方恢复与分阶段运行说明；原在线路径继续保留。当前 lightweight 预设仍限定 sft-only，完整强弱路径使用 original 配置。短提示强弱采样以及将新 CoT 语义审查按原文哈希接到 DPO chosen 仍待后续实现；机械检查不能代替语义审查。此次不改变原公式、筛选阈值及 vendor 代码。
 
 离线审计：tmp/uncertainty-cost-audit-20261127/report.json 与 historical-metrics.json；驱动 tmp/audit_uncertainty_cost.py。该驱动比较修改前后公式输出，新增字段单测同时覆盖单对、多对和未配对分支。
 
@@ -300,6 +300,37 @@ sampled 聚合标为 split_reconstructed；它仍受结果条件化候选影响�
 
 stream-timing 默认开启，模型调用日志保留 input_tokens、output_tokens、seconds、ttft_seconds、decode_tokens_per_second。TTFT 是客户端发出 HTTP 请求到首个非空 SSE 内容／工具增量的时间，包含排队与网络；decode rate 按服务端输出 token 数与首尾增量时间近似计算，不能当作精确逐 token 的内核速度。关闭流式时 TTFT 和 decode rate 为 null，不用总耗时冒充 TTFT。没有增加额外模型调用来做计时。
 
+## 随机种子、断点恢复与分阶段概率评分（2026-11-27）
+
+后处理概率采样改为按运行 seed、场景 cid、模型分支和样本编号派生独立 RNG。并发完成顺序不再改变 sampled_action/preference；模型本身的生成 seed 沿用原协议。与旧共享 RNG 的随机采样结果可能不同，原始概率、熵和 Log Loss 公式不变。
+
+新生成运行使用 v3 manifest。原命令加 --resume 复用已完成样本；允许调整两层并发数，数据、场景、种子、模型配置及相关代码身份必须一致。旧 v2 产物不会静默升级为可续跑的新运行。原始观察监督在模型调用前保存，generated.jsonl 每完成一条生成即追加并刷盘，probabilities.jsonl 独立保存概率结果。传输失败会停止当前运行，修复服务后显式续跑；失败请求及未完成请求可重新执行，已持久化的有效或无效输出都不重复生成。只丢弃没有结束换行的中断尾行，完整行损坏则报错；运行锁防止同目录被两个写入者同时使用。
+
+completed.json 只在整个阶段完成后写入；中断运行的部分 records.jsonl 不视为完整产物。完全缓存命中时，恢复不请求模型服务。尚未落盘的在途 HTTP 请求不保证服务端取消，也不保证从网络层实现 exactly-once。
+
+完整强弱路径可显式延迟概率评分。以下为后续运行模板，本轮未运行真实模型服务；两个生成阶段使用同一冻结场景和相同设置，仅变更所选分支、服务地址及输出目录：
+
+~~~bash
+./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
+  --dataset <release> --scenes <frozen-fit-scenes> --output <strong-run> \
+  --defer-probabilities --generation-variants strong \
+  --samples 3 --temperature 0.7 --max-new-tokens 768 --bge-device cpu
+
+./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
+  --dataset <release> --scenes <frozen-fit-scenes> --output <weak-run> \
+  --defer-probabilities --generation-variants weak \
+  --samples 3 --temperature 0.7 --max-new-tokens 768 --bge-device cpu
+
+./agent_simulation/python.sh -m agent_simulation.evaluation.customer_scoring \
+  --run <strong-run> --run <weak-run> --output <scored-run> \
+  --predictor-url <fixed-service-url> --predictor-model <fixed-model> \
+  --predictor-tokenizer models/Qwen3.5-9B --concurrency 4
+~~~
+
+实际运行时分别配置对应的 --strong-url/--weak-url；只检查被选中的生成器服务。生成阶段不创建概率预测器，也不导出训练文件；保留原始监督、生成轨迹与 label-free probability_context。评分入口只加载预测器 tokenizer、连接一个预测器服务，校验上下文哈希、原始提示和候选顺序；观察标签和生成动作不进入预测器。不同分支文件须同配置、同场景且无重复任务才可合并；不完整或变更的生成结果拒绝评分。评分运行也支持 --resume，复用已完成概率，无须重跑教师。评分成功后沿用原筛选和导出规则，不表示已经训练或通过语义审查。服务权重仍须按既有流程核对；服务模型名不等于远端权重验证。
+
+复核使用 3 个真实 Train 父请求、5 个 Response 子场景和 8 条原始监督，CPU 离线回放历史输出并注入生成/评分中断，两阶段分别复用已完成的 2 条任务；16 个最终分支的原始轨迹、概率及采样结果与在线路径一致，全部父请求行为保留，历史窗口未变。此次概率使用测试分布、没有真实模型调用，不能用于判断新 CoT 质量或蒸馏效果。记录：tmp/customer-recovery-real-20261127/verification.json；驱动：tmp/verify_customer_recovery_real.py。
+
 ## 提示词与上下文审计
 
 固定模式精简提示词移除工具规划包装、重复的 EKB 决策类型说明和重复输出说明，保留作者 default_system 全文、项目事实规则、证据解释与 JSON 适配。不新增字数上限。自主模式仍保留工具规划说明。
@@ -331,7 +362,7 @@ entry point uses a simplified EKB prompt and never exports SFT/DPO data.
 
 上述数值可被显式参数覆盖；重复采样仍要求非零 temperature。轻量预设保留相同 EKB schema、事实上下文、证据检查和原始生成动作，不在失败后改写答案。Train Query 仍直接用原始监督，不调用 teacher。短解释不等于已通过语义审阅。
 
-`--scene-concurrency` 控制同时处理的场景分支数量，`--sample-concurrency` 控制每分支内样本并发。最多同时执行前者 × 后者个采样工作流；轻量默认每分支只有一个样本，因此最多 4 个。固定模式每工作流一次生成调用。调度按输入顺序落盘、保留独立样本 seed，惰性拉取有限任务，不为全量场景一次建立全部 asyncio tasks。错误会取消并回收待处理任务；已提交的 HTTP 请求不能保证服务端立即停止。新逻辑没有启动或扩容模型服务。
+`--scene-concurrency` 控制同时处理的场景分支数量，`--sample-concurrency` 控制每分支内样本并发。最多同时执行前者 × 后者个采样工作流；轻量默认每分支只有一个样本，因此最多 4 个。固定模式每工作流一次生成调用。调度按完成顺序接收结果，全部完成后按稳定身份整理最终记录；保留独立样本 seed，惰性拉取有限任务，不为全量场景一次建立全部 asyncio tasks。错误会取消并回收待处理任务；已提交的 HTTP 请求不能保证服务端立即停止。新逻辑没有启动或扩容模型服务。
 
 仅供后续明确启动时使用，本次未执行生成：
 
