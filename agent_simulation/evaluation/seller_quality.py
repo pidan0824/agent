@@ -42,8 +42,17 @@ def check_seller_evidence(trajectory):
             value = json.loads(message.get("content") or "")
         except (TypeError, ValueError):
             continue
-        if isinstance(value, dict) and value.get("evidence_id") == with_evidence_id(value)["evidence_id"]:
-            available.add(value["evidence_id"])
+        def collect(node):
+            if isinstance(node, dict):
+                if node.get("evidence_id") and node["evidence_id"] == with_evidence_id(node)["evidence_id"]:
+                    available.add(node["evidence_id"])
+                for child in node.values():
+                    if isinstance(child, (dict, list)):
+                        collect(child)
+            elif isinstance(node, list):
+                for child in node:
+                    collect(child)
+        collect(value)
     reasons = []
     rationale = trajectory.get("rationale", {})
     evidence = rationale.get("evidence", [])

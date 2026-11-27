@@ -13,7 +13,6 @@ from agent_simulation.data.common import literal, require, rows, sha256
 from agent_simulation.evaluation.customer_curation import CurationTools
 from agent_simulation.evaluation.customer_evidence import encode_context, check_evidence
 from agent_simulation.evaluation.seller_quality import check_seller_evidence, seller_action_quality
-from agent_simulation.agents.context.seller_features import seller_behavior_features, with_evidence_id
 from agent_simulation.agents.decisions import action_output
 from agent_simulation.agents.agentic import initial_agentic_request, AgenticOptions, teacher_output
 from agent_simulation.agents.schemas import strict_json, validate_arguments
@@ -101,26 +100,13 @@ def customer_case(catalog, identity, partition, stratum, dataset_identity):
 
 def seller_case(catalog, label, partition, dataset_identity):
     seller, item, cutoff = label["seller_id"], label["item_id"], label["history_cutoff_exclusive"]
-    history = rows(catalog.connection, """SELECT * FROM seller_history
-        WHERE seller_id=? AND item_id=? AND time_index<? ORDER BY time_index""", [seller,item,cutoff])
-    require(history and all(r["time_index"]<cutoff for r in history), "Missing past Seller evidence")
-    features = seller_behavior_features(history, seller_id=seller, cutoff=cutoff, item_ids=[item])
-    last = history[-1]
-    previous = features["products"][0]["last_valid_price_raw"]
+    from agent_simulation.datasets.samples.seller import seller_sample
+    from agent_simulation.evaluation.trajectories import FrozenSellerSampleTools
+    sample = seller_sample(catalog, seller, item, cutoff, history_embedder=None)
+    binding = FrozenSellerSampleTools(catalog, sample)
+    previous = next(p["last_valid_price_raw"] for p in binding.features["products"] if p["item_id"] == item)
     require(previous == label["previous_price_raw"], "Seller reference differs from frozen cohort")
-    from agent_simulation.data.catalog import DataRepository
-    from agent_simulation.agents.context.market import context_view, SELLER_MARKET_NOTE
-    repo = DataRepository(catalog.connection,catalog.config,cutoff)
-    market = context_view(repo.market_position(seller,item_id=item,before_time_index=cutoff))
-    context = with_evidence_id({
-        "profile":{"seller_id":seller}, "history_cutoff_exclusive":cutoff,
-        "requested_price_item_ids":[item],
-        "owned_products":[{k:last.get(k) for k in ("item_id","item_title","brand_name","category_level3_name")}],
-        "behavior_features":features,
-        "recent_quote_observations":[{k:r.get(k) for k in (
-            "time_index","price_raw","price_status","exposure_records","click_records","purchase_records")}
-            for r in history[-10:]],
-        "market_position":market, "market_semantics":SELLER_MARKET_NOTE})
+    context = binding.initial_context()
     return dict(case_id=label["sample_id"],role="seller",stage="seller",actor_id=seller,
         source_request_id=label["sample_id"],source_split="train",partition=partition,
         stratum=label["direction"],context=context,
@@ -155,7 +141,13 @@ def prepare(args):
         cut1,cut2=lo+int((hi-lo)*.70),lo+int((hi-lo)*.85)
         interval={"fit":(lo,cut1),"dev":(cut1+1,cut2),"audit":(cut2+1,hi)}
         protocol = {
-            "schema":"dual-agent-sft-pilot-v1","dataset_manifest_sha256":identity,
+            "schema":"dual-agent-sft-pilot-v1","context_protocol":"shared-observed-seller-v2",
+            "context_source_sha256": {name: sha256(Path(__file__).parents[1]/"agent_simulation"/name)
+                for name in ("evaluation/seller_context.py", "evaluation/trajectories.py",
+                             "agents/context/seller_features.py", "evaluation/customer_context.py",
+                             "evaluation/customer_background.py", "evaluation/customer_evidence.py",
+                             "evaluation/micro/customer_agentic.py")},
+            "dataset_manifest_sha256":identity,
             "time_intervals_inclusive":interval,"seed":args.seed,
             "fit_counts":{"customer":128,"seller":128},"dev_counts":{"customer":64,"seller":64},
             "audit_counts":{"customer":128,"seller":128},

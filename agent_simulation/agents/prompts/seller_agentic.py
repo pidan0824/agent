@@ -7,6 +7,14 @@ from agent_simulation.agents.agentic import TEACHER_OUTPUT_NOTE
 
 _ROOT = Path(__file__).with_name("skills") / "seller-pricing"
 
+_CONTEXT_NOTE = """
+When available, cite the product's own evidence_id for product-specific claims.
+Keep its 30-day business snapshot separate from retained quote-event counts;
+zero purchases in the latter do not mean the shop had no orders.
+Compare the supplied competitor titles/brands and quote times before interpreting
+the category median as a price reference. Similarity does not prove equal specifications.
+"""
+
 
 def skill_reference_names(*, theory=True):
     return ["evidence", *(["pricing-hypotheses"] if theory else [])]
@@ -26,7 +34,7 @@ def agentic_seller_instructions(*, theory=True):
             + "\n" + TEACHER_OUTPUT_NOTE
             + "\nIn each rationale.evidence entry cite at least one supplied evidence_id in square brackets, "
               "for example [S0123456789ab]. Cite only input or actual tool observations, not your own hypotheses. "
-              "A citation identifies an available source, not proof of the inference.")
+              "A citation identifies an available source, not proof of the inference." + _CONTEXT_NOTE)
 
 
 def concise_seller_instructions():
@@ -43,4 +51,4 @@ One quote cannot establish price stability over time. Keep market medians and
 percentiles tied to the same reference pool and time window; do not mix them.
 Unknown costs, margins, current competitors and future outcomes must stay unknown.
 Do not restate all input records. A source citation does not prove your inference.
-""")
+""" + _CONTEXT_NOTE)
