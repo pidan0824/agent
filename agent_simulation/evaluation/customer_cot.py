@@ -9,6 +9,7 @@ from agent_simulation.agents.agentic import teacher_output
 from agent_simulation.agents.decisions import action_output
 from agent_simulation.agents.schemas import strict_json, validate_arguments
 from agent_simulation.data.common import require, sha256
+from agent_simulation.datasets.trajectory import json_field_spans
 from agent_simulation.evaluation.customer_contract import single_item_schema, validate_request_splits
 from agent_simulation.evaluation.customer_evidence import check_evidence
 from agent_simulation.evaluation.customer_filtering import combine_observed_sft
@@ -77,6 +78,9 @@ def prepare_comparison(records, observed, reviews=None):
                           action_output("response", displayed_ids=row["candidate_item_ids"])["final_schemas"][0])
                 final = strict_json(messages[-1]["content"])
                 validate_arguments(final, teacher_output([schema], customer_ekb=True))
+                spans = json_field_spans(messages[-1]["content"])
+                if spans["rationale"][0] > spans["action"][0]:
+                    reasons.append("action_precedes_rationale")
                 require(final["action"] == t["final_action"] and final["rationale"] == t["rationale"],
                         "Original teacher output mismatch")
             except (ValueError, KeyError, TypeError, IndexError):
@@ -124,8 +128,26 @@ def prepare_comparison(records, observed, reviews=None):
         decisions.append({"trajectory_id": identity, "scene_id": t.get("scene_id"),
                           "retained": not reasons, "reasons": reasons})
     cot = [chosen.get(_key(row), deepcopy(row)) for row in direct]
+    serialization_changes = 0
+    for index, row in enumerate(direct):
+        teacher = chosen.get(_key(row))
+        if teacher is None:
+            continue
+        text = teacher["messages"][-1]["content"]
+        begin, end = json_field_spans(text)["action"]
+        action_text = text[begin:end]
+        # Match the reviewed teacher's action serialization without rewriting its
+        # transcript or review hash. Only observed target text changes formatting.
+        if row["messages"][-1]["content"] != action_text:
+            value = deepcopy(row)
+            value["source_trajectory_id"] = row["trajectory_id"]
+            value["action_serialization_source"] = teacher["trajectory_id"]
+            value["messages"][-1]["content"] = action_text
+            value["trajectory_id"] = digest([row["trajectory_id"], teacher["trajectory_id"], action_text])
+            direct[index] = value
+            serialization_changes += 1
     report = {"observed_rows": len(direct), "teacher_attempts": len(records),
-              "rationale_scenes": len(chosen),
+              "rationale_scenes": len(chosen), "action_serialization_changes": serialization_changes,
               "rationale_response_fraction": len(chosen) / max(1, sum(r["stage"] == "response" for r in direct)),
               "exclusion_reasons": dict(Counter(reason for d in decisions for reason in d["reasons"])),
               "strata": {key: dict(value) for key, value in sorted(strata.items())}}
@@ -156,25 +178,81 @@ def export_comparison(records, observed, reviews, output, *, min_rationale_scene
     _write(output / "review-candidates.jsonl", queue)
     (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     require(report["status"] == "ready", "Insufficient reviewed rationale scenes; no training files exported")
-    pair_id = digest([[_key(r), r["messages"], r["target"]] for r in cot])
+    pair_id = digest({name: [[_key(r), r["messages"], r["target"]] for r in rows]
+                      for name, rows in (("action_only", direct), ("cot", cot))})
     for objective, rows in (("action_only", direct), ("cot", cot)):
         for row in rows:
             row.update(sft_objective=objective, comparison_id=pair_id,
                        min_rationale_scenes=min_rationale_scenes if objective == "cot" else 0)
         _write(output / (objective + ".jsonl"), rows)
-    manifest = {**report, "schema": "customer-cot-comparison-v1", "comparison_id": pair_id,
+    manifest = {**report, "schema": "customer-cot-comparison-v2", "comparison_id": pair_id,
                 "sources": sources or {},
                 "files": {name: sha256(output / (name + ".jsonl")) for name in ("action_only", "cot")},
                 "protocol": "Same ordered scenes, frozen user inputs, targets and parent weights; one row per scene. "
+                            "Reviewed CoT transcripts remain original; action-only target serialization matches their action span. "
                             "Only reviewed Response rows change system output instructions and assistant output. "
                             "Query and unselected Response rows remain identical.",
-                "evaluation": "Same frozen dev/audit cases and direct-action prompts for both adapters. "
+                "evaluation": "Two explicit protocols: direct prompts for both adapters isolate training supervision; "
+                              "generated_cot compares direct baseline with a student-generated short rationale and action. "
+                              "Both use the same frozen dev/audit user context, never gold input rationales. "
                               "Same base, initialization, seed, epochs, batch/accumulation and action weights. "
                               "Ensure both arms fit max_length; do not independently filter/truncate. "
                               "Report rationale coverage and extra tokens/time; token budgets are not equalized."}
     (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     return manifest
 
+
+
+def validate_training_pair(release, action_only_run, cot_run, *, evaluation_cases=()):
+    """Verify completed matched SFT runs against the exact exported pair."""
+    release = Path(release)
+    manifest = json.loads((release / "manifest.json").read_text())
+    require(manifest.get("schema") == "customer-cot-comparison-v2" and manifest["status"] == "ready",
+            "Use a ready v2 CoT comparison release")
+    def parent(row):
+        return tuple(str(row.get(k)) for k in ("dataset_manifest_sha256", "actor_id", "source_request_id"))
+    with (release / "action_only.jsonl").open() as stream:
+        train_parents = {parent(json.loads(line)) for line in stream if line.strip()}
+    require(all(parent(case) not in train_parents for case in evaluation_cases),
+            "Evaluation parent appeared in paired training data")
+    configs, results, fingerprints = {}, {}, {}
+    for objective, directory in (("action_only", action_only_run), ("cot", cot_run)):
+        directory = Path(directory)
+        data_hash = sha256(release / (objective + ".jsonl"))
+        require(data_hash == manifest["files"][objective], "Comparison release changed")
+        config = json.loads((directory / "config.json").read_text())
+        result = json.loads((directory / "result.json").read_text())
+        identity, options = config["identity"], config["options"]
+        require(identity["mode"] == "sft" and identity["role"] == "customer"
+                and identity["input_sha256"] == data_hash
+                and identity["records"] == manifest["observed_rows"] and options["limit"] == 0,
+                "Training run does not use the complete paired arm")
+        require(result["status"] == "completed" and result["mode"] == "sft" and result["steps"] > 0,
+                "Both paired SFT runs must have completed")
+        supervision = identity["supervision"]
+        require(supervision["objective"] == objective, "Training objective differs from paired arm")
+        if objective == "cot":
+            require(supervision["rationale_scenes"] >= manifest["min_rationale_scenes"]
+                    and supervision["rationale_tokens"] > 0 and options["rationale_weight"] > 0,
+                    "CoT run lacks actual rationale supervision")
+        else:
+            require(supervision["rationale_tokens"] == 0, "Action-only run contains rationales")
+        configs[objective], results[objective] = config, result
+        fingerprints[objective] = {"config_sha256": sha256(directory / "config.json"),
+                                   "result_sha256": sha256(directory / "result.json"), "input_sha256": data_hash}
+    left, right = configs["action_only"], configs["cot"]
+    for key in ("base_config_sha256", "base_weight_sha256", "tokenizer_sha256",
+                "initial_adapter_sha256", "records"):
+        require(left["identity"][key] == right["identity"][key], "Paired training initialization differs: " + key)
+    for key in ("epochs", "max_steps", "batch_size", "accumulation", "learning_rate", "dtype",
+                "rank", "seed", "max_length", "gradient_checkpointing", "click_weight", "purchase_weight",
+                "rationale_weight", "tool_weight", "format_weight", "response_decision_weight"):
+        require(left["options"][key] == right["options"][key], "Paired training options differ: " + key)
+    require(results["action_only"]["steps"] == results["cot"]["steps"], "Paired training steps differ")
+    return {"comparison_id": manifest["comparison_id"], "release_manifest_sha256": sha256(release / "manifest.json"),
+            "runs": fingerprints, "steps_per_arm": results["cot"]["steps"],
+            "base_config_sha256": right["identity"]["base_config_sha256"],
+            "scope": "Local training artifacts verified; serving adapter identity must also be verified at launch"}
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)

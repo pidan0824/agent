@@ -296,7 +296,8 @@ def generate(args):
               "base_config_sha256":sha256(args.tokenizer/"config.json"),
               "model":args.model,"tokenizer":str(args.tokenizer.resolve()),"style":args.style,
               "partition":args.partition,"max_new_tokens":args.max_new_tokens,"temperature":args.temperature,
-              "seed":args.seed,"concurrency":args.concurrency}
+              "seed":args.seed,"concurrency":args.concurrency,
+              "decoder_schema_sha256":sha256(Path(__file__).resolve().parents[1] / "agent_simulation/inference/vllm.py")}
     if args.output.exists():
         require(json.loads((args.output/"manifest.json").read_text())==identity,"Resume identity mismatch")
     else:
@@ -408,11 +409,14 @@ def comparison(args):
     import numpy as np
     from sklearn.metrics import f1_score
     cases={r["case_id"]:r for r in load_cases(args.cohorts)}
+    protocol = getattr(args, "response_protocol", "direct")
+    require(protocol in ("direct", "generated_cot"), "Unknown Response comparison protocol")
+    expected_styles = {"zero_shot": "direct", "sft": "concise" if protocol == "generated_cot" else "direct"}
     predictions={}
     manifests={}
     for name,path in (("zero_shot",args.baseline),("sft",args.sft)):
         manifests[name]=json.loads((path/"manifest.json").read_text())
-        require(manifests[name]["style"]=="direct","Compare the same direct decision protocol")
+        require(manifests[name]["style"]==expected_styles[name],"Output style differs from comparison protocol")
         require(manifests[name]["cases_sha256"]==sha256(args.cohorts/"cases.jsonl"),"Prediction cohort differs")
         records=[json.loads(line) for line in (path/"predictions.jsonl").read_text().splitlines()]
         predictions[name]={r["case_id"]:r for r in records}
@@ -422,12 +426,46 @@ def comparison(args):
     require(manifests["zero_shot"]["base_config_sha256"]==manifests["sft"]["base_config_sha256"],
             "Baseline and SFT base architectures differ")
     require(all(manifests["zero_shot"][key]==manifests["sft"][key]
-                for key in ("max_new_tokens","temperature","seed","partition")),
+                for key in (("temperature","seed","partition") if protocol == "generated_cot"
+                            else ("max_new_tokens","temperature","seed","partition"))),
             "Evaluation decoding or partition differs")
+    decoders = [m.get("decoder_schema_sha256") for m in manifests.values()]
+    require(decoders[0] == decoders[1], "Evaluation decoder versions differ")
+    if protocol == "generated_cot":
+        require(all(decoders), "Generated-CoT comparisons require recorded decoder versions")
     for key in predictions["zero_shot"]:
-        require(predictions["zero_shot"][key]["request_sha256"]==predictions["sft"][key]["request_sha256"],
-                "Evaluation input or schema changed")
+        if protocol == "direct":
+            require(predictions["zero_shot"][key]["request_sha256"]==predictions["sft"][key]["request_sha256"],
+                    "Evaluation input or schema changed")
+        else:
+            require(cases[key]["role"] == "customer" and cases[key]["stage"] == "response",
+                    "Generated-CoT comparison is Response-only")
+            requests = {name: decision_request(cases[key], style) for name, style in expected_styles.items()}
+            require(requests["zero_shot"]["messages"][1:] == requests["sft"]["messages"][1:]
+                    and requests["zero_shot"]["tools"] == requests["sft"]["tools"] == [],
+                    "Generated-CoT arms must share frozen user context")
+            for name, request in requests.items():
+                row = predictions[name][key]
+                require(row["request_sha256"] == digest(request), "Unexpected CoT comparison prompt")
+                if row["status"] == "ok":
+                    require(row["messages"][:-1] == request["messages"], "Stored prediction input differs")
+                    final = strict_json(row["messages"][-1]["content"])
+                    validate_arguments(final, request["final_schema"])
+                    action = final if name == "zero_shot" else final["action"]
+                    require(action == row["prediction"], "Stored prediction action differs")
+                    if name == "sft":
+                        require(final["rationale"] == row["rationale"], "Stored prediction rationale differs")
         require(cases[key]["partition"] in ("dev","audit"),"No training-set success claims")
+    paired_paths = [getattr(args, k, None) for k in ("comparison_release", "action_only_training", "cot_training")]
+    training_control = None
+    if any(paired_paths):
+        require(all(paired_paths), "Supply comparison release and both training runs together")
+        require(all(decoders), "Paired SFT evaluation requires recorded decoder versions")
+        from agent_simulation.evaluation.customer_cot import validate_training_pair
+        training_control = validate_training_pair(*paired_paths,
+            evaluation_cases=[cases[key] for key in predictions["sft"]])
+        require(training_control["base_config_sha256"] == manifests["sft"]["base_config_sha256"],
+                "Evaluation base differs from paired training")
     rng=np.random.default_rng(20261126)
     def paired(left,right,larger=True,groups=None,bootstrap_rng=None):
         detail = {}
@@ -446,9 +484,35 @@ def comparison(args):
         samples=[float(delta[sample_rng.integers(0,len(delta),len(delta))].mean()) for _ in range(2000)]
         return {**detail,"n":len(delta),"baseline_mean":float(a.mean()),"sft_mean":float(b.mean()),
                 "improvement":float(delta.mean()),"paired_bootstrap_95pct":np.quantile(samples,[.025,.975]).tolist()}
-    report={"protocol":"paired fixed inputs, same base family, same output budget; conditional behavior pilot",
+    report={"protocol": ("paired fixed inputs, same base family, same output budget; conditional behavior pilot"
+                         if protocol == "direct" else
+                         "same frozen Response context; direct baseline versus student-generated short CoT and action"),
+            "response_protocol": protocol, "decoder_schema_sha256": decoders[0],
+            "training_control": training_control or {"status": "not_verified", "scope": "No controlled CoT-SFT claim"},
+            "arm_labels": {"zero_shot": "action_only" if training_control else "baseline",
+                           "sft": "cot" if training_control else "comparison"},
+            "output_budgets": {n: m["max_new_tokens"] for n, m in manifests.items()},
             "partition":manifests["sft"]["partition"],"models":{n:m["model"] for n,m in manifests.items()},
             "invalid":{n:sum(r["status"]!="ok" for r in rs.values()) for n,rs in predictions.items()}}
+    report["generation_cost"] = {}
+    for name, rows in predictions.items():
+        seconds = [r["seconds"] for r in rows.values() if isinstance(r.get("seconds"), (int, float))
+                   and np.isfinite(r["seconds"]) and r["seconds"] >= 0]
+        report["generation_cost"][name] = {
+            "attempts": len(rows), "timed_attempts": len(seconds),
+            "sum_request_seconds": float(sum(seconds)) if seconds else None,
+            "mean_request_seconds": float(np.mean(seconds)) if seconds else None,
+            "scope": "Includes timed invalid attempts; request-time sum is not concurrent wall time"}
+    if protocol == "generated_cot":
+        eligible = [r for r in predictions["sft"].values() if r["status"] == "ok"]
+        checked = [quality(cases[r["case_id"]], r["prediction"], r["rationale"], r["messages"], "concise")
+                   for r in eligible]
+        report["rationale_quality"] = {
+            "attempts": len(predictions["sft"]), "valid": len(eligible),
+            "with_cited_evidence": sum(q["has_cited_evidence"] for q in checked),
+            "mechanical_evidence_passed": sum(q["evidence"]["accepted"] for q in checked),
+            "exact_action_and_mechanical_passed": sum(q["accepted"] for q in checked),
+            "scope": "Mechanical checks on all valid attempts, not semantic entailment or observed private reasoning"}
     response=[k for k in predictions["sft"] if cases[k]["stage"]=="response"]
     def response_groups(keys):
         return ([cases[k]["source_request_id"] for k in keys]
@@ -619,6 +683,11 @@ def main():
     score.add_argument("--baseline",type=Path,required=True)
     score.add_argument("--sft",type=Path,required=True)
     score.add_argument("--output",type=Path,required=True)
+    score.add_argument("--response-protocol", choices=("direct", "generated_cot"), default="direct",
+                       help="Direct/direct isolates training supervision; generated_cot additionally changes inference output")
+    score.add_argument("--comparison-release", type=Path, help="Paired v2 training-data export")
+    score.add_argument("--action-only-training", type=Path, help="Completed action-only SFT run")
+    score.add_argument("--cot-training", type=Path, help="Completed CoT SFT run")
     args=p.parse_args()
     {"prepare":prepare,"generate":generate,"export":export,"compare":comparison}[args.command](args)
 

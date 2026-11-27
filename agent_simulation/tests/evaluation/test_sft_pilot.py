@@ -249,7 +249,8 @@ class PilotTests(unittest.TestCase):
             identity=dict(requests_sha256=digest({c["case_id"]:decision_request(c,"concise")}),
                 cases_sha256=checksum,ids=[c["case_id"]],base_config_sha256=sha256(tok/"config.json"),
                 model="fixture",tokenizer=str(tok.resolve()),style="concise",partition="fit",
-                max_new_tokens=768,temperature=0,seed=42,concurrency=1)
+                max_new_tokens=768,temperature=0,seed=42,concurrency=1,
+                decoder_schema_sha256=sha256(Path(__file__).resolve().parents[2] / "inference/vllm.py"))
             write_json(out/"manifest.json",identity)
             (out/"predictions.jsonl").write_text(dump(dict(case_id=c["case_id"],status="invalid"))+"\n")
             with patch("experiments.cot_sft_pilot.AgenticClient",side_effect=AssertionError("No service needed")),redirect_stdout(io.StringIO()):

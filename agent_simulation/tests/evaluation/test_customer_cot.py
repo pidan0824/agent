@@ -63,6 +63,34 @@ class CotComparisonTests(unittest.TestCase):
                 read_training_records(out / "action_only.jsonl", "sft", OffsetTokenizer(), require_rationales=True)
         self.assertEqual((records, observed, reviews), before)
 
+
+    def test_pair_matches_action_serialization_and_preserves_reviewed_teacher(self):
+        from agent_simulation.datasets.trajectory import json_field_spans
+        records, observed, reviews = fixture()
+        t = records[0]["trajectory"]
+        t["messages"][-1]["content"] = json.dumps(
+            {"rationale": t["rationale"], "action": t["final_action"]}, separators=(",", ":"))
+        reviews["teacher-1"]["messages_sha256"] = digest(t["messages"])
+        before = deepcopy((records, observed, reviews))
+        direct, cot, report, _, _ = prepare_comparison(records, observed, reviews)
+        begin, end = json_field_spans(t["messages"][-1]["content"])["action"]
+        self.assertEqual(direct[1]["messages"][-1]["content"], t["messages"][-1]["content"][begin:end])
+        self.assertEqual(cot[1]["messages"], t["messages"])
+        self.assertEqual(cot[1]["semantic_review"]["messages_sha256"], digest(t["messages"]))
+        self.assertNotEqual(direct[1]["trajectory_id"], observed[1]["trajectory_id"])
+        self.assertEqual(direct[1]["source_trajectory_id"], observed[1]["trajectory_id"])
+        self.assertEqual(report["action_serialization_changes"], 1)
+        self.assertEqual((records, observed, reviews), before)
+
+    def test_action_first_teacher_is_not_reasoning_before_action_supervision(self):
+        records, observed, reviews = fixture()
+        t = records[0]["trajectory"]
+        t["messages"][-1]["content"] = json.dumps({"action": t["final_action"], "rationale": t["rationale"]})
+        reviews["teacher-1"]["messages_sha256"] = digest(t["messages"])
+        _, _, report, decisions, _ = prepare_comparison(records, observed, reviews)
+        self.assertEqual(report["rationale_scenes"], 0)
+        self.assertIn("action_precedes_rationale", decisions[0]["reasons"])
+
     def test_minimum_counts_scenes_not_multiple_versions_of_one_scene(self):
         records, observed, reviews = fixture()
         with TemporaryDirectory() as d:
@@ -110,7 +138,7 @@ class CotComparisonTests(unittest.TestCase):
                 t["rationale"]["evidence_refs"] = {k: [] for k in t["rationale"]["evidence_refs"]}
             else:
                 t["final_action"] = {"clicked_item_ids": [], "purchased_item_ids": []}
-            t["messages"][-1]["content"] = json.dumps({"action": t["final_action"], "rationale": t["rationale"]})
+            t["messages"][-1]["content"] = json.dumps({"rationale": t["rationale"], "action": t["final_action"]})
             t["evidence_quality"] = {"accepted": True}
             reviews["teacher-1"]["messages_sha256"] = digest(t["messages"])
             _, _, report, decisions, _ = prepare_comparison(records, observed, reviews)

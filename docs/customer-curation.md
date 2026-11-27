@@ -546,9 +546,9 @@ Seller 的共享行为特征补充最近有效报价的时间点和最近两次�
 
 --min-rationale-scenes 必须显式指定正整数；32 只是示例数量门槛，并非统计充分性保证。还需根据 report.json 的行为分层、解释覆盖率决定是否扩量，不能用全部无动作解释代表正例。数量不足时保存失败报告，不产生任何训练 JSONL。成功后得到：
 
-- action_only.jsonl：全部原始动作，每个场景一条。
+- action_only.jsonl：全部原始动作，每个场景一条。已选教师样本的动作 JSON 写法与教师原文中的 action 子串一致，避免空格、键顺序等序列化差异混入对照；标签不变，保留来源 ID。
 - cot.jsonl：完全相同的场景顺序、候选、输入信息和标签；每个通过审查的 Response 最多用一条原始教师解释/动作替换对应行，Query 与未选 Response 保持原样，不叠加额外样本。
-- manifest.json：两臂文件哈希、源 records/observed/reviews/生成 manifest 哈希、comparison_id、解释门槛、行为分层和对照协议。
+- manifest.json：v2 协议，两臂文件哈希、源 records/observed/reviews/生成 manifest 哈希、comparison_id、解释门槛、行为分层和对照协议。教师原文及审查哈希保持不变；action 在 rationale 之前的输出按 action_precedes_rationale 排除，不计作先推理后决策监督。
 
 每条训练记录携带 sft_objective、comparison_id 和解释门槛。加载训练数据会按实际编码后的 rationale loss mask 检查非零解释及不同场景数，--limit 截掉解释也会失败；混合两臂、混合对照身份、无 CoT 对照中混入解释均被拒绝。CoT 训练同时拒绝 rationale_weight=0。旧的无标记文件可显式使用训练或编码入口的 --require-rationales。训练配置记录实际 rationale_scenes/rationale_tokens，而非只记录声明的权重。
 
@@ -560,10 +560,29 @@ Seller 的共享行为特征补充最近有效报价的时间点和最近两次�
   --tokenizer models/Qwen3.5-9B --max-length 8192 --require-rationales
 ~~~
 
-action_only.jsonl 使用同一编码入口、同一长度阈值，去掉 --require-rationales。若一臂超长，应回到同一场景集合共同处理，不能分别删样本或截断。后续训练固定相同底座/初始化、种子、epoch、batch、梯度累积、学习率、动作及父请求权重；只改变解释监督与相应输出指令。两臂样本数和优化步数匹配，CoT 的 token/耗时会更多，需单独报告。用完全相同且未参与筛选的 dev/audit 场景和 direct-action 提示比较两模型的 Query、点击、购买、无动作、正例及父请求等权指标；额外 CoT 解码评估另列，不能与 direct 指标混算。
+action_only.jsonl 使用同一编码入口、同一长度阈值，去掉 --require-rationales。若一臂超长，应回到同一场景集合共同处理，不能分别删样本或截断。后续训练固定相同底座/初始化、种子、epoch、batch、梯度累积、学习率、动作及父请求权重；只改变解释监督与相应输出指令。两臂样本数和优化步数匹配，CoT 的 token/耗时会更多，需单独报告。评估使用相同且未参与训练或筛选的 dev/audit 场景，分开两种口径：
+
+- direct（默认）：两组都直接输出动作，用于隔离训练监督的影响；保留 Query 与 Response 的既有指标。
+- generated_cot：仅比较 Response，action-only 模型直接输出动作，CoT 模型自行生成短解释后输出动作。两组共享用户上下文，解释不是输入中的标准答案；该口径同时改变推理时输出协议，不能将收益全部归因于训练。
+
+~~~bash
+./agent_simulation/python.sh experiments/cot_sft_pilot.py compare \
+  --cohorts <frozen-evaluation-cohorts> \
+  --baseline <action-only-predictions> --sft <cot-predictions> \
+  --response-protocol generated_cot \
+  --comparison-release <v2-comparison-release> \
+  --action-only-training <completed-action-only-run> \
+  --cot-training <completed-cot-run> --output <comparison-report.json>
+~~~
+
+生成预测时分别使用 style=direct 与 style=concise；direct 对照则两组都使用 direct。新生成记录保存解码实现哈希，防止混用修复前后的 JSON 约束。generated_cot 允许不同输出上限并明确报告；报告包括所有尝试的有效性与请求耗时，含有耗时记录的失败请求。请求耗时之和不是并发任务的墙钟耗时。解释质量统计是机械证据检查，不能代替语义审查。
+
+声明为配对 CoT-SFT 实验时，上述三个数据/训练路径须一起提供。评估核对实际训练输入、完整样本数、已完成状态、相同初始化/训练选项/步数、非零解释 token，并拒绝训练父请求出现在评估中。不提供这些路径时标记 training_control=not_verified。此检查验证本地训练产物，服务启动时仍须核对实际加载的 adapter 身份，不能仅凭服务模型名证明已加载对应权重。
 
 本轮离线检查使用已有 32 条真实教师输出及对应 63 条原始监督，保留历史审查通过的 2 条，两臂均为 63 条、输入/标签/顺序/父请求权重一致。实际 Qwen3.5-9B tokenizer 编码得到 action_only 为 0、cot 为 732 个 rationale token；最低数量设为 3 时导出停止。这里 2 条仅用于验证链路，不作为正式 CoT 实验的充分数据。审计保存在 tmp/cot-chain-real-audit-20261127/，原始输入未修改。本次 174 项相关测试通过（含离线 mock、编码和 CPU 微型夹具）；没有启动服务器上的真实教师服务、生成或训练任务。
 
+
+v2 接入复核：真实历史数据导出后仍为每臂 63 条、2 条已审查解释，实际解释 token 为 0 对 732；输入、标签、权重和教师原文一致。历史 Response/Query 报告完整重算一致。新增协议及相关回归共 55 项测试通过；本轮只做离线复核，没有启动模型生成或训练。产物：tmp/cot-chain-real-audit-20261127/v2-paired/ 和 tmp/response-metrics-protocol-replay-20261127.json。
 
 ### Response diagnosis and low-cost CoT follow-up (2026-11-27)
 
