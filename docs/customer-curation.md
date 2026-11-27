@@ -634,7 +634,7 @@ overgeneralizing candidate relevance, and an unsupported Habitual style.
 The short prompt now also explicitly limits price provenance and absence claims.
 Fact-reference existence remains weaker than semantic entailment.
 
-Next bounded diagnostic, once compute is available:
+Follow-up protocol (initial offline plan; executed probes are reported below):
 
 1. Freeze a small stratified **dev** subset before viewing new outputs. Compare
    the saved base and SFT on identical original prompts and original action schema;
@@ -663,8 +663,8 @@ Next bounded diagnostic, once compute is available:
 
 Local replay artifacts: `tmp/response-metrics-replay-20261127.json` and
 `tmp/response-diagnosis-20261127/{training-supervision,training-decision-masks,cot-audit}.json`.
-No new Customer model inference, CoT generation or training was run for this
-diagnosis; the available GPUs were occupied by other work.
+The offline replay above made no Customer model calls. Later GPU headroom became
+available, allowing the bounded inference probes below. No training was started.
 
 
 ### Frozen native-probability probe
@@ -714,12 +714,88 @@ baselines, and gold action NLL/first-token log probabilities by behavior class.
 Base weights are checked against the SFT config; frozen request/plan hashes and
 adapter hashes are recorded. Partial files remain marked running until all
 conditions finish. There is no optimizer, backward pass, or parameter update.
-Gradient magnitude and alternative free-decoding settings remain separate,
-uncompleted diagnostics.
+Real parameter-gradient magnitudes remain unmeasured. Decoding variants are
+reported below; they must not be conflated with full-sequence menu ranking.
 
 The prepared real plan at `tmp/response-diagnosis-20261127/dev-probe-plan.json`
 contains 8 parents: 3 no-action, 1 purchase-only, 2 click-only, 2 click+purchase.
 Official-tokenizer verification covers 190 continuations per model (both context
 conditions), with a maximum of 4,428 tokens. All decision masks and ablations
-passed. This preparation and tiny fixture inference do not constitute results
-from the real 9B model; real scoring still requires available compute.
+passed. The subsequent real 9B runs used this same frozen plan; results follow.
+
+
+### Real decoder and history probes (2026-11-27)
+
+The frozen 8-case dev plan was executed with the existing 9B base and unchanged
+Customer SFT adapter. Native menu scoring completed 380 continuations across
+the two models in about 112 seconds of model scoring. Separate short-generation
+runs checked HF greedy, vLLM greedy without a response-format constraint, and
+the original vLLM JSON-schema constraint. No parameters were updated.
+
+A concrete decoder artifact was found. The single-item contract is an
+`anyOf` of whole-object `const` actions. In the installed xgrammar version,
+these compile to literal compact JSON strings even with `any_whitespace=True`.
+For example, the compact form below was accepted while the spaced form was
+rejected, despite identical parsed objects:
+
+```json
+{"clicked_item_ids":[2453715],"purchased_item_ids":[]}
+{"clicked_item_ids": [2453715], "purchased_item_ids": []}
+```
+
+On these inputs the base model naturally emitted the spaced style, whereas the
+SFT adapter emitted compact JSON. Within the same vLLM backend and identical
+messages, removing only the response-format constraint changed 4/8 base actions
+and 0/8 SFT actions. The unconstrained full-context outputs matched HF greedy
+for all 16 model/case pairs. This isolates a format-enforcement effect for this
+probe; it is not evidence that every omitted action has this cause.
+
+The minimal correction is in `inference.vllm._generation_schema`: only
+single-item Response object constants are expanded into equivalent typed object
+and array schemas. Prompt text, original validation schema, candidates, allowed
+actions and model weights stay unchanged. Other constants remain untouched.
+This preserves empty actions, purchase without click, and the single-ID
+constraint without requiring compact serialization. It adds no model calls or
+extra review stage.
+
+Verification included semantic action-set equivalence, plus the actual vLLM
+environment accepting 285 valid compact/spaced/indented strings and rejecting
+24 invalid/out-of-scope/multi-ID actions. The old grammar rejected all 95 spaced
+legal actions. In 16 real full-context replays, the corrected strict decoder
+matched unconstrained outputs exactly while keeping action validation.
+
+Both history conditions were then evaluated under the corrected strict decoder:
+
+| Model / context | Scenes predicting an action | Click TP / FP | Purchase TP / FP |
+| --- | ---: | ---: | ---: |
+| Base / full | 4/8 | 2 / 2 | 0 / 0 |
+| Base / history withheld | 7/8 | 1 / 6 | 0 / 0 |
+| SFT / full | 2/8 | 2 / 0 | 1 / 0 |
+| SFT / history withheld | 6/8 | 1 / 5 | 0 / 2 |
+
+The cohort contains four true click items and three true purchase items.
+Removing historical events **and** derived behavioral statistics increased
+actions but worsened item selection in this probe. Retain relevant history;
+these results do not identify whether individual events or aggregate features
+drive the effect, and do not establish population-level improvement.
+
+Gold action-token NLL fell after SFT for all eight full-context cases, yet that
+did not imply that the true action became the preferred output. The normalized
+canonical-string menu and greedy decoding sometimes rank actions differently.
+Do not interpret the menu's all-empty SFT argmax as the deployed decoder's
+behavior. Per-class losses are available in `native-probe/report.json`;
+actual parameter-gradient diagnostics remain outstanding.
+
+All results above concern existing action-only SFT, not CoT-SFT. The frozen audit
+was not rerun or used for model/threshold selection. Its old numbers remain
+historical results under the old decoder and cannot establish reliable CoT
+benefits. Future controlled CoT evaluation must freeze the corrected decoder
+and account for output serialization/instructions as well as shared user context.
+
+Artifacts under `tmp/response-diagnosis-20261127/`: `native-probe/`,
+`native-greedy/`, `constrained-probe/`, `unconstrained-probe/`,
+`decoder-grammar-check.json`, `repaired-decoder-probe/`,
+`repaired-history-probe/`, and the final `repaired-comparison.json`.
+All newly started model processes/services were allowed to finish and only our
+own services were stopped. New 32B teacher CoT generation remains pending
+sufficient GPU headroom; it was not replaced with a different teacher.

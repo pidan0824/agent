@@ -59,6 +59,45 @@ class VLLMTests(unittest.TestCase):
         self.assertEqual((prices['minItems'],prices['maxItems']), (1,1))
         self.assertEqual(prices['items']['properties']['item_id']['enum'],[1])
 
+    def test_single_item_decoder_schema_preserves_exact_action_set(self):
+        from copy import deepcopy
+        from itertools import product
+        from jsonschema import Draft202012Validator
+        from agent_simulation.evaluation.customer_contract import single_item_schema
+        from agent_simulation.inference.vllm import _generation_schema
+        original = single_item_schema([1, 2])
+        before = deepcopy(original)
+        converted = _generation_schema(original)
+        left, right = map(Draft202012Validator, (original, converted))
+        arrays = [[], [1], [2], [99], [1, 2], [1, 1]]
+        for click, purchase in product(arrays, repeat=2):
+            action = {"clicked_item_ids": click, "purchased_item_ids": purchase}
+            self.assertEqual(left.is_valid(action), right.is_valid(action), action)
+            self.assertFalse(right.is_valid({**action, "extra": 1}))
+        self.assertEqual(original, before)
+        self.assertEqual(_generation_schema({"const": {"unrelated": "value"}}),
+                         {"const": {"unrelated": "value"}})
+        self.assertEqual(_generation_schema({"properties": {"action": original}})["properties"]["action"],
+                         converted)
+
+    def test_single_item_xgrammar_accepts_spacing_without_relaxing_ids(self):
+        try:
+            import xgrammar as xgr
+        except ImportError:
+            self.skipTest("Run this interoperability check in the existing vLLM environment")
+        from agent_simulation.evaluation.customer_contract import single_item_schema, single_item_actions
+        from agent_simulation.inference.vllm import _generation_schema
+        compiler = xgr.GrammarCompiler(xgr.TokenizerInfo.from_huggingface(self.tokenizer), max_threads=2)
+        original = single_item_schema([1, 2])
+        converted = compiler.compile_json_schema(_generation_schema(original), any_whitespace=True)
+        for action in single_item_actions([1, 2]):
+            for text in (json.dumps(action), json.dumps(action, separators=(",", ":")), json.dumps(action, indent=2)):
+                self.assertTrue(xgr.GrammarMatcher(converted).accept_string(text), text)
+        for action in ({"clicked_item_ids": [99], "purchased_item_ids": []},
+                       {"clicked_item_ids": [1, 2], "purchased_item_ids": []},
+                       {"clicked_item_ids": [1], "purchased_item_ids": [2]}):
+            self.assertFalse(xgr.GrammarMatcher(converted).accept_string(json.dumps(action)))
+
     def test_customer_json_and_reflection_use_distinct_contracts(self):
         request=self.request('query')
         self.assertEqual(len(structured_output(request)['json']['anyOf']),2)
@@ -77,7 +116,10 @@ class VLLMTests(unittest.TestCase):
                     self.assertEqual(field['items']['enum'], ids)
                     self.assertNotIn("uniqueItems", field)
             else:
-                self.assertEqual(schema, {'const': {'clicked_item_ids': [], 'purchased_item_ids': []}})
+                from jsonschema import Draft202012Validator
+                validator = Draft202012Validator(schema)
+                self.assertTrue(validator.is_valid({"clicked_item_ids": [], "purchased_item_ids": []}))
+                self.assertFalse(validator.is_valid({"clicked_item_ids": [1], "purchased_item_ids": []}))
 
     def test_duplicate_customer_items_are_rejected_after_generation(self):
         backend = self.client(lambda _: httpx.Response(200, json={

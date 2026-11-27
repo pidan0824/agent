@@ -47,6 +47,19 @@ def export_lora(source, output, *, model):
 def _generation_schema(value):
     # The vLLM grammar cannot express uniqueness. finish_reply checks the original schema.
     if isinstance(value, dict):
+        action = value.get("const")
+        # xgrammar emits whole-object consts as compact string literals, even with
+        # any_whitespace=True. Expand only the single-item Response contract so
+        # valid spacing cannot change which action prefixes the decoder permits.
+        if (set(value) == {"const"} and isinstance(action, dict)
+                and set(action) == {"clicked_item_ids", "purchased_item_ids"}
+                and all(isinstance(ids, list) and len(ids) <= 1
+                        and all(type(item) is int for item in ids) for ids in action.values())):
+            return {"type": "object", "properties": {
+                field: {"type": "array", "minItems": len(ids), "maxItems": len(ids),
+                        **({"items": {"const": ids[0]}} if ids else {})}
+                for field, ids in action.items()},
+                "required": list(action), "additionalProperties": False}
         return {key: _generation_schema(child) for key, child in value.items()
                 if key != "uniqueItems" or not isinstance(child, bool)}
     if isinstance(value, list):
