@@ -665,3 +665,61 @@ Local replay artifacts: `tmp/response-metrics-replay-20261127.json` and
 `tmp/response-diagnosis-20261127/{training-supervision,training-decision-masks,cot-audit}.json`.
 No new Customer model inference, CoT generation or training was run for this
 diagnosis; the available GPUs were occupied by other work.
+
+
+### Frozen native-probability probe
+
+`experiments.customer_response_probe` prepares a small diagnostic without model
+calls. It selects dev Response scenes with distinct parents, stratified by the
+projected click/purchase labels, before any new predictions. The default cap of
+five candidates limits the cost of scoring every valid single-item action.
+This selected subset is not a representative accuracy estimate.
+
+```bash
+./agent_simulation/python.sh -m experiments.customer_response_probe prepare \
+  --cohorts result/cot-sft-pilot-20261126/customer-context-cohorts \
+  --output tmp/response-probe-plan.json --count 8 --max-candidates 5
+```
+
+The paired conditions preserve the original system, runtime instructions,
+current query, candidate order, candidate product facts and static profile.
+The history ablation removes historical event facts, history lists, available
+history counts and the complete behavior-features block (including the
+background activity snapshot). It states that history is unavailable, rather
+than claiming the user has no history. Unknown context/profile fields require
+review before ablation so new derived memories cannot silently leak.
+
+Once a GPU can hold the existing model, this separate command performs inference
+only, sequentially scoring Base and the saved SFT adapter on the exact same plan:
+
+```bash
+./agent_simulation/python.sh -m experiments.customer_response_probe score \
+  --plan tmp/response-probe-plan.json --model models/Qwen3.5-9B \
+  --sft-run result/cot-sft-pilot-20261126/customer-context-sft-v1 \
+  --output tmp/response-probe-scores --device cuda:0
+```
+
+Scoring reuses the actual assistant token masks and model loader. It compares
+native complete JSON continuation likelihoods, including end tokens, without
+changing the task into option-label prediction. One canonical JSON serialization
+is used per action. Normalization is only across those exact strings: it is not
+the probability of every possible serialization of an action, not calibrated
+click/purchase probability, and not free generation. Mean token log probability
+is saved descriptively; it does not replace the native summed likelihood for
+ranking. Purchase first-token scores condition on that option's preceding click
+choice, and an ID's first token does not encode its entire selection probability.
+
+Outputs include all option scores, matched action metrics with no-action
+baselines, and gold action NLL/first-token log probabilities by behavior class.
+Base weights are checked against the SFT config; frozen request/plan hashes and
+adapter hashes are recorded. Partial files remain marked running until all
+conditions finish. There is no optimizer, backward pass, or parameter update.
+Gradient magnitude and alternative free-decoding settings remain separate,
+uncompleted diagnostics.
+
+The prepared real plan at `tmp/response-diagnosis-20261127/dev-probe-plan.json`
+contains 8 parents: 3 no-action, 1 purchase-only, 2 click-only, 2 click+purchase.
+Official-tokenizer verification covers 190 continuations per model (both context
+conditions), with a maximum of 4,428 tokens. All decision masks and ablations
+passed. This preparation and tiny fixture inference do not constitute results
+from the real 9B model; real scoring still requires available compute.
