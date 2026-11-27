@@ -36,6 +36,25 @@ class FilteringTests(unittest.TestCase):
             record("good", "strong", target, target, [[.01,.97,.01,.01],[.01,.01,.01,.97]]),
             record("bad", "weak", action(), target, [[.8,.1,.05,.05],[.8,.05,.05,.1]])]
 
+    def test_uncertainty_reports_matched_sample_count_and_single_sample_degeneracy(self):
+        rows = self.pair_rows()
+        one = select_preferences(rows)[2][0]
+        self.assertEqual(one["matched_sample_count"], 1)
+        self.assertAlmostEqual(one["teacher_data_uncertainty"], 0.)
+        self.assertAlmostEqual(one["student_data_uncertainty"], 0.)
+        target = action([1, 2], [2])
+        rows.append(record("second-strong", "strong", target, target,
+                           [[.97,.01,.01,.01],[.97,.01,.01,.01]], tid=1))
+        # Unpaired samples must not inflate the decomposition's sample count.
+        unmatched = select_preferences(rows)[2][0]
+        self.assertEqual(unmatched["matched_sample_count"], 1)
+        rows.append(record("second-weak", "weak", action(), target,
+                           [[.8,.1,.05,.05],[.8,.05,.05,.1]], tid=1))
+        two = select_preferences(rows)[2][0]
+        self.assertEqual(two["matched_sample_count"], 2)
+        self.assertGreater(two["teacher_data_uncertainty"], 0.)
+        self.assertAlmostEqual(two["student_data_uncertainty"], 0.)
+
     def test_export_checks_each_response_once_and_rechecks_next_export(self):
         from agent_simulation.evaluation import customer_filtering as module
         for sft_only in (True, False):

@@ -214,11 +214,13 @@ def _uncertainty_metrics(usable):
     strong = frame[frame.variant == "strong"].set_index(["dataset", "cid", "tid"])
     weak = frame[frame.variant == "weak"].set_index(["dataset", "cid", "tid"])
     metrics = calculate_metrics(strong, weak).reset_index()
+    counts = strong.groupby(level=[0, 1]).size()
+    metrics["matched_sample_count"] = metrics.set_index(["dataset", "cid"]).index.map(counts)
     for name, data in (("teacher", strong), ("student", weak)):
         hit = data.preference.groupby(level=[0, 1]).mean().rename(name + "_hit")
         metrics[name + "_hit"] = metrics.set_index(["dataset", "cid"]).index.map(hit)
     metrics["diff_hit"] = metrics.student_hit - metrics.teacher_hit
-    columns = ["dataset", "cid", "choice_cnt",
+    columns = ["dataset", "cid", "choice_cnt", "matched_sample_count",
                *[c for c in metrics if c.startswith(("teacher_", "student_", "diff_"))]]
     return metrics[columns].to_dict("records")
 
