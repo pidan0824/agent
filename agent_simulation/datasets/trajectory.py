@@ -240,9 +240,44 @@ def encode_record(row, mode, tokenizer, *, max_length=32768, response_decisions=
     return encoded
 
 
+def sft_supervision(records, *, require_rationales=False):
+    """Check the actual encoded loss mask, including after --limit is applied."""
+    objectives = {r["metadata"].get("sft_objective") for r in records}
+    require(objectives <= {None, "action_only", "cot"} and len(objectives) == 1,
+            "Mixed or unknown SFT objectives")
+    objective = next(iter(objectives))
+    if objective is not None:
+        require(len({r["metadata"].get("comparison_id") for r in records}) == 1
+                and all(r["metadata"].get("comparison_id") for r in records),
+                "Mixed or missing comparison identity")
+    tokens, scenes = 0, set()
+    for row in records:
+        count = sum(component == COMPONENTS["rationale"] and label != IGNORE_INDEX
+                    for turn in row["encoded"]["trajectory"].turns
+                    for component, label in zip(turn.components or [], turn.labels))
+        tokens += count
+        if count:
+            meta = row["metadata"]
+            scenes.add((*[meta.get(k) for k in
+                ("dataset_manifest_sha256", "actor_id", "stage", "source_request_id")],
+                meta.get("scene_id", meta["initial_state_id"])))
+    minimum = 1 if require_rationales or objective == "cot" else 0
+    if objective == "cot":
+        declared = {r["metadata"].get("min_rationale_scenes") for r in records}
+        require(len(declared) == 1 and all(type(v) is int and v > 0 for v in declared),
+                "CoT release requires a positive rationale minimum")
+        minimum = max(minimum, next(iter(declared)))
+    require(len(scenes) >= minimum and (not minimum or tokens > 0),
+            "Insufficient rationale supervision after encoding/limit; refusing CoT SFT")
+    require(objective != "action_only" or tokens == 0, "Action-only control contains rationale supervision")
+    return {"objective": objective or ("cot_required" if require_rationales else "unspecified"),
+            "rationale_scenes": len(scenes), "rationale_tokens": tokens, "minimum_rationale_scenes": minimum}
+
+
 def read_training_records(path, mode, tokenizer, *, max_length=32768, limit=0,
-                          click_weight=1.0, purchase_weight=1.0, response_decisions=False):
+                          click_weight=1.0, purchase_weight=1.0, response_decisions=False, require_rationales=False):
     """Read a bounded training release; corrupt/oversized rows fail explicitly."""
+    require(not require_rationales or mode == 'sft', 'Rationale requirement is SFT-only')
     require(type(limit) is int and limit >= 0, 'Invalid training row cap')
     require(all(math.isfinite(w) and w >= 1 for w in (click_weight,purchase_weight)),
             "Positive action weights must be finite and at least one")
@@ -275,12 +310,15 @@ def read_training_records(path, mode, tokenizer, *, max_length=32768, limit=0,
                 key: row[key] for key in ('role', 'actor_id', 'stage', 'initial_state_id', 'trajectory_id',
                                          'chosen_trajectory_id', 'rejected_trajectory_id', 'source_request_id',
                                          'scene_id', 'source_response_target', 'dataset_manifest_sha256',
-                                         'response_style', 'action_mode', 'evaluation_protocol') if key in row}})
+                                         'response_style', 'action_mode', 'evaluation_protocol', 'sft_objective',
+                                         'comparison_id', 'min_rationale_scenes') if key in row}})
             if limit and len(records) >= limit:
                 break
     require(bool(records), 'Empty trajectory training release')
     require(len({row['metadata']['role'] for row in records}) == 1,
             'Train separate Customer and Seller adapters')
+    if mode == 'sft':
+        sft_supervision(records, require_rationales=require_rationales)
     # Normalize globally: batch-local normalization cancels weights at batch_size=1.
     groups = defaultdict(lambda: defaultdict(list))
     for record in records:
@@ -307,12 +345,15 @@ def main():
     parser.add_argument('--tokenizer', type=Path, required=True)
     parser.add_argument('--max-length', type=int, default=32768)
     parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument('--require-rationales', action='store_true')
     args = parser.parse_args()
     tokenizer = load_tokenizer(str(args.tokenizer), local_files_only=True)
     rows = read_training_records(args.input, args.mode, tokenizer,
-                                 max_length=args.max_length, limit=args.limit)
+                                 max_length=args.max_length, limit=args.limit,
+                                 require_rationales=args.require_rationales)
+    supervision = sft_supervision(rows, require_rationales=args.require_rationales) if args.mode == "sft" else None
     encoded = [value for row in rows for value in row['encoded'].values()]
-    print(json.dumps(dict(format=FORMAT, mode=args.mode, records=len(rows),
+    print(json.dumps(dict(format=FORMAT, mode=args.mode, records=len(rows), supervision=supervision,
                           max_tokens=max(value.max_tokens for value in encoded),
                           assistant_tokens=sum(value.assistant_tokens for value in encoded))))
 

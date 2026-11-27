@@ -18,7 +18,7 @@ import torch
 from torch.nn import functional as F
 
 from agent_simulation.data.common import require, sha256
-from agent_simulation.datasets.trajectory import FORMAT, IGNORE_INDEX, read_training_records
+from agent_simulation.datasets.trajectory import FORMAT, IGNORE_INDEX, read_training_records, sft_supervision
 from agent_simulation.inference import resolve_device
 from agent_simulation.inference.requests import load_tokenizer, tokenizer_identity
 from agent_simulation.logs import write_report
@@ -257,7 +257,12 @@ def train(args):
                                     max_length=args.max_length, limit=args.limit,
                                     click_weight=getattr(args,"click_weight",1.0),
                                     purchase_weight=getattr(args,"purchase_weight",1.0),
-                                    response_decisions=decision_weight > 0)
+                                    response_decisions=decision_weight > 0,
+                                    require_rationales=getattr(args, "require_rationales", False))
+    supervision = (sft_supervision(records, require_rationales=getattr(args, "require_rationales", False))
+                   if args.mode == "sft" else None)
+    require(not supervision or not supervision["minimum_rationale_scenes"] or args.rationale_weight > 0,
+            "CoT SFT requires positive rationale loss weight")
     require(not decision_weight or (records[0]["metadata"]["role"] == "customer"
             and any(r["metadata"]["stage"] == "response" for r in records)),
             "Response decision weight requires Customer Response records")
@@ -268,6 +273,7 @@ def train(args):
                 'base_weight_sha256': base_weight_digest(args.model),
                 'tokenizer_sha256': tokenizer_identity(tokenizer, tokenizer.chat_template),
                 'initial_adapter_sha256': init_identity, 'records': len(records),
+                'supervision': supervision,
                 'mask': 'generated assistant content/tool calls/end tokens only; observations excluded',
                 'dpo_logprob': 'sum over all assistant tokens of each complete actual branch',
                 'turn_encoding': 'official template per decision prefix; earlier assistant turns context-only',
@@ -409,6 +415,8 @@ def parser():
                         help='SFT parent-request multiplier for observed Customer clicks')
     parser.add_argument('--purchase-weight', type=float, default=1.0,
                         help='SFT parent-request multiplier for observed Customer purchases; max with click weight')
+    parser.add_argument('--require-rationales', action='store_true',
+                        help='Reject zero rationale supervision; comparison CoT releases enforce this automatically')
     parser.add_argument('--rationale-weight', type=float, default=1.0)
     parser.add_argument('--tool-weight', type=float, default=1.0)
     parser.add_argument('--format-weight', type=float, default=0.25)

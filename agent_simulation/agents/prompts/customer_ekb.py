@@ -36,6 +36,8 @@ def concise_ekb_instructions():
 Return the supplied rationale/action JSON. Keep stimulus, knowledge and evaluation
 to one short sentence each: current need, the most relevant observed comparison,
 and the resulting choice or abstention. Do not repeat the candidate list.
+Write the explanation in Chinese, preserving original query/product wording and IDs.
+Different item IDs are not interchangeable even when their titles match.
 Use zero to two supported factor labels per list. Use Unknown evaluation_style
 unless observations justify a more specific description. An explanation is a
 tentative account, not the person's observed thoughts. Do not invent motives,

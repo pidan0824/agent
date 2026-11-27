@@ -114,6 +114,8 @@ def parser():
     p.add_argument("--count", type=int, default=0, help="Prepared scenes: 0 uses all; raw alternatives require an explicit positive count")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--sft-only", action="store_true", help="Generate strong teacher only; skip weak model, option predictor and DPO")
+    p.add_argument("--cot-sft", action="store_true",
+                   help="Stage fixed teacher outputs for reviewed CoT/action-only comparison; no automatic SFT export")
     p.add_argument("--cot-preset", choices=["original", "lightweight"], default="original",
                    help="Lightweight: fixed SFT only, concise EKB, one sample, 768 tokens, temperature 0")
     p.add_argument("--scene-concurrency", type=int, help="Bounded concurrent scene arms; default 1, lightweight 4")
@@ -197,6 +199,11 @@ def main(argv=None):
     args = parser().parse_args(argv)
     from agent_simulation.evaluation.customer_generation import resolve_generation_options, bounded_map, budget_scenes
     resolve_generation_options(args)
+    if args.cot_sft:
+        require(args.sft_only and args.split == "train" and not args.evaluation_only
+                and args.modes == ["fixed"] and args.theory
+                and args.response_styles in (None, ["ekb"]) and args.teacher_budget != 0,
+                "CoT SFT requires fixed Train strong EKB generation and a nonzero teacher budget")
     validate_filter_options(query_min=args.query_min, response_min=args.response_min,
         click_min=args.click_min, purchase_min=args.purchase_min, max_pairs=args.max_pairs,
         logloss_min_gap=args.logloss_min_gap, action_min_gap=args.action_min_gap)
@@ -264,7 +271,7 @@ def main(argv=None):
                     "dataset_manifest_sha256": sha256(args.dataset / "manifest.json"),
                     "scenes_manifest_sha256": sha256(args.scenes / "manifest.json") if prepared else None,
                     "source_sha256": {name: sha256(Path(__file__).parents[1] / name) for name in (
-                        "evaluation/customer_curation.py", "evaluation/customer_generation.py", "evaluation/customer_context.py",
+                        "evaluation/customer_curation.py", "evaluation/customer_generation.py", "evaluation/customer_context.py", "evaluation/customer_cot.py",
                         "agents/prompts/customer_agentic.py", "evaluation/customer_filtering.py", "evaluation/customer_quality.py",
                         "evaluation/customer_evidence.py", "evaluation/customer_contract.py", "evaluation/trajectories.py",
                         "datasets/customer_candidates.py", "agents/prompts/customer_ekb.py", "inference/agentic.py")},
@@ -390,11 +397,15 @@ def main(argv=None):
             asyncio.run(generate_all())
         if not args.evaluation_only:
             (args.output / "observed-actions.jsonl").write_text("".join(encoded(row) + "\n" for row in observed))
-        exported = {} if args.evaluation_only else export_training(records,args.output,
-            observed_actions=observed, sft_only=args.sft_only, max_pairs=args.max_pairs,filter_column=args.filter_column,
-            sampling_column=args.sampling_column,ascending=args.ascending,
-            query_min=args.query_min,response_min=args.response_min,click_min=args.click_min,purchase_min=args.purchase_min,
-            pair_protocol=args.pair_protocol,logloss_min_gap=args.logloss_min_gap,action_min_gap=args.action_min_gap)
+        if args.cot_sft:
+            from agent_simulation.evaluation.customer_cot import write_review_audit
+            exported = {"cot_sft": write_review_audit(records, observed, args.output)}
+        else:
+            exported = {} if args.evaluation_only else export_training(records,args.output,
+                observed_actions=observed, sft_only=args.sft_only, max_pairs=args.max_pairs,filter_column=args.filter_column,
+                sampling_column=args.sampling_column,ascending=args.ascending,
+                query_min=args.query_min,response_min=args.response_min,click_min=args.click_min,purchase_min=args.purchase_min,
+                pair_protocol=args.pair_protocol,logloss_min_gap=args.logloss_min_gap,action_min_gap=args.action_min_gap)
         review_rows, reviewed_keys = [], set()
         for row in records:
             t = row["trajectory"]

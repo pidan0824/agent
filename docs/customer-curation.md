@@ -518,3 +518,48 @@ Seller 的共享行为特征补充最近有效报价的时间点和最近两次�
 并发另用 8 个真实场景 ID 配合可控延迟做调度模拟：并发 2，首任务 120ms、其他任务 10ms。第三个任务启动时间约从 120ms 提前到 10ms，总耗时中位数约从 151ms 降至 121ms，结果按 ID 对齐一致。该模拟仅证明补位行为，不是 LLM 吞吐实测。
 
 149 项相关测试通过，包括慢首任务补位、背压与取消、正式入口三阶段缓存复用、缓存淘汰／配置隔离／防修改、时间和归属保护、证据检查调用次数及修改后重新校验。审计脚本、基线副本、计时与结果在项目内 tmp/concurrency-context-audit-20261127/；真实场景输入 SHA256 为 35134a80be17b8df85e2a3dc81cfd78655053a5e5c57ec3fc6b8e2a0df2d14de。旧数据和既有运行产物未重写。
+
+## 明确的 CoT SFT 链路与配对对照（2026-11-27）
+
+历史最后的 customer-context-sft-v1 是 596 条原始行为、0 条解释的 SFT，不能用于证明 CoT 收益。新版通过明确的生成模式、离线审查导出和实际 token 检查，将 CoT 训练目标与纯行为 SFT 区分开。以下命令是后续使用说明，本次未执行真实模型生成或训练。
+
+正式生成入口使用 --cot-sft --sft-only --cot-preset lightweight。必须是 Train、fixed、EKB；teacher budget 不得为 0。输入场景应是冻结的 fit 分区，按父请求与 dev/audit 隔离；不能因为都属于官方 Train 就混入评估样本。例：
+
+~~~bash
+./agent_simulation/python.sh -m agent_simulation.evaluation.customer_curation \
+  --dataset <dataset-release> --scenes <frozen-fit-scenes> \
+  --cot-preset lightweight --sft-only --cot-sft --teacher-budget <scene-budget> \
+  --output <new-generation-run>
+~~~
+
+该模式保存 records.jsonl、observed-actions.jsonl、cot-filter-decisions.jsonl、cot-report.json 和 cot-review.jsonl，不自动写 sft.jsonl。状态明确为 awaiting_semantic_review 或 no_eligible_rationales。CoT 审查队列包括全部机械合格候选，不受旧 semantic-review.jsonl 的 20 条预览限制。轻量提示补充中文解释、保留原始商品/查询用词和 ID、不同 ID 不可混同；效果仍须后续实测，不能由代码变更宣称通过率提高。
+
+机械筛选保留既有 split、用户、标签和 schema 校验，并要求单次固定输入原始输出、与原始监督相同的候选/标签、除系统输出指令外相同的输入消息、真实行为完全匹配、非空证据引用和重新计算的证据检查。不会修改预测动作来凑标签，也不信任保存的 evidence_quality。语义审查在队列副本中填写 verdict=pass/fail、reason 和 reviewer，保留 trajectory_id、messages_sha256；没有明确通过、哈希不符或失败的记录不进入 CoT 数据。
+
+离线导出不调用模型，不再依赖整个 cohort 文件哈希相同：未改变的原始消息和同一场景可在新观察集合中重新审核复用，新增其他场景不会自动废弃它。真实上下文/候选变化则拒绝，不能将旧答案移植到新提示。
+
+~~~bash
+./agent_simulation/python.sh -m agent_simulation.evaluation.customer_cot \
+  --run <generation-run> --reviews <reviewed-cot-review.jsonl> \
+  --output <new-comparison-release> --min-rationale-scenes 32
+~~~
+
+--min-rationale-scenes 必须显式指定正整数；32 只是示例数量门槛，并非统计充分性保证。还需根据 report.json 的行为分层、解释覆盖率决定是否扩量，不能用全部无动作解释代表正例。数量不足时保存失败报告，不产生任何训练 JSONL。成功后得到：
+
+- action_only.jsonl：全部原始动作，每个场景一条。
+- cot.jsonl：完全相同的场景顺序、候选、输入信息和标签；每个通过审查的 Response 最多用一条原始教师解释/动作替换对应行，Query 与未选 Response 保持原样，不叠加额外样本。
+- manifest.json：两臂文件哈希、源 records/observed/reviews/生成 manifest 哈希、comparison_id、解释门槛、行为分层和对照协议。
+
+每条训练记录携带 sft_objective、comparison_id 和解释门槛。加载训练数据会按实际编码后的 rationale loss mask 检查非零解释及不同场景数，--limit 截掉解释也会失败；混合两臂、混合对照身份、无 CoT 对照中混入解释均被拒绝。CoT 训练同时拒绝 rationale_weight=0。旧的无标记文件可显式使用训练或编码入口的 --require-rationales。训练配置记录实际 rationale_scenes/rationale_tokens，而非只记录声明的权重。
+
+可先只加载 tokenizer 做预检查，不加载模型：
+
+~~~bash
+./agent_simulation/python.sh -m agent_simulation.datasets.trajectory \
+  --mode sft --input <comparison-release>/cot.jsonl \
+  --tokenizer models/Qwen3.5-9B --max-length 8192 --require-rationales
+~~~
+
+action_only.jsonl 使用同一编码入口、同一长度阈值，去掉 --require-rationales。若一臂超长，应回到同一场景集合共同处理，不能分别删样本或截断。后续训练固定相同底座/初始化、种子、epoch、batch、梯度累积、学习率、动作及父请求权重；只改变解释监督与相应输出指令。两臂样本数和优化步数匹配，CoT 的 token/耗时会更多，需单独报告。用完全相同且未参与筛选的 dev/audit 场景和 direct-action 提示比较两模型的 Query、点击、购买、无动作、正例及父请求等权指标；额外 CoT 解码评估另列，不能与 direct 指标混算。
+
+本轮离线检查使用已有 32 条真实教师输出及对应 63 条原始监督，保留历史审查通过的 2 条，两臂均为 63 条、输入/标签/顺序/父请求权重一致。实际 Qwen3.5-9B tokenizer 编码得到 action_only 为 0、cot 为 732 个 rationale token；最低数量设为 3 时导出停止。这里 2 条仅用于验证链路，不作为正式 CoT 实验的充分数据。审计保存在 tmp/cot-chain-real-audit-20261127/，原始输入未修改。本次 174 项相关测试通过（含离线 mock、编码和 CPU 微型夹具）；没有启动服务器上的真实教师服务、生成或训练任务。

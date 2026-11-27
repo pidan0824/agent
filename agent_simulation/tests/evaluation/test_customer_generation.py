@@ -208,8 +208,9 @@ class GenerationTests(unittest.TestCase):
             identity, _, _, _, source, candidate, _, _ = value
             prepared[identity] = {"request": source, "query_enabled": True,
                                  "response_scenes": [{"request": source, "candidate": candidate}]}
-        for budget, light, samples in ((None, True, 1), (2, True, 1), (0, True, 1), (None, False, 2)):
-            with self.subTest(budget=budget, lightweight=light), TemporaryDirectory() as directory, ExitStack() as stack:
+        for budget, light, samples, cot in ((None, True, 1, False), (2, True, 1, False),
+                                            (0, True, 1, False), (None, False, 2, False), (None, True, 1, True)):
+            with self.subTest(budget=budget, lightweight=light, cot=cot), TemporaryDirectory() as directory, ExitStack() as stack:
                 root = Path(directory)
                 for name in ("dataset", "scenes"):
                     (root / name).mkdir()
@@ -255,6 +256,8 @@ class GenerationTests(unittest.TestCase):
                 argv = ["--dataset", str(root / "dataset"), "--scenes", str(root / "scenes"),
                         "--output", str(root / "output"), "--scene-concurrency", "2"]
                 argv += ["--sft-only", "--cot-preset", "lightweight"] if light else ["--samples", "2"]
+                if cot:
+                    argv += ["--cot-sft"]
                 if budget is not None:
                     argv += ["--teacher-budget", str(budget)]
                 from agent_simulation.evaluation import customer_context
@@ -283,9 +286,16 @@ class GenerationTests(unittest.TestCase):
                 self.assertTrue(all(order == expected_order for order in arms.values()))
                 observed = [json.loads(line) for line in (root / "output/observed-actions.jsonl").read_text().splitlines()]
                 self.assertEqual(len(observed), 6)
-                sft = [json.loads(line) for line in (root / "output/sft.jsonl").read_text().splitlines()]
-                self.assertTrue(all(row in sft for row in observed))
-                self.assertEqual((root / "output/preferences.jsonl").read_text(), "")
+                if cot:
+                    self.assertFalse((root / "output/sft.jsonl").exists())
+                    self.assertFalse((root / "output/preferences.jsonl").exists())
+                    report = json.loads((root / "output/cot-report.json").read_text())
+                    self.assertEqual(report["status"], "no_eligible_rationales")
+                    self.assertTrue((root / "output/cot-review.jsonl").exists())
+                else:
+                    sft = [json.loads(line) for line in (root / "output/sft.jsonl").read_text().splitlines()]
+                    self.assertTrue(all(row in sft for row in observed))
+                    self.assertEqual((root / "output/preferences.jsonl").read_text(), "")
                 manifest = json.loads((root / "output/manifest.json").read_text())
                 self.assertIn("evaluation/customer_context.py", manifest["source_sha256"])
                 self.assertEqual(len(state.clients), 0 if budget == 0 else 1 if light else 2)
