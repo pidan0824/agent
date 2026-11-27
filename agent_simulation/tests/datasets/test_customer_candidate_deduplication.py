@@ -260,3 +260,57 @@ class CandidateDeduplicationTests(unittest.TestCase):
             manifest.pop("candidate_deduplication")
             (output / "manifest.json").write_text(json.dumps(manifest))
             customer_scenes.read_scenes(output)  # Legacy scene directories remain readable.
+
+    def test_all_positive_exposures_preserve_each_purchase_in_observed_sft(self):
+        products, interactions, source, prices = fixture()
+        source["response_input"]["displayed_items"] = source["response_input"]["displayed_items"][:2]
+        source["response_target"] = {"clicked_item_ids": [], "purchased_item_ids": [10, 11]}
+        prices = {i: prices[i] for i in (10, 11)}
+        before = deepcopy(source)
+        for method in ("random", "content", "collaborative"):
+            builder = SampledCandidateBuilder(products, interactions, Encoder(), methods=(method,))
+            children = [customer_scenes.freeze_prices(None, s, prices=prices)
+                        for s in builder.build_all(source, price_observations=prices)]
+            self.assertEqual(len(children), 2)
+            for child in children:
+                item = child["candidate"]["target_item_id"]
+                self.assertEqual(child["candidate"]["candidate_item_ids"], [item])
+                self.assertTrue(child["candidate"]["short_pool"])
+                self.assertEqual(child["request"]["response_target"],
+                                 {"clicked_item_ids": [], "purchased_item_ids": [item]})
+            observed = observed_action_rows(source, 100, "train", "release",
+                bundle={"request": source, "query_enabled": True, "response_scenes": children})
+            response = [r for r in combine_observed_sft([], [], observed) if r["stage"] == "response"]
+            self.assertEqual([r["target"]["purchased_item_ids"] for r in response], [[10], [11]])
+            self.assertEqual(source, before)
+
+    def test_short_no_action_pool_and_positive_after_history_filter_are_preserved(self):
+        products, interactions, source, _ = fixture()
+        for target, exposed, expected in (
+                ({"clicked_item_ids": [], "purchased_item_ids": []}, [10], [10]),
+                ({"clicked_item_ids": [10], "purchased_item_ids": []}, [1, 2, 3, 10], [10])):
+            source["response_input"]["displayed_items"] = [p for p in products if p["item_id"] in exposed]
+            source["response_target"] = target
+            scene = SampledCandidateBuilder(products, interactions, None, methods=("random",)).build(source)
+            self.assertEqual(scene["candidate"]["candidate_item_ids"], expected)
+            self.assertTrue(scene["candidate"]["short_pool"])
+            self.assertEqual(scene["request"]["response_target"], target)
+        source["response_target"] = {"clicked_item_ids": [], "purchased_item_ids": []}
+        source["response_input"]["displayed_items"] = [p for p in products if p["item_id"] in (1, 2, 3)]
+        with self.assertRaisesRegex(ValueError, "insufficient_distractors"):
+            SampledCandidateBuilder(products, interactions, None, methods=("random",)).build(source)
+
+    def test_target_length_is_independent_of_dedup_pool_and_sampling_route(self):
+        products, interactions, source, prices = fixture()
+        for seed in (1, 42, 20261126):
+            sizes = set()
+            for method in ("random", "content", "collaborative"):
+                builder = SampledCandidateBuilder(products, interactions, Encoder(), methods=(method,), seed=seed)
+                for quotes in (None, prices):
+                    scene = builder.build(source, price_observations=quotes)
+                    sizes.add(scene["candidate"]["target_size"])
+                    self.assertEqual(scene["candidate"]["target_size_policy"], "scene-seeded-v1")
+                smaller = deepcopy(source)
+                smaller["response_input"]["displayed_items"] = smaller["response_input"]["displayed_items"][:3]
+                sizes.add(builder.build(smaller)["candidate"]["target_size"])
+            self.assertEqual(len(sizes), 1)

@@ -21,6 +21,19 @@ Predict observed behavior. Relevance alone does not establish a click.
 """
 
 
+PRODUCT_FIELDS = ("item_title", "brand_name", "category_level3_name", "price_raw")
+
+
+def product_collisions(products, *, include_shop=False):
+    """Group by supplied visible attributes, never by labels or item ID."""
+    from collections import defaultdict
+    fields = PRODUCT_FIELDS + (("seller_id", "seller_name") if include_shop else ())
+    groups = defaultdict(list)
+    for product in products:
+        groups[json.dumps([product.get(f) for f in fields], ensure_ascii=False)].append(product["item_id"])
+    return [ids for ids in groups.values() if len(ids) > 1]
+
+
 def attach_sources(context):
     """Build deterministic IDs for visible facts; replace duplicate raw fact bodies."""
     facts = dict(context.pop("facts", {}))
@@ -39,8 +52,21 @@ def attach_sources(context):
             if field in event:
                 add("H", source, field, event[field], event["time_index"],
                     owner=event.get("user_id", actor))
-    for product in context.pop("displayed_items", []):
-        for field in ("item_title", "brand_name", "category_level3_name", "price_raw"):
+    displayed = context.pop("displayed_items", [])
+    by_id = {p["item_id"]: p for p in displayed}
+    shop_fields = {}
+    for group in product_collisions(displayed):
+        # Only add supplied shop fields that can distinguish this collision.
+        fields = tuple(field for field in ("seller_id", "seller_name")
+                       if len({by_id[item].get(field) for item in group}) > 1)
+        for item in group:
+            shop_fields[item] = fields
+    for product in displayed:
+        for field in PRODUCT_FIELDS + shop_fields.get(product["item_id"], ()):
+            if field == "seller_id" and not (type(product.get(field)) is int and product[field] > 0):
+                continue
+            if field == "seller_name" and str(product.get(field) or "").strip().casefold() in ("", "unknown", "null"):
+                continue
             if field in product:
                 add("P", "item:" + str(product["item_id"]), field, product[field],
                     product.get("price_observed_time_index") if field == "price_raw" else None,

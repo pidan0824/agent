@@ -35,6 +35,7 @@ def job(identity, *, duplicate=False, empty=False):
             {**source["response_input"]["displayed_items"][0], "item_id": 5})
     if empty:
         source["response_target"] = {"clicked_item_ids": [], "purchased_item_ids": []}
+    source["response_input"]["displayed_items"].append({"item_id": 6, "item_title": "different", "price_raw": 12})
     ids = [p["item_id"] for p in source["response_input"]["displayed_items"]]
     candidate = {"scene_id": str(identity), "domain": "test", "candidate_count": len(ids),
                  "candidate_item_ids": ids, "original_item_ids": ids,
@@ -238,3 +239,11 @@ class GenerationTests(unittest.TestCase):
                 self.assertEqual((root / "output/preferences.jsonl").read_text(), "")
                 self.assertEqual(len(state.clients), 0 if budget == 0 else 1 if light else 2)
                 self.assertTrue(all(client.seed == 42 for client in state.clients))
+
+    def test_teacher_budget_deprioritizes_single_candidate_within_same_stratum(self):
+        single, multiple = job(1), job(2)
+        single[4]["response_input"]["displayed_items"] = single[4]["response_input"]["displayed_items"][:1]
+        selected, _ = budget_scenes([single, multiple], 1, 42, io.StringIO())
+        self.assertEqual([v[0] for v in selected], [2])
+        audit = scene_evidence(CurationTools(single[4], "response", mode="fixed"))
+        self.assertTrue(audit["single_candidate"])

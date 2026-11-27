@@ -252,3 +252,68 @@ class ContextOptimizationTests(unittest.TestCase):
         audit = io.StringIO()
         budget_scenes([value], 1, 42, audit, history_token_budget=0)
         self.assertFalse(json.loads(audit.getvalue())["same_item_history"])
+
+    def test_collision_only_shop_facts_are_citable_and_round_trip(self):
+        from agent_simulation.evaluation.customer_generation import scene_evidence
+        source = request()
+        products = source["response_input"]["displayed_items"]
+        products[0].update(seller_id=10, seller_name="first shop")
+        products.append({**products[0], "item_id": 5, "seller_id": 11, "seller_name": "second shop"})
+        products.append({"item_id": 6, "item_title": "Other", "price_raw": 9,
+                         "seller_id": 12, "seller_name": "unneeded shop"})
+        binding = CurationTools(source, "response", mode="fixed")
+        ctx = binding.initial_context()
+        shop = [f for f in ctx["facts"].values() if f["field"] in ("seller_id", "seller_name")]
+        self.assertEqual({f["item_id"] for f in shop}, {4, 5})
+        self.assertTrue(all(f["source_id"] == "item:" + str(f["item_id"]) for f in shop))
+        self.assertEqual(expand_sources(json.loads(encode_context(ctx))), ctx)
+        self.assertEqual(scene_evidence(binding)["identical_visible_groups"], [])
+        changed = deepcopy(source)
+        changed["response_target"] = {"clicked_item_ids": [], "purchased_item_ids": []}
+        self.assertEqual(ctx, CurationTools(changed, "response", mode="fixed").initial_context())
+        # Equal shops add no distinguishing fact; unknown shop metadata is not invented.
+        for seller in ({"seller_id": 10, "seller_name": "first shop"},
+                       {"seller_id": None, "seller_name": "UNKNOWN"}):
+            same = deepcopy(source)
+            for p in same["response_input"]["displayed_items"][:2]:
+                p.update(seller)
+            info = CurationTools(same, "response", mode="fixed").initial_context()
+            self.assertFalse(any(f["field"].startswith("seller_") for f in info["facts"].values()))
+
+    def test_light_recall_keeps_older_similar_query_and_known_category_within_budget(self):
+        from agent_simulation.tests.evaluation.test_customer_curation import CurationTests
+        source = CurationTests.history_request()
+        ctx = source["response_input"]
+        ctx["query"] = "冬季保暖棉服"
+        ctx["displayed_items"][0].update(item_title="女士冬季棉服", category_level2_name="棉服",
+                                         category_level3_name="UNKNOWN")
+        history = ctx["short_term_memory"]["search_history"]
+        history[0]["query"] = "冬季保暖棉服女"  # Related real no-action query, not exact.
+        history[1]["clicked_items"] = [{"item_id": 9, "item_title": "加厚外套",
+                                        "category_level2_name": "棉服", "category_level3_name": "UNKNOWN"}]
+        history[2]["clicked_items"] = [{"item_id": 8, "category_level3_name": "UNKNOWN"}]
+        kwargs = dict(mode="fixed", history_limit=4, history_token_budget=50000, tokenizer=CharacterTokenizer())
+        selected = CurationTools(source, "response", **kwargs).initial_context()
+        self.assertEqual([e["event_id"] for e in selected["history_events"]],
+                         ["history:1", "history:2", "history:12", "history:13"])
+        empty = CurationTools(source, "response", mode="fixed", history_limit=0,
+                             history_token_budget=50000, tokenizer=CharacterTokenizer()).initial_context()
+        self.assertLessEqual(len(encode_context(selected)) - len(encode_context(empty)), 50000)
+        changed = deepcopy(source)
+        changed["response_target"] = {"clicked_item_ids": [], "purchased_item_ids": []}
+        self.assertEqual(selected, CurationTools(changed, "response", **kwargs).initial_context())
+        # Query selection cannot use the current Response query or products.
+        query = CurationTools(source, "query", **kwargs).initial_context()
+        self.assertEqual([e["event_id"] for e in query["history_events"]],
+                         ["history:10", "history:11", "history:12", "history:13"])
+        self.assertNotIn("冬季保暖棉服", json.dumps(query, ensure_ascii=False))
+
+    def test_exact_history_and_latest_precede_lexical_hints(self):
+        context = {"evidence_actor_id": 7, "history_cutoff_exclusive": 20, "query": "冬季保暖棉服",
+                   "displayed_items": [{"item_id": 4, "item_title": "女士冬季棉服"}]}
+        events = [{"session_id": i, "time_index": i, "query": q, "clicked_items": [], "purchased_items": []}
+                  for i, q in ((1, "other"), (2, "冬季保暖棉服"), (3, "冬季保暖棉服女"), (4, "newest"))]
+        events[0]["clicked_items"] = [{"item_id": 4}]
+        selected = budget_history(context, events, stage="response", tokenizer=CharacterTokenizer(),
+                                  budget=50000, event_limit=3)
+        self.assertEqual([e["event_id"] for e in selected["history_events"]], ["history:1", "history:2", "history:4"])

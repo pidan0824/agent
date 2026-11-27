@@ -184,6 +184,8 @@ class SampledCandidateBuilder:
                              interaction_df=pd.DataFrame(event_rows),
                              user_interaction_list=pd.Series({user: seen}))
         seed = int(hashlib.sha256(f"{self.seed}:{scene_id}".encode()).hexdigest()[:8], 16)
+        # List length must not depend on shuffle consumption or exposure-pool size.
+        size = random.Random(f"{self.seed}:{scene_id}:target-size-v1").randint(self.min_items, self.max_items)
         with seeded(seed):
             rankings = []
             sample_num = min(len(ids), max(32, self.max_items * 3))
@@ -233,11 +235,9 @@ class SampledCandidateBuilder:
             frame = pd.DataFrame([{"user_id": user, "impression_list": merged}])
             filtered = original.interaction_filtering(sf, frame).iloc[0].impression_list
             negatives = [item for item in filtered if item not in source_positives]
-            # Deduplication must not discard a real action just to meet a list-length target.
-            require(len(negatives) >= self.min_items - len(positives)
-                    or (deduplication["removed_to_retained"] and (negatives or positives)),
-                    "insufficient_distractors")
-            size = random.randint(self.min_items, self.max_items)
+            # The length range is a sampling target, not a reason to lose behavior
+            # supervision. Keep any nonempty shortlist, including a lone positive.
+            require(bool(negatives or positives), "insufficient_distractors")
             candidates = negatives[:max(0, size-len(positives))]
             for item in positives:
                 if candidates:
@@ -260,7 +260,8 @@ class SampledCandidateBuilder:
             "original_item_ids": original_ids, "candidate_item_ids": candidates,
             "original_count": len(original_ids), "candidate_count": len(candidates),
             "domain": Counter(categories).most_common(1)[0][0], "methods": self.methods,
-            "seed": seed, "target_size": size, "prior_interactions": len(owned),
+            "seed": seed, "target_size": size, "target_size_policy": "scene-seeded-v1",
+            "prior_interactions": len(owned),
             "distractor_count": len(candidates)-len(positives), "positive_count": len(positives),
             "scope": scope, "pool_size": len(ids), "no_click_pool": "recorded_exposure_only" if not positives else None, "short_pool": len(candidates) < self.min_items,
             "over_max_to_preserve_positives": len(candidates) > self.max_items,

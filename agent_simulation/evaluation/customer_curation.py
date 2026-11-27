@@ -26,6 +26,45 @@ from agent_simulation.inference.agentic import AgenticClient
 from agent_simulation.inference.requests import load_tokenizer, ContextCapacityError
 
 
+def history_relevance(context):
+    """Cheap input-only recall: exact evidence first, lexical/category hints next."""
+    import re
+    from functools import lru_cache
+    def key(value):
+        return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
+    @lru_cache(maxsize=1024)
+    def grams(text):
+        return frozenset(word[i:i + 2] for word in re.findall(r"[^\W_]+", key(text))
+                         for i in range(len(word) - 1) if not word[i:i + 2].isdigit())
+    def categories(product):
+        return {(level, key(product.get(f"category_level{level}_name"))) for level in (2, 3)
+                if key(product.get(f"category_level{level}_name")) not in ("", "unknown", "null")}
+    displayed = context.get("displayed_items", [])
+    ids = {p["item_id"] for p in displayed}
+    query = key(context.get("query"))
+    references = {grams(context.get("query") or "")}
+    references.update(grams(p.get("item_title") or "") for p in displayed)
+    references.discard(frozenset())
+    category_keys = set().union(*(categories(p) for p in displayed))
+    def score(event):
+        products = [p for field in ("clicked_items", "purchased_items") for p in (event.get(field) or [])]
+        same_item = any(p.get("item_id") in ids for p in products)
+        same_query = bool(query) and key(event.get("query")) == query
+        lexical = 0.
+        for text in [event.get("query"), *(p.get("item_title") for p in products)]:
+            tokens = grams(text or "")
+            for reference in references:
+                shared = len(tokens & reference)
+                if shared >= 2:
+                    similarity = shared / len(tokens | reference)
+                    if similarity >= .3:
+                        lexical = max(lexical, similarity)
+        category = max((level for p in products for level, name in categories(p)
+                        if (level, name) in category_keys), default=0)
+        return same_item, same_query, lexical, category
+    return score
+
+
 def budget_history(context, history, *, stage, tokenizer, budget, event_limit=None):
     """Fit whole historical events; keep recent and relevant evidence, never labels."""
     from agent_simulation.evaluation.customer_evidence import attach_sources, encode_context
@@ -44,16 +83,12 @@ def budget_history(context, history, *, stage, tokenizer, budget, event_limit=No
     complete = render(history)
     if (event_limit is None or len(history) <= event_limit) and tokens(complete) - baseline <= budget:
         return complete
-    def query_key(value):
-        return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
-    candidate_ids = {p["item_id"] for p in context.get("displayed_items", [])}
-    query = query_key(context.get("query")) if stage == "response" else ""
+    relevance = history_relevance(context) if stage == "response" else lambda event: (False, False, 0., 0)
     latest = max(history, key=lambda e: (e["time_index"], e["session_id"]))
     def priority(event):
-        same_item = stage == "response" and any(p.get("item_id") in candidate_ids
-            for field in ("clicked_items", "purchased_items") for p in event.get(field, []))
-        same_query = bool(query) and query_key(event.get("query")) == query
-        return (event is not latest, not same_item, not same_query, -event["time_index"], event["session_id"])
+        same_item, same_query, lexical, category = relevance(event)
+        return (event is not latest, not same_item, not same_query, -lexical, -category,
+                -event["time_index"], event["session_id"])
     selected, result = [], empty
     for event in sorted(history, key=priority):
         if event_limit is not None and len(selected) >= event_limit:
@@ -115,7 +150,15 @@ class CurationTools(FrozenSampleTools):
                         query_events = [row[3] for row in related
                                         if query and query_key(row[3].get("query", "")) == query]
                         query_events.sort(key=lambda event: (-event["time_index"], event["session_id"]))
-                        candidates = {event["session_id"]: event for event in history + recalled + query_events[:2]}
+                        relevance = history_relevance(self.context)
+                        weak = []
+                        for event in self.history[:-self.history_limit]:
+                            same_item, same_query, lexical, category = relevance(event)
+                            if not (same_item or same_query) and (lexical or category):
+                                weak.append((-lexical, -category, -event["time_index"], event["session_id"], event))
+                        weak.sort(key=lambda row: row[:4])
+                        candidates = {event["session_id"]: event for event in
+                                      history + recalled + query_events[:2] + [row[4] for row in weak[:2]]}
                         history = list(candidates.values())
                     else:
                         # Legacy count-only policy replaces the oldest recent events.

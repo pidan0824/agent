@@ -166,9 +166,11 @@ class AuthorCandidateTests(unittest.TestCase):
         self.assertEqual(scenes[-1]["request"]["response_target"],
                          {"clicked_item_ids":[],"purchased_item_ids":[13]})
 
-    def test_insufficient_distractors_is_rejected(self):
-        with self.assertRaisesRegex(ValueError,"insufficient_distractors"):
-            self.builder(min_items=40,max_items=40).build(request(),target_item_id=10)
+    def test_short_exposure_pool_preserves_supervision_without_fabricating_candidates(self):
+        scene = self.builder(min_items=40,max_items=40).build(request(),target_item_id=10)
+        self.assertTrue(scene["candidate"]["short_pool"])
+        self.assertEqual(set(scene["candidate"]["candidate_item_ids"]), set(range(10,22)) - {11})
+        self.assertEqual(scene["request"]["response_target"], {"clicked_item_ids":[10],"purchased_item_ids":[]})
 
     def test_catalog_preparation_uses_shared_pool_and_uniform_prior_prices(self):
         c=duckdb.connect()

@@ -69,11 +69,9 @@ def scene_evidence(binding):
     for fact in facts.values():
         if fact["kind"] == "product":
             products[fact["item_id"]][fact["field"]] = fact["value"]
-    groups = defaultdict(list)
-    fields = ("item_title", "brand_name", "category_level3_name", "price_raw")
-    for identity, product in products.items():
-        groups[digest([product.get(f) for f in fields])].append(identity)
-    collisions = [ids for ids in groups.values() if len(ids) > 1]
+    from agent_simulation.evaluation.customer_evidence import product_collisions
+    collisions = product_collisions([{"item_id": identity, **product}
+                                     for identity, product in products.items()], include_shop=True)
     supported_ids = set()
     query_match = False
     query = binding.context.get("query", "")
@@ -92,6 +90,7 @@ def scene_evidence(binding):
     unresolved = [ids for ids in collisions if not supported_ids.intersection(ids)]
     complete = len(products) == len(binding.displayed) > 0 and all(str(p.get("item_title") or "").strip() for p in products.values())
     return {"complete_titles": complete, "has_query": bool(key(query)),
+            "single_candidate": len(binding.displayed) == 1,
             "same_item_history": same_item, "exact_query_history": query_match,
             "identical_visible_groups": collisions, "unsupported_identical_groups": unresolved}
 
@@ -114,7 +113,8 @@ def budget_scenes(jobs, budget, seed, audit, *, history_token_budget=None, token
             history_token_budget=history_token_budget, tokenizer=tokenizer))
         scene_id = str(candidate.get("scene_id", identity))
         stratum = (candidate["domain"], behavior_stratum(adapted["response_target"]))
-        priority = (features["has_query"] and features["complete_titles"],
+        priority = (not features["single_candidate"],
+                    features["has_query"] and features["complete_titles"],
                     not features["unsupported_identical_groups"],
                     features["same_item_history"], features["exact_query_history"],
                     digest([seed, scene_id]))
