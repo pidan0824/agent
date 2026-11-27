@@ -5,11 +5,12 @@ from agent_simulation.evaluation.customer_evidence import EVIDENCE_SCHEMA, EVIDE
 _TEXT = {"type": "string", "minLength": 1}
 _FACTORS = {"type": "array", "items": {"type": "string", "minLength": 1}}
 EKB_SCHEMA = {"type": "object", "properties": {
-    "evidence_refs": EVIDENCE_SCHEMA, "stimulus": _TEXT, "stimulus_factors": _FACTORS,
+    "stimulus": _TEXT, "stimulus_factors": _FACTORS,
     "knowledge": _TEXT, "knowledge_factors": _FACTORS,
     "evaluation": _TEXT,
-    "evaluation_style": {"type": "string", "enum": ["Logical", "Intuitive", "Impulsive", "Habitual", "Unknown"]}},
-    "required": ["evidence_refs", "stimulus", "stimulus_factors", "knowledge", "knowledge_factors", "evaluation", "evaluation_style"],
+    "evaluation_style": {"type": "string", "enum": ["Logical", "Intuitive", "Impulsive", "Habitual", "Unknown"]},
+    "evidence_refs": EVIDENCE_SCHEMA},
+    "required": ["stimulus", "stimulus_factors", "knowledge", "knowledge_factors", "evaluation", "evaluation_style", "evidence_refs"],
     "additionalProperties": False}
 
 
@@ -21,6 +22,11 @@ In evaluation, compare the selected item(s) with the strongest plausible unselec
 alternative: identify which difference matters to this user and why. Cite the
 supporting facts; do not list every candidate. Category interest shared by the
 whole list is not a reason to select one item over another.
+Past interaction counts indicate familiarity, not a rule to choose the most
+frequent item. Compare relevant attributes, including differences from past items.
+Use only the named item's own price evidence; unknown prices cannot support a
+price ranking. Write the explanation first, then evidence_refs: each preference
+comparison needs both the historical B/H facts and the candidate P attribute IDs.
 If only one candidate exists, do not invent a rival.
 If the available information cannot distinguish the alternatives, state that
 ambiguity without inventing a difference. Uncertainty alone does not mean no action.

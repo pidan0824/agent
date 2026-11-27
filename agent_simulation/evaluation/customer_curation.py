@@ -301,6 +301,7 @@ def main(argv=None):
                     "scenes_manifest_sha256": sha256(args.scenes / "manifest.json") if prepared else None,
                     "source_sha256": {name: sha256(Path(__file__).parents[1] / name) for name in (
                         "evaluation/customer_curation.py", "evaluation/customer_generation.py", "evaluation/customer_context.py", "evaluation/customer_cot.py",
+                        "evaluation/customer_background.py", "evaluation/micro/customer_agentic.py",
                         "agents/prompts/customer_agentic.py", "evaluation/customer_filtering.py", "evaluation/customer_quality.py",
                         "evaluation/customer_evidence.py", "evaluation/customer_contract.py", "evaluation/trajectories.py",
                         "datasets/customer_candidates.py", "agents/prompts/customer_ekb.py", "inference/agentic.py",

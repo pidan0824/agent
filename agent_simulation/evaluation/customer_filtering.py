@@ -18,7 +18,7 @@ from agent_simulation.vendor.usermirrorer.utils import get_entropy, get_prob, ge
 from agent_simulation.vendor.usermirrorer.filtering import behavior_sampling, data_filtering
 
 from agent_simulation.evaluation.customer_quality import FIELDS, assess_record, behavior_stratum
-from agent_simulation.evaluation.customer_evidence import check_evidence
+from agent_simulation.evaluation.customer_evidence import check_evidence, compact_sources
 from agent_simulation.evaluation.customer_contract import single_item_actions, single_item_schema, validate_request_splits
 
 
@@ -89,19 +89,27 @@ class OptionPredictor:
 
     def _single_score(self, binding, trajectory):
         actions = single_item_actions([p["item_id"] for p in binding.displayed])
-        labels = [str(i) for i in range(len(actions))]
-        token_ids = [self.client.tokenizer.encode(label, add_special_tokens=False) for label in labels]
-        require(all(len(ids) == 1 for ids in token_ids), "Single-item labels must each be one token")
-        allowed = [ids[0] for ids in token_ids]
-        require(len(set(allowed)) == len(allowed), "Duplicate option tokens")
-        evidence = {"context": binding.initial_context(), "rationale": trajectory.get("rationale", {}),
+        # Qwen tokenizers can split multi-digit labels. Keep the one-token
+        # probability protocol and existing numeric labels where supported.
+        import string
+        labels, allowed = [], []
+        for label in [*(str(i) for i in range(len(actions))), *string.ascii_letters]:
+            ids = self.client.tokenizer.encode(label, add_special_tokens=False)
+            if len(ids) == 1 and ids[0] not in allowed:
+                labels.append(label)
+                allowed.append(ids[0])
+            if len(labels) == len(actions):
+                break
+        require(len(labels) == len(actions), "Tokenizer lacks enough distinct single-token option labels")
+        evidence = {"context": compact_sources(binding.initial_context()), "rationale": trajectory.get("rationale", {}),
                     "observations": [{"name": call["name"], "returned_content": call.get("returned_content")}
                         for call in trajectory["trace"].get("tools", [])],
                     "options": dict(zip(labels, actions, strict=True))}
         messages = [{"role": "system", "content": "Predict this user's observed behavior. Output exactly one "
             "option label. No action is a normal option. Do not infer a purchase from a click. "
-            "The supplied explanation, if any, is a hypothesis, not a fact."},
-            {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)}]
+            "The supplied explanation, if any, is a hypothesis, not a fact. "
+            "Candidate attribute facts map fact IDs to [field, value, optional metadata]; facts follow fact_layout."},
+            {"role": "user", "content": json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}]
         prompt = prompt_tokens(messages, [], self.client.tokenizer)
         if len(prompt) + 1 > self.context_limit:
             raise ContextCapacityError("Option predictor context overflow")
@@ -123,7 +131,7 @@ class OptionPredictor:
         if binding.context.get("response_action_mode") == "single_item":
             return self._single_score(binding, trajectory)
         # No generator action and no target enter the predictor context.
-        evidence = {"context": binding.initial_context(), "rationale": trajectory["rationale"],
+        evidence = {"context": compact_sources(binding.initial_context()), "rationale": trajectory["rationale"],
                     "observations": [{"name": call["name"], "returned_content": call.get("returned_content"),
                                       "error": call.get("error")} for call in trajectory["trace"].get("tools", [])]}
         messages = [{"role": "system", "content":
@@ -131,8 +139,9 @@ class OptionPredictor:
             "For the indicated candidate output exactly one label: A=neither clicked nor purchased; "
             "B=clicked only; C=purchased only; D=both clicked and purchased. "
             "Other candidates can also be clicked/purchased; all candidates can receive A. "
-            "Do not output an explanation. Treat the supplied explanation as a hypothesis, not a fact."},
-            {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)}]
+            "Do not output an explanation. Treat the supplied explanation as a hypothesis, not a fact. "
+            "Candidate attribute facts map fact IDs to [field, value, optional metadata]; facts follow fact_layout."},
+            {"role": "user", "content": json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}]
         prompts = [prompt_tokens([*messages, {"role": "user", "content": f"Candidate item ID: {product['item_id']}"}],
                                  [], self.client.tokenizer) for product in binding.displayed]
         if not prompts:

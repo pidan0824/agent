@@ -14,6 +14,14 @@ Never generate field paths, serialized values or copies of the facts.
 When fact_layout is present, each facts row follows those columns; fact_sources
 holds shared metadata and an optional row metadata object supplies other fields.
 Facts with clicked_items describe clicks, purchased_items describe purchases.
+B facts are prior user snapshots: recent_item_ids contains the complete retained
+ID lists; item_history contains one historical item's attributes and list counts.
+Candidate attribute facts map P fact IDs to [field, value, optional metadata].
+related_history gives matching visible
+attributes and their fact_ref, not a preference verdict. Cite those B/H references
+when using history, and P references for candidate attributes. Snapshot counts
+must cite snapshot_interactions.fact_ref, never a product-title reference.
+Use a few directly relevant references per stage; do not list every available ID.
 A citation proves source availability, not that a preference inference is true.
 Mark tentative inferences and unknowns in ordinary EKB prose. Do not infer price
 preferences from a click alone, purchases from clicks, or currency from raw prices.
@@ -38,6 +46,11 @@ def attach_sources(context):
     """Build deterministic IDs for visible facts; replace duplicate raw fact bodies."""
     facts = dict(context.pop("facts", {}))
     actor = context.get("evidence_actor_id")
+    summary = context.pop("behavioral_summary", None)
+    if summary is not None:
+        from agent_simulation.evaluation.customer_background import snapshot_facts
+        facts.update(snapshot_facts(summary, actor, context["history_cutoff_exclusive"]))
+    has_background = any(f.get("kind") == "background" for f in facts.values())
     def add(prefix, source, field, value, time_index=None, item_id=None, owner=None):
         if value is None:
             return
@@ -62,7 +75,9 @@ def attach_sources(context):
         for item in group:
             shop_fields[item] = fields
     for product in displayed:
-        for field in PRODUCT_FIELDS + shop_fields.get(product["item_id"], ()):
+        extra_fields = (("category_level2_name", "seller_id", "seller_name") if has_background
+                        else shop_fields.get(product["item_id"], ()))
+        for field in PRODUCT_FIELDS + extra_fields:
             if field == "seller_id" and not (type(product.get(field)) is int and product[field] > 0):
                 continue
             if field == "seller_name" and str(product.get(field) or "").strip().casefold() in ("", "unknown", "null"):
@@ -89,14 +104,23 @@ def attach_sources(context):
                 fact["not_current_quote"] = True
     context["history_events"] = sorted(events.values(), key=lambda e: (e["time_index"], e["event_id"]))
     context["candidate_context"] = list(products.values())
+    if has_background:
+        from agent_simulation.evaluation.customer_background import candidate_links
+        candidate_links(context)
     return context
 
 
 FACT_LAYOUT = ["source_id", "field", "value", "extra_metadata_optional"]
+CANDIDATE_ENCODING = "attribute-facts-v2"
 FACT_REFS_ENCODING = "derive-from-facts-v1"
 FACT_REFS_NOTE = (
     "Fact references are indexed once in facts. For each history event or candidate, "
     "derive its fact_refs by matching source_id or item_id and mapping field to the fact ID."
+)
+
+CANDIDATE_REFS_NOTE = (
+    "Product fact IDs and values are in candidate attributes. Remaining facts follow fact_layout. "
+    "Derive fact_refs by matching source_id/item_id and mapping field to fact ID."
 )
 
 
@@ -152,7 +176,8 @@ def _compact_fact_refs(context):
     if not rows:
         return
     from agent_simulation.agents.prompts.context_format import compact_json, MIN_TABLE_SAVINGS
-    metadata = {"fact_refs_encoding": FACT_REFS_ENCODING, "fact_refs_note": FACT_REFS_NOTE}
+    note = CANDIDATE_REFS_NOTE if any("attributes" in r for r in context.get("candidate_context", [])) else FACT_REFS_NOTE
+    metadata = {"fact_refs_encoding": FACT_REFS_ENCODING, "fact_refs_note": note}
     # Each affected object keeps other fields: replacing braces with one comma
     # gives the exact compact JSON size change, including both metadata fields.
     removed_size = sum(len(compact_json({"fact_refs": refs})) - 1 for _, refs in rows)
@@ -167,7 +192,7 @@ def compact_sources(context):
     """Lossless wire format: source metadata once, unchanged fact IDs and values."""
     from collections import defaultdict
     from agent_simulation.data.common import require
-    require(not {"fact_layout", "fact_sources", "fact_refs_encoding", "fact_refs_note", "history_item_tables"}.intersection(context),
+    require(not {"fact_layout", "fact_sources", "fact_refs_encoding", "fact_refs_note", "history_item_tables", "candidate_attributes_encoding"}.intersection(context),
             "Context is already encoded or uses reserved fact fields")
     result = deepcopy(context)
     if "facts" not in result:
@@ -190,6 +215,23 @@ def compact_sources(context):
             if extra:
                 packed[key].append(extra)
     result.update(fact_layout=list(FACT_LAYOUT), fact_sources=sources, facts=packed)
+    # The model reads each candidate's attributes and citation IDs together.
+    # Move their values instead of duplicating the flat product facts on the wire.
+    moved = False
+    for item in result.get("candidate_context", []):
+        if "attributes" not in item:
+            continue
+        entries = {}
+        for key, fact in context["facts"].items():
+            if fact.get("kind") == "product" and fact["item_id"] == item["item_id"]:
+                row = packed.pop(key)
+                entries[key] = [fact["field"], row[2], *row[3:]]
+        require({entry[0]: entry[1] for entry in entries.values()} == item["attributes"],
+                "Conflicting candidate attributes")
+        item["attributes"] = entries
+        moved = True
+    if moved:
+        result["candidate_attributes_encoding"] = CANDIDATE_ENCODING
     # Reuse the shared table format inside multi-item historical action facts.
     # Fact IDs, source metadata, action order and per-observation prices stay intact.
     from agent_simulation.agents.prompts.context_format import pack, compact_json, MIN_TABLE_SAVINGS
@@ -221,10 +263,11 @@ def expand_sources(context):
     derived_refs = "fact_refs_encoding" in context or "fact_refs_note" in context
     if derived_refs:
         require(context.get("fact_refs_encoding") == FACT_REFS_ENCODING and
-                context.get("fact_refs_note") == FACT_REFS_NOTE and "fact_layout" in context,
+                context.get("fact_refs_note") in (FACT_REFS_NOTE, CANDIDATE_REFS_NOTE) and "fact_layout" in context,
                 "Invalid derived fact reference encoding")
     if "fact_layout" not in context:
-        require("fact_sources" not in context, "Missing compact fact layout")
+        require("fact_sources" not in context and "candidate_attributes_encoding" not in context,
+                "Missing compact fact layout")
         return context
     require(context["fact_layout"] == FACT_LAYOUT, "Unknown compact fact layout")
     result = deepcopy(context)
@@ -233,6 +276,36 @@ def expand_sources(context):
     result.pop("history_item_tables", None)
     require(isinstance(sources, dict) and isinstance(result.get("facts"), dict),
             "Invalid compact fact tables")
+    if "candidate_attributes_encoding" in result:
+        candidate_encoding = result.pop("candidate_attributes_encoding")
+        require(candidate_encoding in ("attribute-facts-v1", CANDIDATE_ENCODING),
+                "Unknown candidate attribute encoding")
+        for item in result.get("candidate_context", []):
+            require(isinstance(item, dict), "Invalid candidate attribute row")
+            if "attributes" not in item:
+                continue
+            require(type(item.get("item_id")) is int and isinstance(item["attributes"], dict),
+                    "Invalid candidate attribute table")
+            values = {}
+            for identity, entry in item["attributes"].items():
+                require(isinstance(entry, list) and len(entry) in (2, 3),
+                        "Invalid candidate attribute fact")
+                if candidate_encoding == "attribute-facts-v1":
+                    field, key = identity, entry[0]
+                else:
+                    key, field = identity, entry[0]
+                value = entry[1]
+                require(isinstance(field, str) and field not in values,
+                        "Duplicate or invalid candidate attribute")
+                require(isinstance(key, str) and key not in result["facts"],
+                        "Duplicate candidate fact ID")
+                source = "item:" + str(item["item_id"])
+                require(isinstance(sources.get(source), dict) and sources[source].get("kind") == "product"
+                        and sources[source].get("item_id") == item["item_id"],
+                        "Wrong candidate attribute source")
+                result["facts"][key] = [source, field, value, *entry[2:]]
+                values[field] = value
+            item["attributes"] = values
     facts = {}
     for key, row in result["facts"].items():
         require(isinstance(row, list) and len(row) in (3, 4), "Invalid compact fact row")
@@ -338,6 +411,22 @@ def check_evidence(trajectory):
                     reasons.append("wrong_actor_evidence")
                 if fact["field"] not in ("query", "clicked_items", "purchased_items"):
                     reasons.append("invalid_behavior_type")
+            if fact["kind"] == "background":
+                when = fact.get("time_index")
+                if type(when) is not int or when < 0 or cutoff is None or when >= cutoff:
+                    reasons.append("non_prior_evidence")
+                if actor is None or fact.get("actor_id") != actor:
+                    reasons.append("wrong_actor_evidence")
+                source = f"background:{fact.get('actor_id')}:{when}"
+                item = fact.get("item_id")
+                if fact.get("field") == "item_history":
+                    source += f":item:{item}"
+                    if type(item) is not int or not isinstance(fact.get("value"), dict) or fact["value"].get("item_id") != item:
+                        reasons.append("wrong_item_evidence")
+                elif fact.get("field") != "recent_item_ids" or item is not None:
+                    reasons.append("invalid_behavior_type")
+                if fact.get("source_id") != source:
+                    reasons.append("wrong_background_source")
             if fact["kind"] == "product":
                 if fact["source_id"] != "item:" + str(fact["item_id"]):
                     reasons.append("wrong_item_evidence")

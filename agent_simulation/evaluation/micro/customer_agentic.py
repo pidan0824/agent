@@ -64,10 +64,10 @@ class FrozenSampleTools:
             "available_history_events": len(self.history),
             "memory_status": "No generated long-term memory is supplied in the observed-data evaluation.",
         }
+        if self.context.get("behavioral_summary") is not None:
+            result["behavioral_summary"] = deepcopy(self.context["behavioral_summary"])
         if self.stage == "response":
-            result.update(query=self.context["query"], displayed_items=[
-                {key: product.get(key) for key in ("item_id", "item_title", "price_raw")}
-                for product in self.displayed])
+            result.update(query=self.context["query"], displayed_items=deepcopy(self.displayed))
         return result
 
     def initial_context(self):

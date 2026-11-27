@@ -78,6 +78,9 @@ def scene_evidence(binding):
     from agent_simulation.evaluation.customer_context import normalize_query
     query = normalize_query(binding.context.get("query", ""))
     for fact in facts.values():
+        if fact["kind"] == "background" and fact["field"] == "recent_item_ids":
+            for values in fact["value"].values():
+                supported_ids.update(values)
         if fact["kind"] != "history":
             continue
         if fact["field"] in ("clicked_items", "purchased_items"):

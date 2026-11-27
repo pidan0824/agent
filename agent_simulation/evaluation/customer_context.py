@@ -77,41 +77,56 @@ def history_relevance(context, *, include_weak=True):
 
 
 def budget_history(context, history, *, stage, tokenizer, budget, event_limit=None, relevance=None):
-    """Fit whole historical events; keep recent and relevant evidence, never labels."""
+    """Fit complete search events and snapshot item details in one history budget."""
     from agent_simulation.evaluation.customer_evidence import attach_sources, encode_context
-    # Product/query facts and collision fields do not change during event selection.
+    from agent_simulation.evaluation.customer_background import match_priority
+    # Full retained ID sequences remain visible, even if a detail record cannot fit.
     base = attach_sources({k: deepcopy(v) for k, v in context.items() if k != "observed_history"})
-    def render(events):
+    details = {key: fact for key, fact in base["facts"].items()
+               if fact["kind"] == "background" and fact["field"] == "item_history"}
+    base["facts"] = {key: fact for key, fact in base["facts"].items() if key not in details}
+    def render(events, items=()):
         value = deepcopy(base)
+        value["facts"].update({key: details[key] for key in items})
         value["observed_history"] = sorted(events, key=lambda e: (e["time_index"], e["session_id"]))
         value["selected_history_events"] = len(events)
         value["history_token_budget"] = budget
+        if details:
+            value["snapshot_detail_selection"] = {"available": len(details), "shown": len(items)}
         return attach_sources(value)
     empty = render([])
-    if not budget or not history:
+    if not budget or not (history or details):
         return empty
     def tokens(value):
         return len(tokenizer.encode(encode_context(value), add_special_tokens=False))
     baseline = tokens(empty)
     if event_limit is None or len(history) <= event_limit:
-        complete = render(history)
+        complete = render(history, details)
         if tokens(complete) - baseline <= budget:
             return complete
     if relevance is None:
         relevance = history_relevance(context) if stage == "response" else lambda event: HistoryRelevance(False, False)
-    latest = max(history, key=lambda e: (e["time_index"], e["session_id"]))
+    latest = max(history, key=lambda e: (e["time_index"], e["session_id"])) if history else None
     def priority(event):
         same_item, same_query, lexical, category = relevance(event)
         return (event is not latest, not same_item, not same_query, -lexical, -category,
                 -event["time_index"], event["session_id"])
-    selected, result = [], empty
-    for event in sorted(history, key=priority):
-        if event_limit is not None and len(selected) >= event_limit:
-            break
-        proposed = render([*selected, event])
+    units = [(priority(event), "event", event) for event in history]
+    for key, fact in details.items():
+        item = fact["value"]
+        matches = [match_priority(product, item) for product in context.get("displayed_items", [])]
+        same, brand, shop, lexical, cat3, cat2 = max(matches, default=(False, False, False, 0., False, False))
+        units.append(((True, not same, True, -(brand + shop + lexical), -(3 if cat3 else 2 if cat2 else 0),
+                       -fact["time_index"], item["item_id"]), "detail", key))
+    selected, shown, result = [], [], empty
+    for _, kind, value in sorted(units, key=lambda unit: unit[0]):
+        if kind == "event" and event_limit is not None and len(selected) >= event_limit:
+            continue
+        events = [*selected, value] if kind == "event" else selected
+        items = [*shown, value] if kind == "detail" else shown
+        proposed = render(events, items)
         if tokens(proposed) - baseline <= budget:
-            selected.append(event)
-            result = proposed
+            selected, shown, result = events, items, proposed
     return result
 
 
