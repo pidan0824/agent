@@ -100,7 +100,7 @@ def scene_evidence(binding):
 
 
 def budget_scenes(jobs, budget, seed, audit, *, history_token_budget=None, tokenizer=None, context_cache=None,
-                  response_context_protocol="legacy", readable_stage="A", readable_history_policy="frozen"):
+                  response_context_protocol="legacy", readable_stage="A", readable_history_policy="budgeted"):
     """Top evidence within behavior/domain strata, round-robin allocation.
 
     Labels are used only for coverage strata. Priority uses visible inputs only.
