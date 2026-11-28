@@ -60,6 +60,16 @@ def initial_agentic_request(messages, tools, options=None):
     options = options_from(options)
     conversation = deepcopy(messages)
     available = deepcopy(tools)
+    if not available:
+        for message in conversation:
+            if message.get("role") != "user":
+                continue
+            try:
+                context = json.loads(message.get("content") or "")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(context, dict) and context.get("context_protocol") == "readable-v1" and context.get("information_mode") == "fixed":
+                return conversation, available, None
     has_budget = any(m.get("role") == "user" and str(m.get("content", "")).startswith(BUDGET_PREFIX)
                      for m in conversation)
     budget_index = (len(conversation) - 1 if has_budget and conversation[-1].get("role") == "user"
@@ -117,10 +127,11 @@ async def run_agentic_workflow(*, messages, tools, complete, execute_tool, valid
             budget = budget_message(options, turn=turn, tools_used=len(trace["tools"]),
                 tool_output_chars=trace["tool_output_chars"], model_output_chars=trace["model_output_chars"],
                 available=bool(available))
-            if turn:
-                conversation.append(budget)
-            else:
-                conversation[budget_index] = budget
+            if budget_index is not None:
+                if turn:
+                    conversation.append(budget)
+                else:
+                    conversation[budget_index] = budget
             call = {"index": turn + 1, "messages": deepcopy(conversation),
                     "tools": deepcopy(tools), "tools_enabled": bool(available)}
             trace["model_calls"].append(call)

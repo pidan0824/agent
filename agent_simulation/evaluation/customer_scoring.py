@@ -79,7 +79,7 @@ def main(argv=None):
                               "tokenizer_config_sha256": sha256(args.predictor_tokenizer / "tokenizer_config.json"),
                               "context_limit": args.context_limit},
                 "source_sha256": {name: sha256(Path(__file__).with_name(name))
-                                  for name in ("customer_scoring.py", "customer_filtering.py", "customer_run.py", "customer_evidence.py")}}
+                                  for name in ("customer_scoring.py", "customer_filtering.py", "customer_run.py", "customer_evidence.py", "customer_readable.py")}}
     require(args.output.exists() if args.resume else not args.output.exists(),
             "Resume needs an existing scoring run; otherwise use a new directory")
     args.output.mkdir(parents=True, exist_ok=args.resume)

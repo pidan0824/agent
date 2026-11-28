@@ -33,7 +33,8 @@ from agent_simulation.inference.requests import load_tokenizer, ContextCapacityE
 
 
 def observed_action_rows(request, identity, split, dataset_identity, *, bundle=None, policies=None,
-                         history_token_budget=None, tokenizer=None, context_cache=None):
+                         history_token_budget=None, tokenizer=None, context_cache=None,
+                         response_context_protocol="legacy", readable_stage="A", readable_history_policy="frozen"):
     """Observed actions use prepared child scenes; explicit raw protocols keep full labels."""
     if split != "train":
         return []
@@ -46,7 +47,9 @@ def observed_action_rows(request, identity, split, dataset_identity, *, bundle=N
     result = []
     for stage, policy, adapted, candidate in generation_jobs(request, bundle=bundle, policies=observed_policies):
         binding = CurationTools(adapted, stage, mode="fixed", theory=False,
-                               history_token_budget=history_token_budget, tokenizer=tokenizer, context_cache=context_cache)
+                               history_token_budget=history_token_budget, tokenizer=tokenizer, context_cache=context_cache,
+                               response_context_protocol=response_context_protocol,
+                               readable_stage=readable_stage, readable_history_policy=readable_history_policy)
         schemas, prompt = trajectory_messages(binding, role="customer", stage=stage, theory=False)
         prompt, _, _ = initial_agentic_request(prompt, [], AgenticOptions(max_model_calls=1, theory=False))
         target = deepcopy(adapted[stage + "_target"])
@@ -64,6 +67,10 @@ def observed_action_rows(request, identity, split, dataset_identity, *, bundle=N
                "evaluation_protocol": "outcome_conditioned_single_positive" if single else "independent_behavior_prediction",
                "behavior_source": "observed_action; scene-aligned input; no generated rationale"}
         if stage == "response":
+            if binding.response_context_protocol == "readable-v1":
+                frozen_context = binding.initial_context()
+                row.update(context_protocol="readable-v1", readable_stage=frozen_context["readable_stage"],
+                           evidence_context=deepcopy(frozen_context))
             row["candidate_item_ids"] = [p["item_id"] for p in binding.displayed]
         if single:
             require(candidate["source_request_id"] == identity and
@@ -124,6 +131,9 @@ def parser():
     p.add_argument("--sft-only", action="store_true", help="Generate strong teacher only; skip weak model, option predictor and DPO")
     p.add_argument("--cot-sft", action="store_true",
                    help="Stage fixed teacher outputs for reviewed CoT/action-only comparison; no automatic SFT export")
+    p.add_argument("--response-context-protocol", choices=("legacy", "readable-v1"), default="legacy")
+    p.add_argument("--readable-stage", choices=("A", "B", "C"), default="A")
+    p.add_argument("--readable-history-policy", choices=("frozen", "budgeted"), default="frozen")
     p.add_argument("--cot-preset", choices=["original", "lightweight"], default="original",
                    help="Lightweight: fixed concise EKB, one sample, 768 tokens, temperature 0; SFT-only or deferred scoring")
     p.add_argument("--scene-concurrency", type=int, help="Bounded concurrent scene arms; default 1, lightweight 4")
@@ -301,7 +311,7 @@ def main(argv=None):
                     "scenes_manifest_sha256": sha256(args.scenes / "manifest.json") if prepared else None,
                     "source_sha256": {name: sha256(Path(__file__).parents[1] / name) for name in (
                         "evaluation/customer_curation.py", "evaluation/customer_generation.py", "evaluation/customer_context.py", "evaluation/customer_cot.py",
-                        "evaluation/customer_background.py", "evaluation/micro/customer_agentic.py",
+                        "evaluation/customer_background.py", "evaluation/customer_readable.py", "evaluation/micro/customer_agentic.py",
                         "agents/prompts/customer_agentic.py", "evaluation/customer_filtering.py", "evaluation/customer_quality.py",
                         "evaluation/customer_evidence.py", "evaluation/customer_contract.py", "evaluation/trajectories.py",
                         "datasets/customer_candidates.py", "agents/prompts/customer_ekb.py", "inference/agentic.py",
@@ -349,7 +359,8 @@ def main(argv=None):
             binding = CurationTools(adapted, stage, mode=mode, theory=use_theory,
                                    concise=args.cot_preset == "lightweight",
                                    history_token_budget=args.history_token_budget, tokenizer=data.tokenizer,
-                                   context_cache=context_cache)
+                                   context_cache=context_cache, response_context_protocol=args.response_context_protocol,
+                                   readable_stage=args.readable_stage, readable_history_policy=args.readable_history_policy)
             options = AgenticOptions(max_model_calls=1 if mode == "fixed" else args.max_model_calls,
                                      max_tool_calls=args.max_tool_calls, theory=use_theory)
             async def one(sample):
@@ -413,7 +424,9 @@ def main(argv=None):
                 observed.extend(observed_action_rows(request, identity, args.split,
                     manifest["dataset_manifest_sha256"], bundle=prepared.get(identity),
                     policies=args.candidate_policies, history_token_budget=args.history_token_budget,
-                    tokenizer=data.tokenizer, context_cache=context_cache))
+                    tokenizer=data.tokenizer, context_cache=context_cache,
+                    response_context_protocol=args.response_context_protocol, readable_stage=args.readable_stage,
+                    readable_history_policy=args.readable_history_policy))
             observed_text = "".join(encoded(row) + "\n" for row in observed)
             observed_path = args.output / "observed-actions.jsonl"
             if observed_path.exists():
@@ -428,7 +441,8 @@ def main(argv=None):
             with (args.output / "teacher-scene-evidence.jsonl").open("w") as audit:
                 jobs, budget_report = budget_scenes(jobs, args.teacher_budget, args.seed, audit,
                     history_token_budget=args.history_token_budget, tokenizer=data.tokenizer,
-                    context_cache=context_cache)
+                    context_cache=context_cache, response_context_protocol=args.response_context_protocol,
+                    readable_stage=args.readable_stage, readable_history_policy=args.readable_history_policy)
             (args.output / "teacher-budget.json").write_text(encoded(budget_report) + "\n")
 
         with (args.output / "records.jsonl").open("w") as output:

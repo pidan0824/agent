@@ -190,6 +190,9 @@ def _compact_fact_refs(context):
 
 def compact_sources(context):
     """Lossless wire format: source metadata once, unchanged fact IDs and values."""
+    if context.get("context_protocol") == "readable-v1":
+        from agent_simulation.evaluation.customer_readable import readable_view
+        return readable_view(context)
     from collections import defaultdict
     from agent_simulation.data.common import require
     require(not {"fact_layout", "fact_sources", "fact_refs_encoding", "fact_refs_note", "history_item_tables", "candidate_attributes_encoding"}.intersection(context),
@@ -343,6 +346,9 @@ def expand_sources(context):
 
 
 def encode_context(context):
+    if context.get("context_protocol") == "readable-v1":
+        from agent_simulation.evaluation.customer_readable import readable_view
+        return json.dumps(readable_view(context), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     return json.dumps(compact_sources(context), ensure_ascii=False, allow_nan=False,
                       separators=(",", ":"))
 
@@ -361,6 +367,9 @@ def check_evidence(trajectory):
             valid = False
         return {"accepted": valid, "status": "not_applicable" if valid else "failed",
                 "reasons": [] if valid else ["original_transcript_mismatch"]}
+    if trajectory.get("context_protocol") == "readable-v1":
+        from agent_simulation.evaluation.customer_readable import readable_check
+        return readable_check(trajectory)
     rationale = trajectory.get("rationale", {})
     annotations = rationale.get("evidence_refs")
     if not annotations:

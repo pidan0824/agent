@@ -110,6 +110,10 @@ class OptionPredictor:
             "The supplied explanation, if any, is a hypothesis, not a fact. "
             "Candidate attribute facts map fact IDs to [field, value, optional metadata]; facts follow fact_layout."},
             {"role": "user", "content": json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}]
+        if evidence["context"].get("context_protocol") == "readable-v1":
+            messages[0]["content"] = messages[0]["content"].replace(
+                "Candidate attribute facts map fact IDs to [field, value, optional metadata]; facts follow fact_layout.",
+                "Histories and candidate attributes are directly readable; use the supplied item IDs.")
         prompt = prompt_tokens(messages, [], self.client.tokenizer)
         if len(prompt) + 1 > self.context_limit:
             raise ContextCapacityError("Option predictor context overflow")
@@ -142,6 +146,10 @@ class OptionPredictor:
             "Do not output an explanation. Treat the supplied explanation as a hypothesis, not a fact. "
             "Candidate attribute facts map fact IDs to [field, value, optional metadata]; facts follow fact_layout."},
             {"role": "user", "content": json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}]
+        if evidence["context"].get("context_protocol") == "readable-v1":
+            messages[0]["content"] = messages[0]["content"].replace(
+                "Candidate attribute facts map fact IDs to [field, value, optional metadata]; facts follow fact_layout.",
+                "Histories and candidate attributes are directly readable; use the supplied item IDs.")
         prompts = [prompt_tokens([*messages, {"role": "user", "content": f"Candidate item ID: {product['item_id']}"}],
                                  [], self.client.tokenizer) for product in binding.displayed]
         if not prompts:
@@ -210,7 +218,7 @@ def select_sft(records, *, variants=("strong",), _check_evidence=None):
         if not evidence["accepted"]:
             continue
         meta = {key: t[key] for key in ("role", "actor_id", "stage", "initial_state_id", "source_split")}
-        meta.update({key: deepcopy(t[key]) for key in ("source_request_id", "scene_id", "source_response_target", "dataset_manifest_sha256", "response_style", "action_mode", "evaluation_protocol") if key in t})
+        meta.update({key: deepcopy(t[key]) for key in ("source_request_id", "scene_id", "source_response_target", "dataset_manifest_sha256", "response_style", "action_mode", "evaluation_protocol", "context_protocol", "readable_stage", "evidence_context") if key in t})
         value = {**meta, "trajectory_id": t["trajectory_id"], "tools": deepcopy(t["tools"]),
                  "messages": deepcopy(t["messages"]), "score": quality["metrics"]["score"],
                  "quality": quality, "evidence_quality": evidence,
@@ -273,7 +281,7 @@ def _pair(good, bad, *, protocol, selection_metric, selection_value):
     require(a["messages"][prefix]["role"] == b["messages"][prefix]["role"] == "assistant",
             "Preference continuation must start with assistant")
     meta = {key: a[key] for key in ("role", "actor_id", "stage", "initial_state_id", "source_split")}
-    meta.update({key: deepcopy(a[key]) for key in ("source_request_id", "scene_id", "source_response_target", "dataset_manifest_sha256", "response_style", "action_mode", "evaluation_protocol") if key in a})
+    meta.update({key: deepcopy(a[key]) for key in ("source_request_id", "scene_id", "source_response_target", "dataset_manifest_sha256", "response_style", "action_mode", "evaluation_protocol", "context_protocol", "readable_stage", "evidence_context") if key in a})
     return {**meta, "prompt": deepcopy(a["prompt"]), "tools": deepcopy(a["tools"]),
         "chosen": deepcopy(a["messages"][prefix:]), "rejected": deepcopy(b["messages"][prefix:]),
         "chosen_trajectory_id": a["trajectory_id"], "rejected_trajectory_id": b["trajectory_id"],
@@ -477,6 +485,12 @@ def combine_observed_sft(selected, records, observed):
                 except (ValueError, TypeError):
                     pass
         context = next((c for c in contexts if isinstance(c, dict) and "facts" in c), None)
+        if row.get("context_protocol") == "readable-v1":
+            from agent_simulation.evaluation.customer_readable import readable_view, validate_sources
+            context = row.get("evidence_context")
+            require(isinstance(context, dict), "Missing observed readable sidecar")
+            validate_sources(context)
+            require(readable_view(context) in contexts, "Observed readable facts differ from transcript")
         require(context is not None, "Observed action lacks frozen facts")
         require(context.get("evidence_actor_id") == row["actor_id"], "Observed action actor mismatch")
         ids = [p["item_id"] for p in context.get("candidate_context", [])]

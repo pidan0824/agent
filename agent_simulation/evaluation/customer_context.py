@@ -176,11 +176,21 @@ class ContextCache:
 
 class CurationTools(FrozenSampleTools):
     def __init__(self, request, stage, *, mode, theory=True, history_limit=10, concise=False,
-                 history_token_budget=None, tokenizer=None, context_cache=None):
+                 history_token_budget=None, tokenizer=None, context_cache=None,
+                 response_context_protocol='legacy', readable_stage='A', readable_history_policy='frozen'):
         super().__init__(request, stage, theory=theory)
         require(mode in ("fixed", "autonomous"), "Unknown information mode")
         require(type(history_limit) is int and history_limit >= 0, "Nonnegative integer history limit required")
         self.mode, self.history_limit = mode, history_limit
+        require(response_context_protocol in ("legacy", "readable-v1"), "Unknown Response context protocol")
+        require(readable_stage in ("A", "B", "C") and readable_history_policy in ("frozen", "budgeted"),
+                "Unknown readable options")
+        self.response_context_protocol = response_context_protocol if stage == "response" else "legacy"
+        self.readable_stage, self.readable_history_policy = readable_stage, readable_history_policy
+        if self.response_context_protocol == "readable-v1":
+            require(mode == "fixed", "readable-v1 currently supports fixed Response only")
+            if history_token_budget is None:
+                history_token_budget = 2048
         require(history_token_budget is None or (type(history_token_budget) is int and history_token_budget >= 0),
                 "Nonnegative history token budget required")
         require(history_token_budget is None or mode == "fixed", "History token budget requires fixed mode")
@@ -190,7 +200,7 @@ class CurationTools(FrozenSampleTools):
         self._budget_context = None
         self._context_cache = context_cache if mode == "fixed" else None
         self._context_key = (self.fingerprint, stage, mode, history_limit,
-                             history_token_budget, id(tokenizer))
+                             history_token_budget, id(tokenizer), self.response_context_protocol, readable_stage, readable_history_policy)
         self.concise = concise
         if mode == "fixed":
             self.schemas = []
@@ -222,13 +232,23 @@ class CurationTools(FrozenSampleTools):
                 context["history_scope"] = (
                     "Selected events from available history; unshown events may contain other actions.")
             context["observed_history"] = deepcopy(history)
-        if self.history_token_budget is not None:
+        if self.response_context_protocol == "readable-v1" and self.readable_history_policy == "budgeted":
+            from agent_simulation.evaluation.customer_evidence import attach_sources
+            from agent_simulation.evaluation.customer_readable import budget_readable
+            context = attach_sources(context)
+            context.update(readable_stage=self.readable_stage)
+            context = budget_readable(context, tokenizer=self.tokenizer, budget=self.history_token_budget,
+                                     event_limit=self.history_limit)
+        elif self.history_token_budget is not None:
             context = budget_history(context, history, stage=self.stage,
                 tokenizer=self.tokenizer, budget=self.history_token_budget, event_limit=self.history_limit,
                 relevance=relevance)
         else:
             from agent_simulation.evaluation.customer_evidence import attach_sources
             context = attach_sources(context)
+        if self.response_context_protocol == "readable-v1" and context.get("context_protocol") != "readable-v1":
+            from agent_simulation.evaluation.customer_readable import mark_readable
+            context = mark_readable(context, self.readable_stage, self.readable_history_policy)
         if self.history_token_budget is not None or self._context_cache is not None:
             self._budget_context = context
             if self._context_cache is not None:
@@ -237,7 +257,8 @@ class CurationTools(FrozenSampleTools):
         return context
 
 
-def fixed_response_requests(response_input, *, history_limit=10, history_token_budget=None, tokenizer=None):
+def fixed_response_requests(response_input, *, history_limit=10, history_token_budget=None, tokenizer=None,
+                            response_context_protocol="legacy", readable_stage="A", readable_history_policy="frozen"):
     """Use the exact fixed curation prompts and schemas in controlled evaluation."""
     from agent_simulation.agents.agentic import initial_agentic_request, teacher_output
     from agent_simulation.evaluation.trajectories import trajectory_messages
@@ -246,7 +267,9 @@ def fixed_response_requests(response_input, *, history_limit=10, history_token_b
         theory = style == "ekb"
         binding = CurationTools({"response_input": response_input}, "response",
                                mode="fixed", theory=theory, history_limit=history_limit,
-                               history_token_budget=history_token_budget, tokenizer=tokenizer)
+                               history_token_budget=history_token_budget, tokenizer=tokenizer,
+                               response_context_protocol=response_context_protocol,
+                               readable_stage=readable_stage, readable_history_policy=readable_history_policy)
         schemas, messages = trajectory_messages(binding, role="customer", stage="response", theory=theory)
         messages, tools, _ = initial_agentic_request(messages, [], AgenticOptions(max_model_calls=1, theory=theory))
         result[style] = {"messages": messages, "tools": tools,

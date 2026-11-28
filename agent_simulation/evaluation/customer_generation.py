@@ -13,6 +13,8 @@ def resolve_generation_options(args):
     from agent_simulation.evaluation.customer_context import resolve_context_options
     context = resolve_context_options(args.cot_preset, args.modes, args.history_token_budget)
     args.history_token_budget = context["history_token_budget"]
+    if getattr(args, "response_context_protocol", "legacy") == "readable-v1":
+        require(tuple(args.modes) == ("fixed",), "readable-v1 supports fixed mode only")
     light = context["concise"]
     for name, default in (("samples", 1 if light else 10),
                           ("temperature", 0. if light else .7),
@@ -97,7 +99,8 @@ def scene_evidence(binding):
             "identical_visible_groups": collisions, "unsupported_identical_groups": unresolved}
 
 
-def budget_scenes(jobs, budget, seed, audit, *, history_token_budget=None, tokenizer=None, context_cache=None):
+def budget_scenes(jobs, budget, seed, audit, *, history_token_budget=None, tokenizer=None, context_cache=None,
+                  response_context_protocol="legacy", readable_stage="A", readable_history_policy="frozen"):
     """Top evidence within behavior/domain strata, round-robin allocation.
 
     Labels are used only for coverage strata. Priority uses visible inputs only.
@@ -112,7 +115,9 @@ def budget_scenes(jobs, budget, seed, audit, *, history_token_budget=None, token
         require(stage == "response" and mode == "fixed" and style == "ekb",
                 "Teacher budget expects fixed Response EKB scenes")
         features = scene_evidence(CurationTools(adapted, stage, mode=mode, concise=True,
-            history_token_budget=history_token_budget, tokenizer=tokenizer, context_cache=context_cache))
+            history_token_budget=history_token_budget, tokenizer=tokenizer, context_cache=context_cache,
+            response_context_protocol=response_context_protocol, readable_stage=readable_stage,
+            readable_history_policy=readable_history_policy))
         scene_id = str(candidate.get("scene_id", identity))
         stratum = (candidate["domain"], behavior_stratum(adapted["response_target"]))
         priority = (not features["single_candidate"],

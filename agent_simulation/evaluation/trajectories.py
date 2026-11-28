@@ -132,7 +132,21 @@ def trajectory_messages(binding, *, role, stage, theory):
         output = compact if direct else teacher_output([compact], customer_ekb=True)
     from agent_simulation.evaluation.customer_evidence import encode_context
     context = binding.initial_context()
-    messages = [{"role": "system", "content": instructions + "\n" + output_note + encoded(output)},
+    if role == "customer" and stage == "response" and context.get("context_protocol") == "readable-v1":
+        from agent_simulation.evaluation.customer_readable import instructions as readable_instructions
+        from agent_simulation.agents.prompts.instructions import FACT_RULES
+        instructions = (FACT_RULES + "\n" + readable_instructions(context["readable_stage"],
+                         concise=getattr(binding, "concise", False))) if not direct else instructions + (
+                         "\n价格未知的商品不能参与价格高低比较，但仍然可以被选择。")
+        output_note = ("Return rationale (stimulus, stimulus_factors, knowledge, knowledge_factors, "
+                       "evaluation, evaluation_style, evidence_refs) and action JSON. "
+                       if not direct else "Return only the action JSON. ")
+        output_note += ("Choose at most one distinct candidate across clicked_item_ids and purchased_item_ids."
+                        if single else "Return clicked_item_ids and purchased_item_ids from the candidates.")
+        schema_text = ""
+    else:
+        schema_text = encoded(output)
+    messages = [{"role": "system", "content": instructions + "\n" + output_note + schema_text},
                 {"role": "user", "content": encode_context(context) if role == "customer" else encoded(context)}]
     return schemas, messages
 
@@ -162,6 +176,10 @@ async def generate_trajectory(binding, model, *, role, actor_id, stage, record_i
               "status": "running", "trace": trace}
 
     if role == "customer" and stage == "response":
+        if getattr(binding, "response_context_protocol", "legacy") == "readable-v1":
+            frozen_context = binding.initial_context()
+            record.update(context_protocol="readable-v1", readable_stage=frozen_context["readable_stage"],
+                          evidence_context=deepcopy(frozen_context))
         record["candidate_item_ids"] = [p["item_id"] for p in binding.displayed]
     if role == "seller":
         record["previous_prices"] = {str(p["item_id"]): p["last_valid_price_raw"]

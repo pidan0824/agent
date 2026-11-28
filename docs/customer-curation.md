@@ -1327,3 +1327,82 @@ behavior_features约17.5%、报价观测约14.7%、market_semantics说明约11.1
 或邻品方向指导涨跌。尚未把这些信号加入正式Seller上下文，也未调用模型或训练。
 产物：tmp/seller-signal-audit-20261128-cohort/report.json、audit.py、signals.jsonl、
 token-details.jsonl等；失败尝试在tmp/seller-signal-audit-20261128/。
+
+
+### 可读 Response 协议与 A/B/C 离线对照（2026-11-28）
+
+新增 --response-context-protocol readable-v1（默认仍为 legacy）；
+--readable-stage A|B|C 为累积阶段，可以切换，不修改旧轨迹。
+当前只支持 fixed Response；autonomous 的旧工具协议保留，Query 继续使用旧输入，
+不读取当前查询、候选和目标。新模块 customer_readable.py 负责直接可读视图、
+历史预算、引用映射及校验；customer_context.py/curation.py/generation.py 接正式入口，
+customer_evidence.py/过滤与延迟概率打分按协议分派。生成恢复和打分身份包含新源文件。
+
+A 复用旧协议已选中的历史事件、快照商品和候选事实。历史事件直接包含查询、
+点击/购买商品及标题；候选属性直接按字段展示；快照中的完整点击/购买ID序列
+和原已显示商品详情保留。related_history 临时改为可读商品标题、来源事件和匹配字段，
+候选下的 snapshot_interactions 保留。内部事实表和来源索引保存在 evidence_context，
+不作为模型消息；原有统计和时间边界也保留。信息一致性比较针对事实值清单、
+候选属性、事件、完整快照序列以及非传输上下文，不把哈希编码或引用索引作为新事实。
+
+B 在 A 基础上只移除模型候选下的 related_history 和 snapshot_interactions；
+历史交互仍来自 prior_interacted_products 和搜索事件。C 在 B 基础上仅更改计数提示：
+“同一商品的历史点击和购买是重要依据，需结合当前查询和候选之间的差异判断；
+历史交互不等于本次一定点击。”不加入历史最多者必选、历史命中者即答案等规则。
+A/B 系统提示相同，B/C 输入仅阶段标记不同；不把短列表捷径当作选择策略。
+
+两种历史处理方式分开：
+- --readable-history-policy frozen（默认）：用于同信息对照，复用旧预算选择结果。
+  旧预算是相对基础上下文增加的token，不能当作新历史块的绝对上限。
+  原45场景（两个来源有重复）各有一个鞋例历史块为2119 tokens，其余在2048内。
+  不通过删事实伪造 A 的一致性；完整请求仍执行统一容量检查。
+- --readable-history-policy budgeted：沿用 --history-token-budget，默认2048，
+  对实际序列化 history_events + prior_interacted_products 的教师tokenizer精确计数。
+  逐事件/商品完整选择，先统一规则保留候选同ID快照商品，再补最近事件和其他商品；
+  放不下整条跳过，剩余商品只折叠类目与数量。快照商品缺逐品时间，
+  仅保留原序列顺序并明确标注，不能把该顺序写成独立核实的最近交互时间。
+  此方式会改变历史覆盖，不应混入同信息 A/B/C 对照。
+  Query 不应用这些候选优先规则；不按当前标签或次数给候选打分。
+
+价格仅将自身带严格过去时点的记录作为历史价格；缺少时写“未知”，
+且提示未知价格不能参与高低比较、仍然可以被选择。可读模式在构造时
+校验所有事件/快照的用户、时间以及全部候选价格时间，不只检查被引用的事实。
+没有逐品历史时间的快照商品详情不补造价格。
+
+evidence_refs 支持 query、event:<事件号>、item:<商品ID>，以及完整快照可见时的 snapshot。
+程序将其映射回实际可见的内部事实，复用旧的来源/时间/用户/商品检查；
+被折叠的不可见交互不会仅因候选ID相同而成为可引用证据。
+校验先重新生成可读视图并与原始消息逐项匹配，再检查原始输出，
+不修改训练中的解释文本、不把映射后的哈希引用写回原输出。
+语义审查与非零 rationale 门仍保留。旧轨迹继续按旧规则检查。
+
+fixed 可读请求不发 Runtime budget 用户消息；autonomous 和 legacy 保持旧行为。
+系统提示也不重复完整动作 enum：生成客户端 AgenticClient.complete 在无工具时
+仍把完整 final_schema 交给 response_format=json_schema(strict=true)，
+执行后仍做动作与解释schema验证。离线 MockTransport 测试核对实际payload，
+未访问真实服务。概率预测使用相同可读视图，旁路的内部 evidence_context 不进入模型。
+
+重建两个原冻结集合，共45场景实例，保存315份请求（legacy、A/B/C、budgeted-A/B/C）：
+| 集合 | legacy 中位/P90/最大输入tokens | A | B | C |
+|---|---|---|---|---|
+| 11条 | 5180/6830/7160 | 3781/4082/4302 | 2956/3273/3654 | 2966/3283/3664 |
+| 34子场景 | 6613/8163/8903 | 3938/5382.4/6061 | 3151.5/3690.9/3838 | 3161.5/3700.9/3848 |
+
+A相对旧协议的配对token差中位数分别-1864、-2139.5；
+B为-2122、-3329.5，C为-2112、-3319.5（配对差中位数不等于各列中位数之差）。
+A 45/45 事实值一致；B移除字段、C提示差异检查通过；
+direct/CoT/延迟概率输入相同，修改目标不影响请求。
+教师Qwen3-32B与学生Qwen3.5-9B真实tokenizer均验证容量：
+A/B/C全部可在8192内预留768输出；旧34子场景有5条不满足，原样保留并列出。
+所有budgeted历史块<=2048。没有过滤掉容量不足的旧场景。
+
+新增13项协议测试，evaluation合计233项通过、0项失败。
+测试包括来源篡改、隐藏证据引用拒绝、Query不变、缓存隔离、严格解码payload、
+解释经机械检查/导出保留以及有无CoT对照输入一致性。假输出只用于测试，
+不是新生成CoT或语义质量证据。未调用真实LLM、未训练，尚未验证效果。
+
+产物：tmp/readable-context-20261128/manifest.json、rebuild.py、rebuild-v2.py，
+run2/report.json、details.jsonl、requests.jsonl 和 examples/ 原始A/B/C输入。
+原始冻结集合只有两个不同鞋子场景（227325、3407032），不是三个；
+均已保存两个来源的原输入，外套202712、353512也均保存，没有编造第三个鞋例。
+run1保留首次容量断言失败的现场；run2保留全部场景并报告容量失败，未覆盖旧产物。
