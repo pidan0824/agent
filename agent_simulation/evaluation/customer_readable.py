@@ -7,6 +7,57 @@ from agent_simulation.data.common import require
 
 PROTOCOL = "readable-v1"
 STAGES = ("A", "B", "C")
+CUSTOMER_RULES = """
+Use the supplied Customer observations. Raw prices retain their source numbers;
+currency and unit are unconfirmed. Missing values are unknown, not zero.
+time_index is an ordering clock, not a calendar duration.
+历史快照与搜索事件有重叠，不要累计；未显示的历史可能还有其他行为。
+候选共用店铺见 candidate_shop；商品单独标注的店铺为例外。
+"""
+HISTORY_PRODUCT_FIELDS = ("item_id", "item_title", "brand_name", "category_level2_name",
+                          "category_level3_name", "seller_name", "price_raw")
+BUDGETED_VIEW = "customer-v2"
+_MODEL_METADATA = {"snapshot_detail_selection", "history_scope", "background_history_scope",
+                   "memory_status", "information_mode", "history_token_budget",
+                   "context_protocol", "readable_stage", "readable_history_policy",
+                   "readable_history_tokens", "evidence_actor_id", "history_cutoff_exclusive",
+                   "available_history_events", "selected_history_events", "candidate_protocol"}
+
+
+def customer_budget_view(view):
+    """Presentation-only pruning; provenance and unabridged facts stay in the sidecar."""
+    value = deepcopy(view)
+    for key in _MODEL_METADATA:
+        value.pop(key, None)
+    features = value.get("behavior_features", {})
+    for key in ("limitations", "schema", "historical_cutoff_exclusive"):
+        features.pop(key, None)
+    features.get("observed", {}).pop("clock", None)
+    features.get("background_snapshot", {}).pop("interpretation", None)
+    for event in value["history_events"]:
+        for field in ("clicked_items", "purchased_items"):
+            if field in event:
+                event[field] = [{k: deepcopy(p[k]) for k in HISTORY_PRODUCT_FIELDS if k in p}
+                                for p in event[field]]
+    # Budgeted product lines supersede the raw ID sequences.
+    snapshot = value.get("prior_interacted_products", {})
+    for field in ("recent_clicked_item_ids", "recent_purchased_item_ids", "scope"):
+        snapshot.pop(field, None)
+    for product in snapshot.get("products", []):
+        product.pop("seller_id", None)
+    snapshot.get("folded", {}).pop("order", None)
+    candidates = value["candidate_context"]
+    shops = Counter((p["attributes"].get("seller_id"), p["attributes"].get("seller_name"))
+                    for p in candidates if p["attributes"].get("seller_name"))
+    if shops:
+        (seller_id, seller_name), count = shops.most_common(1)[0]
+        if type(seller_id) is int and seller_id > 0 and count >= 2 and count > len(candidates) / 2:
+            value["candidate_shop"] = {"seller_id": seller_id, "seller_name": seller_name}
+            for p in candidates:
+                if (p["attributes"].get("seller_id"), p["attributes"].get("seller_name")) == (seller_id, seller_name):
+                    p["attributes"].pop("seller_id", None)
+                    p["attributes"].pop("seller_name", None)
+    return value
 
 
 def readable_view(context):
@@ -15,7 +66,7 @@ def readable_view(context):
     c = expand_sources(deepcopy(context))
     facts = c["facts"]
     exclude = {"facts", "history_events", "candidate_context", "context_protocol",
-               "readable_stage", "readable_history_policy", "_folded_snapshot"}
+               "readable_stage", "readable_history_policy", "_folded_snapshot", "_readable_view_version"}
     view = {k: deepcopy(v) for k, v in c.items() if k not in exclude}
     view.update(context_protocol=PROTOCOL, readable_stage=c["readable_stage"],
                 readable_history_policy=c.get("readable_history_policy", "frozen"))
@@ -69,7 +120,7 @@ def readable_view(context):
                        if k not in ("fact_ref", "item_id")}})
         products.append(p)
     view["candidate_context"] = products
-    return view
+    return customer_budget_view(view) if c.get("_readable_view_version") == BUDGETED_VIEW else view
 
 
 def reference_map(context, view=None):
@@ -118,6 +169,8 @@ def mark_readable(context, stage="A", policy="frozen"):
     require(stage in STAGES and policy in ("frozen", "budgeted"), "Unknown readable stage or history policy")
     result = deepcopy(context)
     result.update(context_protocol=PROTOCOL, readable_stage=stage, readable_history_policy=policy)
+    if policy == "budgeted":
+        result["_readable_view_version"] = BUDGETED_VIEW
     validate_sources(result)
     return result
 

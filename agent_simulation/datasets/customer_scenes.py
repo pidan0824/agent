@@ -4,11 +4,14 @@ from collections import Counter
 from contextlib import closing
 from copy import deepcopy
 import json
+import hashlib
+import math
+import random
 from pathlib import Path
 
 from agent_simulation.data.catalog import Catalog
 from agent_simulation.data.common import require, rows, sha256
-from agent_simulation.datasets.customer_candidate_sampling import SampledCandidateBuilder, CANDIDATE_DEDUPLICATION
+from agent_simulation.datasets.customer_candidate_sampling import SampledCandidateBuilder, CANDIDATE_DEDUPLICATION, INTERACTION_MATCHED, LEGACY_CANDIDATES
 from agent_simulation.datasets.labels import select_record_ids
 
 
@@ -41,8 +44,103 @@ def freeze_prices(catalog, scene, *, prices=None):
     return scene
 
 
+
+def estimate_interaction_calibration(catalog, fit_cases, *, seed=42, min_items=2, max_items=12, min_history=3):
+    """Use only frozen Train fit full-exposure Response cases; no dev/audit estimates."""
+    from agent_simulation.evaluation.customer_evidence import expand_sources
+    fit_cases = Path(fit_cases)
+    cases = [row for row in map(json.loads, Path(fit_cases).read_text().splitlines())
+             if row.get("role") == "customer" and row.get("stage") == "response"
+             and row.get("partition") == "fit"]
+    require(cases and all(row["source_split"] == "train" for row in cases),
+            "Calibration requires frozen Train fit Response cases")
+    require(all(row.get("action_mode") != "single_item" and
+                row.get("evaluation_protocol") != "outcome_conditioned_single_positive" for row in cases),
+            "Interaction calibration requires original full-exposure cases")
+    contexts = [expand_sources(row["context"]) for row in cases]
+    cohort_protocol_path = Path(fit_cases).with_name("protocol.json")
+    fit_interval = None
+    if cohort_protocol_path.exists():
+        fit_interval = json.loads(cohort_protocol_path.read_text()).get("time_intervals_inclusive", {}).get("fit")
+        if fit_interval:
+            require(all(fit_interval[0] <= c["history_cutoff_exclusive"] <= fit_interval[1] for c in contexts),
+                    "Fit calibration case outside frozen fit interval")
+    users = sorted({c["evidence_actor_id"] for c in contexts})
+    histories = rows(catalog.connection, """
+        SELECT user_id,time_index,clicked_item_ids,purchased_item_ids FROM customer_history
+        WHERE source_split='train' AND user_id IN (SELECT unnest(?::BIGINT[]))
+          AND time_index < ? ORDER BY user_id,time_index
+    """, [users, max(c["history_cutoff_exclusive"] for c in contexts)])
+    by_user = {}
+    for event in histories:
+        by_user.setdefault(event["user_id"], []).append(event)
+    numerator = denominator = 0
+    ids, opportunities = [], []
+    for row, context in zip(cases, contexts, strict=True):
+        require(context.get("candidate_protocol", "full") !=
+                "Synthetic choice list; prices are strictly-prior observations, not current quotes.",
+                "Calibration requires full exposures, not synthetic shortlists")
+        seen = {item for event in by_user.get(context["evidence_actor_id"], [])
+                if event["time_index"] < context["history_cutoff_exclusive"]
+                for field in ("clicked_item_ids", "purchased_item_ids") for item in event[field]}
+        positives = set(row["target"]["clicked_item_ids"]) | set(row["target"]["purchased_item_ids"])
+        exposed = {p["item_id"] for p in context["candidate_context"]}
+        require(positives <= exposed, "Calibration positives absent from full exposure")
+        negatives = exposed - positives
+        denominator += len(negatives)
+        numerator += len(negatives & seen)
+        ids.append(row["source_request_id"])
+        prior_count = sum(len(set(event["clicked_item_ids"]) | set(event["purchased_item_ids"]))
+                          for event in by_user.get(context["evidence_actor_id"], [])
+                          if event["time_index"] < context["history_cutoff_exclusive"])
+        if prior_count >= min_history:
+            for positive in sorted(positives) or [None]:
+                sid = (f'{row["source_request_id"]}:positive:{positive}' if positive is not None else
+                       f'{row["source_request_id"]}:no_action')
+                size = random.Random(f"{seed}:{sid}:target-size-v1").randint(min_items, max_items)
+                slots = min(size - int(positive is not None), len(negatives - seen))
+                opportunities.append((slots, len(negatives & seen)))
+    require(denominator > 0 and len(ids) == len(set(ids)), "Empty or duplicate fit calibration")
+    total_slots = sum(slots for slots, count in opportunities)
+    require(total_slots > 0, "Fit calibration has no eligible negative slots")
+    target_count = total_slots * numerator / denominator
+    def expected(probability):
+        total = 0.
+        for slots, count in opportunities:
+            # Exact expectation of a capped binomial; no Monte Carlo fit.
+            total += sum(min(slots, k) * math.comb(count, k) * probability**k *
+                         (1 - probability)**(count-k) for k in range(count+1))
+        return total
+    low, high = 0., 1.
+    for _ in range(50):
+        middle = (low + high) / 2
+        if expected(middle) < target_count:
+            low = middle
+        else:
+            high = middle
+    probability = (low + high) / 2
+    return {"schema": "fit-interaction-calibration-v1", "scope": "frozen_train_fit_full_exposures",
+            "source_split": "train", "source_path": str(Path(fit_cases)),
+            "source_sha256": sha256(fit_cases), "request_ids": sorted(ids),
+            "request_ids_sha256": hashlib.sha256(json.dumps(sorted(ids)).encode()).hexdigest(),
+            "fit_time_interval_inclusive": fit_interval,
+            "fit_cutoff_range": [min(c["history_cutoff_exclusive"] for c in contexts),
+                                 max(c["history_cutoff_exclusive"] for c in contexts)],
+            "request_count": len(ids), "nonpositive_exposure_items": denominator,
+            "seen_acceptance_probability": probability,
+            "allocation": {"seed": seed, "min_items": min_items, "max_items": max_items, "min_history": min_history,
+                           "eligible_scene_count": len(opportunities), "legacy_negative_slot_estimate": total_slots,
+                           "target_seen_count": target_count, "expected_seen_count": expected(probability),
+                           "maximum_seen_count": sum(min(slots, count) for slots, count in opportunities),
+                           "opportunity_scope": "Fit full-exposure child lists before content deduplication; realized rates reported separately"},
+            "interacted_nonpositive_items": numerator, "rate": numerator / denominator,
+            "estimator": "Frozen full-exposure fit sample estimate, not whole-Train population rate",
+            "history_source": "customer_history Train, strictly before each request cutoff; no snapshots",
+            "excluded_partitions": ["dev", "audit"]}
+
 def prepare_scenes(catalog, requests, encoder, *, min_items=2, max_items=12, seed=42,
-                   min_history=3, methods=("random", "content", "collaborative")):
+                   min_history=3, methods=("random", "content", "collaborative"),
+                   candidate_protocol=LEGACY_CANDIDATES, interaction_calibration=None):
     require(bool(requests), "Empty request selection")
     cutoffs = [r["response_input"]["history_cutoff_exclusive"] for r in requests]
     interactions = rows(catalog.connection, """
@@ -66,7 +164,7 @@ def prepare_scenes(catalog, requests, encoder, *, min_items=2, max_items=12, see
                     "first_seen_time_index": request["response_input"]["history_cutoff_exclusive"]}
     builder = SampledCandidateBuilder(list(by_id.values()), interactions, encoder,
         min_items=min_items,max_items=max_items,seed=seed,min_history=min_history,methods=methods,
-        fit_cutoff=fit_cutoff)
+        fit_cutoff=fit_cutoff, candidate_protocol=candidate_protocol, interaction_calibration=interaction_calibration)
     scenes, skipped = [], []
     expected = {"insufficient_prior_interactions", "empty_available_item_pool",
                 "empty_constructed_list", "insufficient_distractors"}
@@ -137,6 +235,8 @@ def read_scenes(directory, *, dataset=None, split=None):
     directory=Path(directory)
     manifest=json.loads((directory/"manifest.json").read_text())
     require(manifest["schema"]=="customer-single-positive-scenes-v2", "Prepare scenes again: single-positive v2 required")
+    protocol = manifest.get("candidate_protocol_version", LEGACY_CANDIDATES)
+    require(protocol in (LEGACY_CANDIDATES, INTERACTION_MATCHED), "Unknown scene candidate protocol")
     deduplication = manifest.get("candidate_deduplication")
     require(deduplication in (None, CANDIDATE_DEDUPLICATION), "Unknown candidate deduplication policy")
     if dataset is not None:
@@ -154,6 +254,9 @@ def read_scenes(directory, *, dataset=None, split=None):
         require(source["assigned_split"] == manifest["split"], "Source request split differs")
         positives = set(source["response_target"]["clicked_item_ids"]) | set(source["response_target"]["purchased_item_ids"])
         for child in bundle["response_scenes"]:
+            if protocol == INTERACTION_MATCHED:
+                require(child["candidate"].get("candidate_protocol_version") == protocol,
+                        "Child interaction protocol differs from scene manifest")
             if deduplication is not None:
                 require(child["candidate"].get("scope", {}).get("deduplication", {}).get("protocol") == deduplication,
                         "Child deduplication policy differs from scene manifest")
@@ -184,6 +287,9 @@ def main(argv=None):
     p.add_argument("--min-items",type=int,default=2)
     p.add_argument("--max-items",type=int,default=12)
     p.add_argument("--min-history",type=int,default=3)
+    p.add_argument("--candidate-protocol", choices=[LEGACY_CANDIDATES, INTERACTION_MATCHED], default=LEGACY_CANDIDATES)
+    p.add_argument("--interaction-fit-cases", type=Path,
+                   help="Frozen full-exposure cases.jsonl; calibrates from Train fit rows only")
     p.add_argument("--methods",nargs="+",choices=["random","content","collaborative"],default=["random","content","collaborative"])
     p.add_argument("--bge-path",type=Path,default=Path("models/bge-small-zh-v1.5"))
     p.add_argument("--bge-device",default="cuda",help="Embedding device, e.g. cuda, cuda:1 or cpu; honor CUDA_VISIBLE_DEVICES")
@@ -219,8 +325,14 @@ def main(argv=None):
         if "content" in args.methods:
             from agent_simulation.agents.retrieval.bge_encoder import bge_encoder
             encoder,_=bge_encoder(args.bge_path,device=args.bge_device)
+        calibration = None
+        if args.candidate_protocol == INTERACTION_MATCHED:
+            require(args.interaction_fit_cases is not None, "Specify --interaction-fit-cases for the new protocol")
+            calibration = estimate_interaction_calibration(catalog, args.interaction_fit_cases, seed=args.seed,
+                min_items=args.min_items, max_items=args.max_items, min_history=args.min_history)
         scenes,skipped=prepare_scenes(catalog,requests,encoder,min_items=args.min_items,max_items=args.max_items,
-            seed=args.seed,min_history=args.min_history,methods=args.methods)
+            seed=args.seed,min_history=args.min_history,methods=args.methods,
+            candidate_protocol=args.candidate_protocol, interaction_calibration=calibration)
     if args.max_input_tokens:
         from agent_simulation.inference.requests import load_tokenizer
         scenes,length_skipped=filter_lengths(scenes,load_tokenizer(args.tokenizer,local_files_only=True),
@@ -242,6 +354,8 @@ def main(argv=None):
         "protocol":"Outcome-conditioned shortlists sampled within recorded exposures, without Query/category gates; not full-exposure evaluation.",
         "candidate_pool":"request_exposures","query_category_filter":False,
         "candidate_deduplication":CANDIDATE_DEDUPLICATION,
+        "candidate_protocol_version":args.candidate_protocol,
+        "interaction_calibration":calibration,
         "query":"Current Query target/exposures remain absent from query_input.",
         "collaborative_fit_cutoff_exclusive":min(r["response_input"]["history_cutoff_exclusive"] for r in requests),
         "author_provenance":json.loads((Path(__file__).parents[1]/"vendor/usermirrorer/PROVENANCE.json").read_text())}

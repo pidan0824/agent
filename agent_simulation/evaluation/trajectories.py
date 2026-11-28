@@ -48,7 +48,8 @@ def digest(value):
 class FrozenSellerSampleTools:
     """Read only historical, owner-authorized facts; never retain the price label."""
 
-    def __init__(self, catalog, sample, *, theory=True):
+    def __init__(self, catalog, sample, *, theory=True, context_protocol="legacy", signal_policy=None):
+        self.context_protocol, self.signal_policy = context_protocol, deepcopy(signal_policy)
         self.context = deepcopy(sample["input"])
         self.cutoff = self.context["history_cutoff_exclusive"]
         self.actor_id = self.context["profile"]["seller_id"]
@@ -71,7 +72,8 @@ class FrozenSellerSampleTools:
 
     def initial_context(self):
         from agent_simulation.evaluation.seller_context import observed_seller_context
-        return observed_seller_context(self.context, self.features, self.history)
+        return observed_seller_context(self.context, self.features, self.history,
+                                       protocol=self.context_protocol, signal_policy=self.signal_policy)
 
     def guard(self):
         require(digest(self.context) == self.fingerprint, "Frozen Seller evaluation snapshot changed")
@@ -133,10 +135,10 @@ def trajectory_messages(binding, *, role, stage, theory):
     from agent_simulation.evaluation.customer_evidence import encode_context
     context = binding.initial_context()
     if role == "customer" and stage == "response" and context.get("context_protocol") == "readable-v1":
-        from agent_simulation.evaluation.customer_readable import instructions as readable_instructions
+        from agent_simulation.evaluation.customer_readable import instructions as readable_instructions, CUSTOMER_RULES
         from agent_simulation.agents.prompts.instructions import FACT_RULES
-        instructions = (FACT_RULES + "\n" + readable_instructions(context["readable_stage"],
-                         concise=getattr(binding, "concise", False))) if not direct else instructions + (
+        instructions = (CUSTOMER_RULES + "\n" + readable_instructions(context["readable_stage"],
+                         concise=getattr(binding, "concise", False))) if not direct else instructions.replace(FACT_RULES, CUSTOMER_RULES) + (
                          "\n价格未知的商品不能参与价格高低比较，但仍然可以被选择。")
         output_note = ("Return rationale (stimulus, stimulus_factors, knowledge, knowledge_factors, "
                        "evaluation, evaluation_style, evidence_refs) and action JSON. "
@@ -200,7 +202,9 @@ async def generate_trajectory(binding, model, *, role, actor_id, stage, record_i
         record["final_action"] = await run_agentic_workflow(
             messages=messages, tools=binding.schemas, complete=complete, execute_tool=binding.execute,
             validate_final=validate,
-            options=options, trace=trace, guard=binding.guard)
+            options=options, trace=trace, guard=binding.guard,
+            omit_runtime_budget=(role == "customer" and stage == "response" and
+                                 getattr(binding, "response_context_protocol", "legacy") == "readable-v1"))
         record["status"] = "ok"
         record["rationale"] = deepcopy(trace.get("rationale", {}))
     except (ModelOutputError, ContextCapacityError) as error:

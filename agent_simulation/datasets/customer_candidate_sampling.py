@@ -38,6 +38,9 @@ def seeded(seed):
 
 
 CANDIDATE_DEDUPLICATION = "same-shop-content-v1"
+INTERACTION_MATCHED = "interaction-matched-v1"
+LEGACY_CANDIDATES = "legacy"
+
 _CONTENT_FIELDS = (
     "item_title", "seller_id", "seller_name", "brand_id", "brand_name",
     "category_level1_id", "category_level1_name",
@@ -83,12 +86,64 @@ def deduplicate_pool(ids, products, prices, history_ids, *, target_item_id, seed
     return [item for item in ids if item not in removed], audit
 
 
+
+def match_interacted_distractors(negatives, exposed_ids, prior_ids, positive_ids, *,
+                                 rate, seed, scene_id, calibration_sha256=None, acceptance_probability=None):
+    """Replace equal slots using calibrated binomial admission of exposed seen items.
+
+    The pure helper is shared by new construction and frozen-list replay, which
+    need not rerun embedding/CF ranking just to audit this one protocol change.
+    """
+    acceptance_probability = rate if acceptance_probability is None else acceptance_probability
+    require(math.isfinite(rate) and 0 <= rate <= 1 and math.isfinite(acceptance_probability)
+            and 0 <= acceptance_probability <= 1, "Invalid history interaction rate")
+    rng = random.Random(f"{seed}:{scene_id}:{INTERACTION_MATCHED}")
+    eligible_seen = sorted(set(exposed_ids) & set(prior_ids) - set(positive_ids),
+        key=lambda item: hashlib.sha256(f"{seed}:{scene_id}:seen:{item}".encode()).digest())
+    requested = sum(rng.random() < acceptance_probability for _ in eligible_seen)
+    realized = min(requested, len(negatives))
+    result = list(negatives)
+    require(not (set(result) & set(prior_ids)), "Baseline negatives must follow legacy filtering")
+    for slot, item in zip(sorted(rng.sample(range(len(result)), realized)),
+                          eligible_seen[:realized], strict=True):
+        result[slot] = item
+    return result, {
+        "protocol": INTERACTION_MATCHED, "fit_rate": rate,
+        "seen_acceptance_probability": acceptance_probability,
+        "legacy_distractor_count": len(negatives), "requested_seen_count": requested,
+        "eligible_seen_count": len(eligible_seen), "selected_seen_count": realized,
+        "unfilled_seen_count": requested - realized,
+        "calibration_request_ids_sha256": calibration_sha256,
+        "count_scope": "strictly-prior event interactions; snapshots excluded"}
+
 class SampledCandidateBuilder:
     def __init__(self, products, interactions, encoder, *, min_items=2, max_items=12,
-                 methods=("random", "content", "collaborative"), seed=42, min_history=3, fit_cutoff=None):
+                 methods=("random", "content", "collaborative"), seed=42, min_history=3, fit_cutoff=None,
+                 candidate_protocol=LEGACY_CANDIDATES, interaction_calibration=None):
         require(2 <= min_items <= max_items, "Invalid candidate length range")
         require(methods and set(methods) <= {"random", "content", "collaborative"}, "Unknown sampler method")
         require(min_history >= 0, "Negative minimum history")
+        require(candidate_protocol in (LEGACY_CANDIDATES, INTERACTION_MATCHED), "Unknown candidate protocol")
+        if candidate_protocol == INTERACTION_MATCHED:
+            require(isinstance(interaction_calibration, dict)
+                    and interaction_calibration.get("scope") == "frozen_train_fit_full_exposures"
+                    and interaction_calibration.get("source_split") == "train",
+                    "Interaction matching requires Train fit exposure calibration")
+            denominator = interaction_calibration.get("nonpositive_exposure_items")
+            numerator = interaction_calibration.get("interacted_nonpositive_items")
+            require(type(denominator) is int and denominator > 0 and type(numerator) is int
+                    and 0 <= numerator <= denominator, "Invalid interaction calibration counts")
+            require(interaction_calibration.get("rate") == numerator / denominator,
+                    "Interaction calibration rate differs from counts")
+            allocation = interaction_calibration.get("allocation", {})
+            require(not allocation or all(allocation.get(k) == v for k, v in
+                (("seed", seed), ("min_items", min_items), ("max_items", max_items), ("min_history", min_history))),
+                "Candidate settings differ from fit interaction calibration")
+            probability = interaction_calibration.get("seen_acceptance_probability")
+            require(type(probability) in (int, float) and math.isfinite(probability)
+                    and 0 <= probability <= 1, "Missing valid calibrated seen acceptance probability")
+        self.candidate_protocol = candidate_protocol
+        self.interaction_calibration = deepcopy(interaction_calibration)
         self.products = {p["item_id"]: deepcopy(p) for p in products}
         require(len(self.products) == len(products), "Duplicate candidate pool item")
         self.interactions = list(interactions)
@@ -246,6 +301,14 @@ class SampledCandidateBuilder:
             # supervision. Keep any nonempty shortlist, including a lone positive.
             require(bool(negatives or positives), "insufficient_distractors")
             candidates = negatives[:max(0, size-len(positives))]
+            if self.candidate_protocol == INTERACTION_MATCHED:
+                # Preserve the legacy realized length and insertion position. Replace
+                # equal numbers of negatives; never import an unexposed product.
+                candidates, scope["interaction_matching"] = match_interacted_distractors(
+                    candidates, ids, seen, source_positives,
+                    rate=self.interaction_calibration["rate"], seed=self.seed, scene_id=scene_id,
+                    calibration_sha256=self.interaction_calibration.get("request_ids_sha256"),
+                    acceptance_probability=self.interaction_calibration["seen_acceptance_probability"])
             if positives:
                 # Include the end slot; the upstream helper excludes it.
                 position = random.Random(f"{self.seed}:{scene_id}:target-position-v1")
@@ -274,6 +337,8 @@ class SampledCandidateBuilder:
                                  for name in ("clicked_item_ids", "purchased_item_ids")},
             "embedding_identity": getattr(self.encoder, "identity", None),
             "input_sha256": hashlib.sha256(json.dumps(request["response_input"], sort_keys=True, ensure_ascii=False).encode()).hexdigest()}
+        if self.candidate_protocol == INTERACTION_MATCHED:
+            manifest["candidate_protocol_version"] = INTERACTION_MATCHED
         result = deepcopy(request)
         result["response_input"] = context
         result["response_target"] = deepcopy(target)

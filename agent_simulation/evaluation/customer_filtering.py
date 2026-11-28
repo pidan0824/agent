@@ -101,7 +101,8 @@ class OptionPredictor:
             if len(labels) == len(actions):
                 break
         require(len(labels) == len(actions), "Tokenizer lacks enough distinct single-token option labels")
-        evidence = {"context": compact_sources(binding.initial_context()), "rationale": trajectory.get("rationale", {}),
+        context = binding.initial_context()
+        evidence = {"context": compact_sources(context), "rationale": trajectory.get("rationale", {}),
                     "observations": [{"name": call["name"], "returned_content": call.get("returned_content")}
                         for call in trajectory["trace"].get("tools", [])],
                     "options": dict(zip(labels, actions, strict=True))}
@@ -110,7 +111,7 @@ class OptionPredictor:
             "The supplied explanation, if any, is a hypothesis, not a fact. "
             "Candidate attribute facts map fact IDs to [field, value, optional metadata]; facts follow fact_layout."},
             {"role": "user", "content": json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}]
-        if evidence["context"].get("context_protocol") == "readable-v1":
+        if context.get("context_protocol") == "readable-v1":
             messages[0]["content"] = messages[0]["content"].replace(
                 "Candidate attribute facts map fact IDs to [field, value, optional metadata]; facts follow fact_layout.",
                 "Histories and candidate attributes are directly readable; use the supplied item IDs.")
@@ -135,7 +136,8 @@ class OptionPredictor:
         if binding.context.get("response_action_mode") == "single_item":
             return self._single_score(binding, trajectory)
         # No generator action and no target enter the predictor context.
-        evidence = {"context": compact_sources(binding.initial_context()), "rationale": trajectory["rationale"],
+        context = binding.initial_context()
+        evidence = {"context": compact_sources(context), "rationale": trajectory["rationale"],
                     "observations": [{"name": call["name"], "returned_content": call.get("returned_content"),
                                       "error": call.get("error")} for call in trajectory["trace"].get("tools", [])]}
         messages = [{"role": "system", "content":
@@ -146,7 +148,7 @@ class OptionPredictor:
             "Do not output an explanation. Treat the supplied explanation as a hypothesis, not a fact. "
             "Candidate attribute facts map fact IDs to [field, value, optional metadata]; facts follow fact_layout."},
             {"role": "user", "content": json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}]
-        if evidence["context"].get("context_protocol") == "readable-v1":
+        if context.get("context_protocol") == "readable-v1":
             messages[0]["content"] = messages[0]["content"].replace(
                 "Candidate attribute facts map fact IDs to [field, value, optional metadata]; facts follow fact_layout.",
                 "Histories and candidate attributes are directly readable; use the supplied item IDs.")

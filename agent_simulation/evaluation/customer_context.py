@@ -177,7 +177,7 @@ class ContextCache:
 class CurationTools(FrozenSampleTools):
     def __init__(self, request, stage, *, mode, theory=True, history_limit=10, concise=False,
                  history_token_budget=None, tokenizer=None, context_cache=None,
-                 response_context_protocol='legacy', readable_stage='A', readable_history_policy='frozen'):
+                 response_context_protocol='legacy', readable_stage='A', readable_history_policy='budgeted'):
         super().__init__(request, stage, theory=theory)
         require(mode in ("fixed", "autonomous"), "Unknown information mode")
         require(type(history_limit) is int and history_limit >= 0, "Nonnegative integer history limit required")
@@ -258,7 +258,7 @@ class CurationTools(FrozenSampleTools):
 
 
 def fixed_response_requests(response_input, *, history_limit=10, history_token_budget=None, tokenizer=None,
-                            response_context_protocol="legacy", readable_stage="A", readable_history_policy="frozen"):
+                            response_context_protocol="legacy", readable_stage="A", readable_history_policy="budgeted"):
     """Use the exact fixed curation prompts and schemas in controlled evaluation."""
     from agent_simulation.agents.agentic import initial_agentic_request, teacher_output
     from agent_simulation.evaluation.trajectories import trajectory_messages
@@ -271,7 +271,8 @@ def fixed_response_requests(response_input, *, history_limit=10, history_token_b
                                response_context_protocol=response_context_protocol,
                                readable_stage=readable_stage, readable_history_policy=readable_history_policy)
         schemas, messages = trajectory_messages(binding, role="customer", stage="response", theory=theory)
-        messages, tools, _ = initial_agentic_request(messages, [], AgenticOptions(max_model_calls=1, theory=theory))
+        messages, tools, _ = initial_agentic_request(messages, [], AgenticOptions(max_model_calls=1, theory=theory),
+            omit_runtime_budget=binding.response_context_protocol == "readable-v1")
         result[style] = {"messages": messages, "tools": tools,
                         "final_schema": teacher_output(schemas, customer_ekb=True) if theory else schemas[0]}
     return binding.initial_context(), result

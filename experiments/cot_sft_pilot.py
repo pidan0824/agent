@@ -98,12 +98,12 @@ def customer_case(catalog, identity, partition, stratum, dataset_identity):
     return result
 
 
-def seller_case(catalog, label, partition, dataset_identity):
+def seller_case(catalog, label, partition, dataset_identity, *, context_protocol="legacy", signal_policy=None):
     seller, item, cutoff = label["seller_id"], label["item_id"], label["history_cutoff_exclusive"]
     from agent_simulation.datasets.samples.seller import seller_sample
     from agent_simulation.evaluation.trajectories import FrozenSellerSampleTools
     sample = seller_sample(catalog, seller, item, cutoff, history_embedder=None)
-    binding = FrozenSellerSampleTools(catalog, sample)
+    binding = FrozenSellerSampleTools(catalog, sample, context_protocol=context_protocol, signal_policy=signal_policy)
     previous = next(p["last_valid_price_raw"] for p in binding.features["products"] if p["item_id"] == item)
     require(previous == label["previous_price_raw"], "Seller reference differs from frozen cohort")
     context = binding.initial_context()
@@ -115,6 +115,13 @@ def seller_case(catalog, label, partition, dataset_identity):
 
 
 def prepare(args):
+    seller_protocol = getattr(args, "seller_context_protocol", "legacy")
+    seller_policy = None
+    if seller_protocol == "seller-change-v1":
+        from agent_simulation.evaluation.seller_signals import validate_signal_policy
+        require(args.seller_signal_policy is not None, "Fit signal policy file required")
+        seller_policy = json.loads(args.seller_signal_policy.read_text())
+        validate_signal_policy(seller_policy)
     require(not args.output.exists() or args.resume, "Use a new cohort directory or explicit --resume")
     source = json.loads((args.dataset/"manifest.json").read_text())
     require(not source.get("time_window_experiment"), "Use full Lite Train")
@@ -141,9 +148,11 @@ def prepare(args):
         cut1,cut2=lo+int((hi-lo)*.70),lo+int((hi-lo)*.85)
         interval={"fit":(lo,cut1),"dev":(cut1+1,cut2),"audit":(cut2+1,hi)}
         protocol = {
-            "schema":"dual-agent-sft-pilot-v1","context_protocol":"shared-observed-seller-v2",
+            "schema":"dual-agent-sft-pilot-v1","context_protocol":(
+                "seller-change-v1" if seller_protocol == "seller-change-v1" else "shared-observed-seller-v2"),
+            **({"seller_signal_policy":seller_policy} if seller_policy else {}),
             "context_source_sha256": {name: sha256(Path(__file__).parents[1]/"agent_simulation"/name)
-                for name in ("evaluation/seller_context.py", "evaluation/trajectories.py",
+                for name in ("evaluation/seller_context.py", "evaluation/seller_signals.py", "evaluation/trajectories.py",
                              "agents/context/seller_features.py", "evaluation/customer_context.py",
                              "evaluation/customer_background.py", "evaluation/customer_evidence.py",
                              "evaluation/micro/customer_agentic.py")},
@@ -219,7 +228,7 @@ def prepare(args):
                 for label in pool:
                     case=cached.get(label["sample_id"])
                     if case is None:
-                        case=seller_case(catalog,label,partition,identity)
+                        case=seller_case(catalog,label,partition,identity,context_protocol=seller_protocol,signal_policy=seller_policy)
                     length=len(prompt_tokens(decision_request(case,"concise")["messages"],[],tokenizer))
                     if length>args.input_limit:
                         skipped.append(dict(role="seller",id=label["sample_id"],partition=partition,reason="input_tokens",tokens=length))
@@ -283,6 +292,11 @@ def generate(args):
         cases=[values[depth] for depth in range(max(map(len,groups.values())))
                for _,values in sorted(groups.items()) if depth<len(values)][:args.limit]
     require(cases,"Empty generation selection")
+    changed_sellers = [case for case in cases if case["role"] == "seller" and
+                       case.get("context", {}).get("context_protocol") == "seller-change-v1"]
+    if changed_sellers:
+        require(set(r["stratum"] for r in changed_sellers) == {"keep", "up", "down"},
+                "Seller change teacher budget must include keep/up/down strata")
     requests={case["case_id"]:decision_request(case,args.style) for case in cases}
     identity={"requests_sha256":digest(requests),"cases_sha256":sha256(args.cohorts/"cases.jsonl"),"ids":[r["case_id"] for r in cases],
               "base_config_sha256":sha256(args.tokenizer/"config.json"),
@@ -290,6 +304,10 @@ def generate(args):
               "partition":args.partition,"max_new_tokens":args.max_new_tokens,"temperature":args.temperature,
               "seed":args.seed,"concurrency":args.concurrency,
               "decoder_schema_sha256":sha256(Path(__file__).resolve().parents[1] / "agent_simulation/inference/vllm.py")}
+    if changed_sellers:
+        identity.update(seller_context_protocol="seller-change-v1",
+            seller_strata_budget={direction:sum(case["stratum"]==direction for case in changed_sellers)
+                                  for direction in ("keep","up","down")})
     if args.output.exists():
         require(json.loads((args.output/"manifest.json").read_text())==identity,"Resume identity mismatch")
     else:
@@ -304,6 +322,12 @@ def generate(args):
         if not (args.output/"completed.json").exists():
             write_json(args.output/"completed.json",{"status":"complete","records":len(cases),
                        "wall_seconds_this_run":0,"resumed_records":len(prior)})
+        if changed_sellers:
+            from agent_simulation.evaluation.seller_signals import seller_coverage
+            coverage = seller_coverage(prior)
+            write_json(args.output/"seller-strata-report.json",coverage)
+            if not coverage["release_allowed"]:
+                write_json(args.output/"seller-teacher-failure.json",coverage)
         print("Already complete",len(cases),flush=True)
         return
     tokenizer=load_tokenizer(args.tokenizer,local_files_only=True)
@@ -339,6 +363,13 @@ def generate(args):
         asyncio.run(run())
         write_json(args.output/"completed.json",{"status":"complete","records":len(cases),
                    "wall_seconds_this_run":time.monotonic()-started,"resumed_records":len(prior)})
+    if changed_sellers:
+        from agent_simulation.evaluation.seller_signals import seller_coverage
+        predictions = [json.loads(line) for line in path.read_text().splitlines()]
+        coverage = seller_coverage(predictions)
+        write_json(args.output/"seller-strata-report.json",coverage)
+        if not coverage["release_allowed"]:
+            write_json(args.output/"seller-teacher-failure.json",coverage)
 
 
 def export(args):
@@ -358,6 +389,7 @@ def export(args):
         meta.update({k:deepcopy(case[k]) for k in ("target","action_mode","evaluation_protocol","source_response_target","candidate_item_ids") if k in case})
         rows_by_role[case["role"]].append(meta)
     counts={role:{"observed":len(values),"rationale":0} for role,values in rows_by_role.items()}
+    passed_seller_cases = []
     for directory in args.teachers:
         identity=json.loads((directory/"manifest.json").read_text())
         require(identity["partition"]=="fit","Never export held-out generated rows")
@@ -388,6 +420,21 @@ def export(args):
             meta.update({k:deepcopy(case[k]) for k in ("target","action_mode","evaluation_protocol","source_response_target","candidate_item_ids") if k in case})
             rows_by_role[case["role"]].append(meta)
             counts[case["role"]]["rationale"]+=1
+            if case["role"] == "seller" and case.get("context", {}).get("context_protocol") == "seller-change-v1":
+                passed_seller_cases.append(case)
+    signal_cases = [case for case in cases if case["role"] == "seller" and case["partition"] == "fit"
+                    and case.get("context", {}).get("context_protocol") == "seller-change-v1"]
+    if signal_cases:
+        from agent_simulation.evaluation.seller_signals import seller_coverage
+        coverage = seller_coverage(signal_cases, accepted=passed_seller_cases)
+        write_json(args.output/"seller-strata-report.json",coverage)
+        if not coverage["release_allowed"]:
+            failure = {"status":"failed","counts":counts,"seller_strata":coverage,
+                       "training_files_written":False,"reason":"zero_passing_seller_change_stratum"}
+            write_json(args.output/"seller-export-failure.json",failure)
+            write_json(args.output/"manifest.json",failure)
+            print(dump(failure),flush=True)
+            return failure
     for role,records in rows_by_role.items():
         require(len({r["trajectory_id"] for r in records})==len(records),"Duplicate SFT rows")
         (args.output/(role+".jsonl")).write_text("".join(dump(r)+"\n" for r in records))
@@ -650,6 +697,8 @@ def main():
     prep.add_argument("--tokenizer",type=Path,default=Path("models/Qwen3.5-9B"))
     prep.add_argument("--input-limit",type=int,default=6656)
     prep.add_argument("--seed",type=int,default=20261126)
+    prep.add_argument("--seller-context-protocol",choices=("legacy","seller-change-v1"),default="legacy")
+    prep.add_argument("--seller-signal-policy",type=Path,help="Fit-only calibrated policy JSON for seller-change-v1")
     prep.add_argument("--resume",action="store_true")
     gen=subs.add_parser("generate")
     gen.add_argument("--cohorts",type=Path,required=True)

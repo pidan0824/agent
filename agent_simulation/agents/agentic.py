@@ -55,11 +55,14 @@ def budget_message(options, *, turn=0, tools_used=0, tool_output_chars=0,
     })}
 
 
-def initial_agentic_request(messages, tools, options=None):
+def initial_agentic_request(messages, tools, options=None, *, omit_runtime_budget=False):
     """Prepare the exact initial visible conversation for previews and execution."""
     options = options_from(options)
     conversation = deepcopy(messages)
     available = deepcopy(tools)
+    if omit_runtime_budget:
+        require(not available, "Runtime budget may only be omitted without tools")
+        return conversation, available, None
     if not available:
         for message in conversation:
             if message.get("role") != "user":
@@ -97,7 +100,7 @@ def _bounded_result(result, limit):
 
 
 async def run_agentic_workflow(*, messages, tools, complete, execute_tool, validate_final,
-                              options=None, trace=None, guard=None):
+                              options=None, trace=None, guard=None, omit_runtime_budget=False):
     """Run one decision. All side effects are delegated to a read-only tool binding.
 
     The trace contains the exact visible conversation and full raw tool results,
@@ -106,7 +109,8 @@ async def run_agentic_workflow(*, messages, tools, complete, execute_tool, valid
     """
     options = options_from(options)
     trace = {} if trace is None else trace
-    conversation, _, budget_index = initial_agentic_request(messages, tools, options)
+    conversation, _, budget_index = initial_agentic_request(
+        messages, tools, options, omit_runtime_budget=omit_runtime_budget)
     schemas = {t["function"]["name"]: t["function"]["parameters"] for t in tools}
     require(len(schemas) == len(tools), "Duplicate agentic tool name")
     trace.update(status="running", options=asdict(options), model_calls=[], tools=[], available_tools=deepcopy(tools),

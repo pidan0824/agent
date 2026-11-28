@@ -34,7 +34,7 @@ from agent_simulation.inference.requests import load_tokenizer, ContextCapacityE
 
 def observed_action_rows(request, identity, split, dataset_identity, *, bundle=None, policies=None,
                          history_token_budget=None, tokenizer=None, context_cache=None,
-                         response_context_protocol="legacy", readable_stage="A", readable_history_policy="frozen"):
+                         response_context_protocol="legacy", readable_stage="A", readable_history_policy="budgeted"):
     """Observed actions use prepared child scenes; explicit raw protocols keep full labels."""
     if split != "train":
         return []
@@ -51,7 +51,8 @@ def observed_action_rows(request, identity, split, dataset_identity, *, bundle=N
                                response_context_protocol=response_context_protocol,
                                readable_stage=readable_stage, readable_history_policy=readable_history_policy)
         schemas, prompt = trajectory_messages(binding, role="customer", stage=stage, theory=False)
-        prompt, _, _ = initial_agentic_request(prompt, [], AgenticOptions(max_model_calls=1, theory=False))
+        prompt, _, _ = initial_agentic_request(prompt, [], AgenticOptions(max_model_calls=1, theory=False),
+            omit_runtime_budget=binding.response_context_protocol == "readable-v1")
         target = deepcopy(adapted[stage + "_target"])
         validate_arguments(target, schemas[0])
         state_id = digest([dataset_identity, identity, stage, prompt])
@@ -133,7 +134,7 @@ def parser():
                    help="Stage fixed teacher outputs for reviewed CoT/action-only comparison; no automatic SFT export")
     p.add_argument("--response-context-protocol", choices=("legacy", "readable-v1"), default="legacy")
     p.add_argument("--readable-stage", choices=("A", "B", "C"), default="A")
-    p.add_argument("--readable-history-policy", choices=("frozen", "budgeted"), default="frozen")
+    p.add_argument("--readable-history-policy", choices=("frozen", "budgeted"), default="budgeted")
     p.add_argument("--cot-preset", choices=["original", "lightweight"], default="original",
                    help="Lightweight: fixed concise EKB, one sample, 768 tokens, temperature 0; SFT-only or deferred scoring")
     p.add_argument("--scene-concurrency", type=int, help="Bounded concurrent scene arms; default 1, lightweight 4")

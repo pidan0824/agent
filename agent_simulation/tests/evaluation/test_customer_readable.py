@@ -66,7 +66,7 @@ class ReadableTests(unittest.TestCase):
         for stage in ("A", "B", "C"):
             b = CurationTools(source(), "response", mode="fixed", concise=True,
                 history_token_budget=10000, tokenizer=TOKENIZER, context_cache=cache,
-                response_context_protocol="readable-v1", readable_stage=stage)
+                response_context_protocol="readable-v1", readable_stage=stage, readable_history_policy="frozen")
             ctx = b.initial_context()
             values.append(readable_view(ctx))
             systems.append(trajectory_messages(b, role="customer", stage="response", theory=True)[1][0])
@@ -138,7 +138,8 @@ class ReadableTests(unittest.TestCase):
             b = CurationTools(source(), "response", mode="fixed", concise=True,
                 history_token_budget=10000, tokenizer=TOKENIZER, response_context_protocol=protocol)
             _, messages = trajectory_messages(b, role="customer", stage="response", theory=True)
-            request, _, index = initial_agentic_request(messages, [], AgenticOptions(max_model_calls=1))
+            request, _, index = initial_agentic_request(messages, [], AgenticOptions(max_model_calls=1),
+                omit_runtime_budget=protocol == "readable-v1")
             self.assertEqual(len(request), count)
             self.assertEqual(index is None, protocol == "readable-v1")
             if protocol == "readable-v1":
@@ -156,6 +157,7 @@ class ReadableTests(unittest.TestCase):
         for p in view["prior_interacted_products"]["products"]:
             expected = next(f["value"] for f in ctx["facts"].values()
                             if f["field"] == "item_history" and f["item_id"] == p["item_id"])
+            expected = {k: v for k, v in expected.items() if k != "seller_id"}
             self.assertEqual(p, expected)
         changed = source();changed["response_target"] = {"clicked_item_ids": [999], "purchased_item_ids": [999]}
         self.assertEqual(binding("B", "budgeted").initial_context(),
@@ -203,7 +205,7 @@ class ReadableTests(unittest.TestCase):
                  messages=prompt + [t["messages"][-1]])
         observed = observed_action_rows(raw, 11, "train", "fixture", policies=("full",),
                     history_token_budget=10000, tokenizer=TOKENIZER,
-                    response_context_protocol="readable-v1", readable_stage="C")
+                    response_context_protocol="readable-v1", readable_stage="C", readable_history_policy="frozen")
         self.assertEqual(len(combine_observed_sft([], [], observed)), 2)
         reviews = {t["trajectory_id"]: {"trajectory_id": t["trajectory_id"],
             "messages_sha256": digest(t["messages"]), "verdict": "pass",
@@ -244,3 +246,65 @@ class ReadableTests(unittest.TestCase):
         payload = seen[0]
         self.assertEqual(payload["response_format"]["json_schema"]["strict"], True)
         self.assertIn("action", payload["response_format"]["json_schema"]["schema"]["properties"])
+
+    def test_customer_budgeted_view_hides_metadata_and_history_ids(self):
+        from agent_simulation.evaluation.customer_readable import HISTORY_PRODUCT_FIELDS, CUSTOMER_RULES
+        ctx = binding("C", "budgeted").initial_context()
+        view = readable_view(ctx)
+        for key in ("context_protocol", "readable_stage", "readable_history_policy",
+                    "history_token_budget", "history_scope", "memory_status", "information_mode"):
+            self.assertNotIn(key, view)
+        self.assertNotIn("limitations", view["behavior_features"])
+        snapshot = view["prior_interacted_products"]
+        self.assertNotIn("recent_clicked_item_ids", snapshot)
+        self.assertNotIn("recent_purchased_item_ids", snapshot)
+        self.assertTrue(all("seller_id" not in p for p in snapshot["products"]))
+        for event in view["history_events"]:
+            for field in ("clicked_items", "purchased_items"):
+                self.assertTrue(all(set(p) <= set(HISTORY_PRODUCT_FIELDS) for p in event.get(field, [])))
+        _, messages = trajectory_messages(binding("C", "budgeted"), role="customer", stage="response", theory=True)
+        self.assertNotIn("submit prices", messages[0]["content"])
+        self.assertNotIn("business 30-day", messages[0]["content"])
+        self.assertIn("currency and unit are unconfirmed", messages[0]["content"])
+
+    def test_shared_candidate_shop_can_be_restored_without_changing_attributes(self):
+        raw = source()
+        for p in raw["response_input"]["displayed_items"]:
+            p.update(seller_id=12, seller_name="共同店铺")
+        ctx = binding("C", "budgeted", raw).initial_context()
+        view = readable_view(ctx)
+        self.assertEqual(view["candidate_shop"], {"seller_id": 12, "seller_name": "共同店铺"})
+        for p, original in zip(view["candidate_context"], ctx["candidate_context"]):
+            self.assertNotIn("seller_name", p["attributes"])
+            self.assertEqual({**view["candidate_shop"], **p["attributes"]}, original["attributes"])
+
+    def test_new_budgeted_generation_omits_runtime_message_and_checks_references(self):
+        b = binding("C", "budgeted")
+        t = trajectory(b.initial_context())
+        t["rationale"]["evidence_refs"]["knowledge"] = ["query"]
+        t["messages"][-1]["content"] = json.dumps({"rationale": t["rationale"], "action": t["final_action"]})
+        async def complete(request, call_id):
+            self.assertEqual(len(request["messages"]), 2)
+            self.assertNotIn("Runtime budget", json.dumps(request["messages"]))
+            return deepcopy(t["messages"][-1])
+        generated = asyncio.run(generate_trajectory(b, SimpleNamespace(model="fixture", seed=1, acomplete=complete),
+            role="customer", actor_id=7, stage="response", record_id=11, source_split="train",
+            catalog_identity="fixture", options=AgenticOptions(max_model_calls=1), sample_index=0))
+        self.assertTrue(generated["evidence_quality"]["accepted"])
+
+    def test_saved_budgeted_v1_sidecars_still_render_the_original_view(self):
+        from agent_simulation.evaluation.customer_readable import mark_readable
+        ctx = binding("C").initial_context()
+        ctx["readable_history_policy"] = "budgeted"  # Old sidecars have no presentation revision.
+        self.assertIn("context_protocol", readable_view(ctx))
+        self.assertIn("limitations", readable_view(ctx)["behavior_features"])
+        self.assertNotIn("context_protocol", readable_view(mark_readable(ctx, "C", "budgeted")))
+
+    def test_enabling_readable_defaults_to_budgeted_and_legacy_is_still_default(self):
+        readable = CurationTools(source(), "response", mode="fixed", concise=True,
+            history_token_budget=10000, tokenizer=TOKENIZER, response_context_protocol="readable-v1",
+            readable_stage="C").initial_context()
+        self.assertEqual(readable["readable_history_policy"], "budgeted")
+        self.assertNotIn("recent_clicked_item_ids", readable_view(readable)["prior_interacted_products"])
+        old = CurationTools(source(), "response", mode="fixed").initial_context()
+        self.assertNotIn("context_protocol", old)

@@ -1406,3 +1406,127 @@ run2/report.json、details.jsonl、requests.jsonl 和 examples/ 原始A/B/C输�
 原始冻结集合只有两个不同鞋子场景（227325、3407032），不是三个；
 均已保存两个来源的原输入，外套202712、353512也均保存，没有编造第三个鞋例。
 run1保留首次容量断言失败的现场；run2保留全部场景并报告容量失败，未覆盖旧产物。
+
+
+### readable-v1 budgeted Customer 展示清理（任务2b，2026-11-28）
+
+只修改可读协议，legacy仍为默认。frozen的用户事实展示保持原样，
+继续验证原有事实值清单；新建budgeted请求在内部记录customer-v2展示版本，
+旧sidecar没有此版本字段时继续按原渲染读取，防止旧可读轨迹失效。
+Customer可读系统提示用Customer证据规则替换Seller共用段，保留原始价格尺度/
+单位未确认、缺失即未知、时间索引非日历、快照与事件不重复累计等必要含义。
+
+budgeted不再发送原始recent点击/购买ID序列；选中商品整条展示标题、属性和次数，
+未展示的商品只折叠类目与数量。历史商品只保留item_id、标题、品牌、二/三级类目、
+店铺名、历史价格；不向模型发送brand/category/seller等数值ID。
+移除behavior_features.limitations及协议/预算/来源选择等程序元数据，
+内部sidecar仍保留来源和严格过去校验。历史预算按清理后的实际视图重新计数。
+候选多数同店时将共同店铺放在candidate_shop，匹配商品不重复列店铺，
+其他店铺仍在该商品自身属性中标注。未引入最多次数必选等捷径。
+
+因为模型不再收到协议元数据，fixed可读请求通过显式内部omit_runtime_budget
+控制生成/预览/观测动作请求，不依赖模型可见字段识别协议。
+概率预测从内部上下文判断协议，发送相同清理视图；原动作schema约束不变。
+
+原11+34共45个场景实例离线重建315份请求（legacy、frozen A/B/C、budgeted A/B/C）。
+frozen全事实值一致；budgeted的保留字段逐项回查内部事实并可还原共同店铺，
+删去ID/元数据及折叠商品属于已声明的有意省略，不称全信息无损。
+时间/用户归属/价格时间、目标变更不影响输入、direct/CoT/概率视图一致均通过。
+budgeted C输入tokens中位/P90/最大：
+11条为3268/3685/3744；34条为3657.5/4109.1/4383。
+相对legacy的配对输入差中位数分别-1912/-2940。
+历史tokens为2044/2046/2046及2026.5/2046/2048，45/45<=2048；
+所有新budgeted输入均可在8192内预留768输出。
+budgeted C显示快照商品数中位数分别14、10；不是仅2项加原始ID列表。
+
+新5项加既有13项readable测试共18项通过；最终联合evaluation 248项通过、0失败。
+所有验证离线，无LLM调用、GPU服务、训练，尚未验证CoT/行为预测收益。
+产物：tmp/readable-context-2b-20261128/report.json、requests.jsonl、details.jsonl、
+audit.py、examples/实际原文及pretty副本，冻结来源仍只有两个不同鞋场景。
+任务6未执行，DPO未启动。
+
+
+### Seller 变价上下文新协议（任务7，2026-11-28）
+
+新增可选seller-change-v1，旧legacy保持默认。seller_signals.py实现纯严格过去信号，
+seller_context/FrozenSellerSampleTools、pilot准备/生成/导出均接入版本和fit policy；
+另提供experiments/seller_change_context.py离线重建入口。
+自身最近变价方向/相对幅度/有效报价观测间隔，与总历史/有效报价数同时展示，
+避免把长历史更易出现变价当作固定偏好。无历史变价时标明观测起点以前未知。
+同店活动仅计算其他商品最新有效报价的严格过去变化，缺少前报价不进分母；
+分母为0显示无数据。窗口限定后报价时点，前报价可能早于窗口。
+自身报价、同店活动、市场统计分别带可引用证据ID，不指示模型机械跟随邻品涨跌。
+
+阈值只在128个fit案例校准，35个有正流量案例的正值nearest-rank P25为1，
+窗口为10000时间索引。fit时间50960..655322、fit IDs/hash和定义都写入policy/manifest。
+这只是最低可见性约定，达到阈值的状态名为meets_fitted_exposure_threshold，
+不解释成足以推断需求；78条达到阈值、242条标注流量数据不足不支持推断。
+新协议teacher预算须覆盖keep/up/down，manifest和分层报告记录数量；
+按unique case而非重复采样计pass，direct输出不计作解释。
+任一层没有通过解释，export只写失败报告/manifest，不产生训练JSONL；旧协议导出可用。
+
+320条冻结案例均保留：fit/dev/audit=128/64/128，keep/up/down=160/80/80。
+完整输入旧中位/P90/最大1998/2299.1/2354，新2609.5/2925.3/3043；
+配对增量中位595、最大699，均可在8192内预留768输出，每例5个证据ID。
+27项相关测试通过0失败（包含新10项、旧Seller5项、pilot12项，部分计入联合evaluation）。
+无教师调用、训练或预测收益结论。
+产物：tmp/seller-change-context-20261128-verified/，含signal-policy.json、
+manifest.json、320条cases.jsonl、token/details和report、README及测试日志。
+
+
+### interaction-matched-v1（2026-11-28，离线）
+
+旧候选协议仍为默认。新协议通过 --candidate-protocol interaction-matched-v1 启用，
+并须显式提供 --interaction-fit-cases 指向原始 full-exposure cohorts/cases.jsonl。
+校准只取 role=customer/stage=response/partition=fit/source_split=train 的完整曝光。
+原fit时间区间1..655707，128个校准请求实际cutoff7699..651142，
+事件历史交互过的非正例37/886=4.176%；源文件hash、请求ID列表/hash和分母分子记录在manifest。
+不使用dev/audit估计、调参或按其结果重抽种子。
+
+不能简单对每个列表按4.176%抽seen名额：无seen曝光池会使总体比例进一步衰减。
+新协议根据fit完整曝光中的可用seen数与旧长度规则，用 capped-binomial 精确期望
+二分求seen候选接纳概率p=0.2380509344。每场景只从该用户严格过去事件交互过、
+且确实在当前曝光中的非正例池抽取，固定种子Bernoulli计数及等量替换，
+保留原未交互候选排序、实际列表长度、正例插入位置种子、去重、价格等规则。
+快照ID不被当作事件seen。旧过滤函数和vendor不变；无seen池自然不插入，
+不强制每个列表含seen，也不从曝光外补候选。
+
+以同一公共纯函数重放最终fit349/dev48冻结列表，未重跑BGE/CF/模型。
+fit事件干扰0/1570→79/1570=5.03%；dev0/237→19/237=8.02%。
+快照干扰fit21/1570→56/1570；dev0/237→8/237。
+事件正例仍29/267、4/37；快照正例仍22/267、4/37。
+fit59个列表变化/替换79项，dev13个/替换19项。
+全部397目标、实际长度、正例位置、共同候选价格、Query输入/启用标记保持，
+不补跑旧列表之后才引入的去重：该冻结产物本来没有去重协议元信息。
+生产builder新协议仍沿用当前去重实现。
+
+实测比例不是精确匹配：同一p在这批冻结机会上的期望分别5.44%、7.09%，
+因为校准full-exposure样本与最终短列表成员/长度分布不同；实际抽样与期望也有波动。
+记录了每场景eligible/requested/selected/capacity-unfilled等，未据dev重校准。
+fit容量截断10个seen抽中名额，dev1个；不为补足它们改变列表长度。
+
+“列表中恰有一个事件seen候选时，它是正例”的条件比例：
+fit29/29→17/49=34.7%，dev4/4→3/12=25%，确定性捷径被破坏。
+正例与历史交互仍有关联，不能宣称消除全部捷径。
+事件计数规则的正例商品命中fit29/267→25/267、dev4/37→4/37；
+完整动作命中fit24/267→22/267、dev3/37→3/37。
+这只是离线规则统计，不是模型质量提升。
+
+新增6项测试，相关候选/采样/去重共37项通过0失败。
+额外datasets全套156项有10个向量缓存预算错误、1个selection mock断言失败、1跳过，
+未以此声称全套通过；root已在HEAD旧curation上复现该mock断言。
+无LLM服务、无神经embedding推理、无GPU、无训练。旧产物保留。
+最终产物 tmp/interaction-matched-audit-20261128-release/
+含report.json、details.jsonl、fit/dev场景与manifest、replay.py、publish.py、verification-final.json。
+
+本轮2b收尾时将readable-v1的默认历史策略改为budgeted：
+整体--response-context-protocol仍默认legacy；显式启用readable-v1后，
+无需再额外指定budgeted才能得到完整商品条目与折叠格式。
+frozen需显式--readable-history-policy frozen，保留用于信息不变对照。
+此前章节的frozen默认描述属于原实现，现以本条为准。
+
+联合收尾验证：evaluation 248项通过、0失败；采样/去重/新候选协议37项通过、0失败。
+datasets扩大回归运行156项：145个方法成功、1个失败方法、9个错误方法
+（10条错误含同一方法两个子测试）、1跳过。错误为旧向量缓存预算超限，
+调用次数断言已加载修改前HEAD的curation代码复现；未清理旧缓存或修改无关逻辑。
+原始日志和计数更正保留。统一报告见tmp/offline-protocols-verification-20261128/report.json。

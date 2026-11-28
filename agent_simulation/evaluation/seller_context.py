@@ -10,8 +10,9 @@ QUOTE_FIELDS = ("time_index", "price_raw", "price_status",
                 "exposure_records", "click_records", "purchase_records")
 
 
-def observed_seller_context(state, features, history):
+def observed_seller_context(state, features, history, *, protocol="legacy", signal_policy=None):
     """Keep per-item business, quote and comparable-product evidence together."""
+    require(protocol in ("legacy", "seller-change-v1"), "Unknown Seller context protocol")
     actor, cutoff = state["profile"]["seller_id"], state["history_cutoff_exclusive"]
     require(features["historical_cutoff_exclusive"] == cutoff, "Seller feature cutoff mismatch")
     details = {p["item_id"]: p for p in state.get("product_details", [])}
@@ -78,10 +79,15 @@ def observed_seller_context(state, features, history):
         products.append(with_evidence_id(own))
     require(set(state["requested_price_item_ids"]) <= {p["item_id"] for p in products},
             "Missing requested Seller product")
-    return with_evidence_id({
+    result = with_evidence_id({
         "profile": {k: deepcopy(v) for k, v in state["profile"].items() if k != "seller_id"},
         "evidence_actor_id": actor, "history_cutoff_exclusive": cutoff,
         "owned_products": products, "requested_price_item_ids": deepcopy(state["requested_price_item_ids"]),
         "behavior_features": deepcopy(features),
         **({"market_semantics": state["market_semantics"]} if "market_semantics" in state else {}),
         "memory_status": "No generated memories in the observed-data snapshot."})
+
+    if protocol == "seller-change-v1":
+        from agent_simulation.evaluation.seller_signals import upgrade_seller_context
+        result = upgrade_seller_context(result, history, signal_policy)
+    return result
