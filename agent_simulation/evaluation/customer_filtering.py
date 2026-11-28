@@ -238,11 +238,12 @@ def _uncertainty_metrics(usable):
     metrics = calculate_metrics(strong, weak).reset_index()
     counts = strong.groupby(level=[0, 1]).size()
     metrics["matched_sample_count"] = metrics.set_index(["dataset", "cid"]).index.map(counts)
+    metrics["low_sample"] = metrics["matched_sample_count"] < 3
     for name, data in (("teacher", strong), ("student", weak)):
         hit = data.preference.groupby(level=[0, 1]).mean().rename(name + "_hit")
         metrics[name + "_hit"] = metrics.set_index(["dataset", "cid"]).index.map(hit)
     metrics["diff_hit"] = metrics.student_hit - metrics.teacher_hit
-    columns = ["dataset", "cid", "choice_cnt", "matched_sample_count",
+    columns = ["dataset", "cid", "choice_cnt", "matched_sample_count", "low_sample",
                *[c for c in metrics if c.startswith(("teacher_", "student_", "diff_"))]]
     return metrics[columns].to_dict("records")
 
@@ -292,7 +293,8 @@ def _pair(good, bad, *, protocol, selection_metric, selection_value):
 
 def select_preferences(records, *, max_pairs=10000, filter_column="diff_model_uncertainty",
                        sampling_column="entropy", ascending=False, pair_protocol="logloss",
-                       logloss_min_gap=.05, action_min_gap=.05, diagnostics=None, _check_evidence=None):
+                       logloss_min_gap=.05, action_min_gap=.05, diagnostics=None, _check_evidence=None,
+                       selection_protocol="uncertainty-ranked-v2", selection_report=None):
     """Rank scenarios by uncertainty; pair original actions and explanations.
 
     logloss: chosen matches both action heads exactly and passes provenance checks.
@@ -302,6 +304,7 @@ def select_preferences(records, *, max_pairs=10000, filter_column="diff_model_un
     original-action safeguards; no resampled action is ever exported.
     """
     from collections import defaultdict
+    require(selection_protocol in ("legacy-v1", "uncertainty-ranked-v2"), "Unknown preference selection protocol")
     require(max_pairs > 0, "Positive pair limit required")
     require(pair_protocol in ("logloss", "sampled_match"), "Unknown pair protocol")
     require(all(math.isfinite(v) and v > 0 for v in (logloss_min_gap, action_min_gap)),
@@ -371,7 +374,9 @@ def select_preferences(records, *, max_pairs=10000, filter_column="diff_model_un
         if legacy:
             frame = pd.DataFrame(legacy).set_index(["dataset", "cid", "tid"])
             available = set(zip(frame.index.get_level_values(0), frame.index.get_level_values(1)))
-            report = pd.DataFrame([m for m in metrics if (m["dataset"], m["cid"]) in available])
+            report = pd.DataFrame([m for m in metrics if (m["dataset"], m["cid"]) in available
+                and (selection_protocol == "legacy-v1" or filter_column == "random" or
+                     (m.get(filter_column) is not None and math.isfinite(m[filter_column])))])
             if not report.empty:
                 sampled = behavior_sampling(frame, report, filter_column, sampling_column).reset_index()
                 lookup = {(r["dataset"], r["cid"], r["variant"], r["tid"]): r for r in legacy}
@@ -390,10 +395,14 @@ def select_preferences(records, *, max_pairs=10000, filter_column="diff_model_un
     selection, pairs_by_key = [], {}
     for key, good, bad in candidates:
         metric = metric_map.get(key, {}).get(filter_column)
-        rank = float(metric) if metric is not None and math.isfinite(metric) else 0.
+        available = metric is not None and math.isfinite(metric)
+        if not available and filter_column != "random" and selection_protocol == "uncertainty-ranked-v2":
+            statuses[key] = "missing_uncertainty_metric"
+            continue
+        rank = float(metric) if available else 0.
         pairs_by_key[key] = _pair(good, bad, protocol=pair_protocol,
             selection_metric=filter_column, selection_value=rank)
-        pairs_by_key[key]["selection_metric_available"] = metric is not None and math.isfinite(metric)
+        pairs_by_key[key]["selection_metric_available"] = available
         for preference in (True, False):
             selection.append({"dataset": key[0], "cid": key[1], "choice_cnt": good["choice_cnt"],
                 "behavior_group": behavior_stratum(good["trajectory"]["target"]),
@@ -407,6 +416,23 @@ def select_preferences(records, *, max_pairs=10000, filter_column="diff_model_un
             key = (row.dataset, row.cid)
             pairs.append(pairs_by_key[key])
             statuses[key] = "paired"
+    ranking = {
+        "protocol": selection_protocol, "filter_column": filter_column, "max_pairs": max_pairs,
+        "candidate_pairs": len(candidates), "rankable_pairs": len(pairs_by_key),
+        "missing_metric_pairs": sum(metric_map.get(key, {}).get(filter_column) is None
+                                    or not math.isfinite(metric_map[key][filter_column])
+                                    for key, _, _ in candidates),
+        "selected_pairs": len(pairs), "sorting_truncated": len(pairs) < len(pairs_by_key),
+        "uncertainty_sorting_affected_selection": filter_column != "random" and len(pairs) < len(pairs_by_key),
+        "low_sample_scenes": sum(r["low_sample"] for r in metrics),
+        "metric_scenes": len(metrics),
+        "sorting_note": ("Random selection; no uncertainty ranking requested."
+                         if filter_column == "random" else
+                         "Uncertainty sorting truncates the rankable candidate set."
+                         if len(pairs) < len(pairs_by_key) else
+                         "不确定性排序未起作用：未截断候选集合，排序仅可能改变行顺序。")}
+    if selection_report is not None:
+        selection_report.update(ranking)
     if diagnostics is not None:
         diagnostics.extend({"dataset": key[0], "cid": key[1], "reason": reason}
                            for key, reason in statuses.items())
@@ -501,7 +527,7 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
                     sampling_column="entropy", ascending=False, query_min=None, response_min=None,
                     click_min=None, purchase_min=None, pair_protocol="logloss",
                     logloss_min_gap=.05, action_min_gap=.05, observed_actions=None, sft_only=False,
-                    require_semantic_review=False):
+                    selection_protocol="uncertainty-ranked-v2", require_semantic_review=False):
     """Offline replay with row-level gates, scene-level pair reasons and coverage."""
     from collections import Counter, defaultdict
     from pathlib import Path
@@ -554,14 +580,17 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
         _, pairs, reason = training_rows(group, min_gap=action_min_gap)
         query_pairs.extend(pairs)
         pair_decisions.append({"stage": "query", "dataset": dataset, "cid": cid, "reason": reason})
-    response_decisions = []
+    response_decisions, preference_selection = [], {}
     if sft_only:
+        preference_selection = {"protocol": selection_protocol, "status": "not_run_sft_only",
+                                "sorting_note": "Preference selection was not run in SFT-only mode."}
         response_sft, response_pairs, metrics = select_sft(response, _check_evidence=check), [], []
     else:
         response_sft, response_pairs, metrics = select_preferences(response, max_pairs=max_pairs,
             filter_column=filter_column, sampling_column=sampling_column, ascending=ascending,
             pair_protocol=pair_protocol, logloss_min_gap=logloss_min_gap,
-            action_min_gap=action_min_gap, diagnostics=response_decisions, _check_evidence=check)
+            action_min_gap=action_min_gap, diagnostics=response_decisions, _check_evidence=check,
+            selection_protocol=selection_protocol, selection_report=preference_selection)
     pair_decisions.extend({"stage": "response", **item} for item in response_decisions)
     sft = select_sft([r for r in records if r["stage"] == "query"], _check_evidence=check) + response_sft
     pairs = list({digest([r["initial_state_id"], r["actor_id"], r["stage"], r["prompt"],
@@ -619,6 +648,8 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
                          if observed_actions is not None else
                          "Strong original transcripts passing separate action and evidence gates; independent of DPO"),
         "response_dpo_protocol": pair_protocol,
+        "preference_selection": preference_selection,
+        "uncertainty_low_sample_scenes": sum(m["low_sample"] for m in metrics),
         "require_reviewed_response_rationales": require_semantic_review,
         "thresholds": {"query_min": query_min, "response_min": response_min,
             "click_min": click_min, "purchase_min": purchase_min,
@@ -629,6 +660,9 @@ def export_training(records, output, *, max_pairs=10000, filter_column="diff_mod
 
 
 def add_filter_arguments(parser):
+    parser.add_argument("--preference-selection-protocol", choices=("legacy-v1", "uncertainty-ranked-v2"),
+                        default="uncertainty-ranked-v2",
+                        help="v2 excludes unrankable pairs; legacy preserves zero fallback")
     parser.add_argument("--click-min", type=float, help="Positive-click F1 gate; defaults to response-min")
     parser.add_argument("--purchase-min", type=float, help="Positive-purchase F1 gate; defaults to response-min")
     parser.add_argument("--pair-protocol", choices=["logloss", "sampled_match"], default="logloss")
@@ -696,6 +730,7 @@ def main(argv=None):
         query_min=args.query_min, response_min=args.response_min,
         click_min=args.click_min, purchase_min=args.purchase_min,
         pair_protocol=args.pair_protocol, logloss_min_gap=args.logloss_min_gap, action_min_gap=args.action_min_gap,
+        selection_protocol=args.preference_selection_protocol,
         require_semantic_review=args.require_reviewed_rationales or args.reviews is not None)
     (args.output / "manifest.json").write_text(json.dumps({"schema": "customer-filter-export-v2",
         "input": str(args.input.resolve()), "input_sha256": sha256(args.input),
@@ -704,6 +739,7 @@ def main(argv=None):
         "require_reviewed_response_rationales": report["require_reviewed_response_rationales"],
         "filter_column": args.filter_column, "sampling_column": args.sampling_column,
         "ascending": args.ascending, "pair_protocol": args.pair_protocol,
+        "preference_selection": report["preference_selection"],
         "thresholds": report["thresholds"]}, indent=2) + "\n")
     print(json.dumps(report, ensure_ascii=False))
 

@@ -40,6 +40,7 @@ class FilteringTests(unittest.TestCase):
         rows = self.pair_rows()
         one = select_preferences(rows)[2][0]
         self.assertEqual(one["matched_sample_count"], 1)
+        self.assertTrue(one["low_sample"])
         self.assertAlmostEqual(one["teacher_data_uncertainty"], 0.)
         self.assertAlmostEqual(one["student_data_uncertainty"], 0.)
         target = action([1, 2], [2])
@@ -226,6 +227,87 @@ class FilteringTests(unittest.TestCase):
         rows[1]["trajectory"]["prompt"][0]["content"] = "different input"
         with self.assertRaisesRegex(ValueError,"contexts"):
             select_preferences(rows)
+
+    def test_missing_rank_is_excluded_without_zero_fallback_and_legacy_is_available(self):
+        rows = self.pair_rows()
+        missing = deepcopy(rows)
+        for row in missing:
+            row["cid"] = "missing"
+            row["variant"] = "strong"  # No matched strong/weak metric.
+            row["trajectory"]["trajectory_id"] += "-missing"
+        diagnostics, ranking = [], {}
+        sft, pairs, metrics = select_preferences(rows + missing, max_pairs=10000,
+            diagnostics=diagnostics, selection_report=ranking)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(next(d["reason"] for d in diagnostics if d["cid"] == "missing"),
+                         "missing_uncertainty_metric")
+        self.assertEqual((ranking["candidate_pairs"], ranking["rankable_pairs"],
+                          ranking["missing_metric_pairs"], ranking["selected_pairs"]), (2, 1, 1, 1))
+        self.assertFalse(ranking["sorting_truncated"])
+        self.assertIn("不确定性排序未起作用", ranking["sorting_note"])
+        old_sft, old_pairs, old_metrics = select_preferences(rows + missing,
+                                                           selection_protocol="legacy-v1")
+        self.assertEqual(sft, old_sft)
+        self.assertEqual(metrics, old_metrics)
+        self.assertEqual(len(old_pairs), 2)
+        self.assertTrue(any(not p["selection_metric_available"] for p in old_pairs))
+
+    def test_ranked_selection_reports_actual_truncation_with_signed_metrics(self):
+        rows = []
+        for cid in ("negative", "positive", "missing"):
+            group = deepcopy(self.pair_rows())
+            for row in group:
+                row["cid"] = cid
+                row["trajectory"]["trajectory_id"] += "-" + cid
+            rows.extend(group)
+        metrics = [
+            {"dataset": rows[0]["dataset"], "cid": cid,
+             "diff_model_uncertainty": rank, "low_sample": False}
+            for cid, rank in (("negative", -.2), ("positive", .3))]
+        with patch("agent_simulation.evaluation.customer_filtering._uncertainty_metrics", return_value=metrics):
+            report, decisions = {}, []
+            _, pairs, _ = select_preferences(rows, max_pairs=1, selection_report=report,
+                                              diagnostics=decisions)
+            self.assertEqual(len(pairs), 1)
+            self.assertEqual(pairs[0]["selection_value"], .3)
+            self.assertTrue(report["sorting_truncated"])
+            self.assertEqual((report["candidate_pairs"], report["rankable_pairs"],
+                              report["selected_pairs"]), (3, 2, 1))
+            report = {}
+            _, pairs, _ = select_preferences(rows, max_pairs=10000, selection_report=report)
+            self.assertEqual({p["selection_value"] for p in pairs}, {-.2, .3})
+            self.assertFalse(report["sorting_truncated"])
+
+    def test_random_selection_does_not_require_uncertainty_metric(self):
+        rows = self.pair_rows()
+        for row in rows:
+            row["variant"] = "strong"
+        report = {}
+        _, pairs, _ = select_preferences(rows, filter_column="random", selection_report=report)
+        self.assertEqual(len(pairs), 1)
+        self.assertFalse(pairs[0]["selection_metric_available"])
+        self.assertFalse(report["uncertainty_sorting_affected_selection"])
+        self.assertIn("no uncertainty ranking", report["sorting_note"])
+        with TemporaryDirectory() as directory:
+            report = export_training(rows, Path(directory), sft_only=True)
+            self.assertEqual(report["preference_selection"]["status"], "not_run_sft_only")
+
+    def test_three_matched_samples_clear_low_sample_flag(self):
+        rows = []
+        for tid in range(3):
+            group = deepcopy(self.pair_rows())
+            for row in group:
+                row["tid"] = tid
+                row["trajectory"]["trajectory_id"] += "-" + str(tid)
+            rows.extend(group)
+        metrics = select_preferences(rows)[2]
+        self.assertEqual(metrics[0]["matched_sample_count"], 3)
+        self.assertFalse(metrics[0]["low_sample"])
+        with TemporaryDirectory() as directory:
+            report = export_training(rows, Path(directory))
+            self.assertEqual(report["uncertainty_low_sample_scenes"], 0)
+            self.assertEqual(report["preference_selection"]["selected_pairs"], 1)
+            self.assertFalse(report["preference_selection"]["sorting_truncated"])
 
     def test_logloss_is_mean_bits_and_probability_input_is_checked(self):
         r = probability_record([[.25]*4]*2,[1,2],action([1],[2]),rng=np.random.default_rng(0))

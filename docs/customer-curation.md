@@ -1221,3 +1221,41 @@ direct/CoT/概率上下文一致，改变目标不影响输入，owner/time 校�
 
 产物：tmp/history-links-20261128/before/、after/ 的 requests.jsonl 与 input-audit.json；
 comparison.json 保留固定快照与正式重建的两种对照，以及预算省略详情的逐条记录。
+
+
+### 偏好对选择协议与小样本不确定性标记（2026-11-28）
+
+新增 --preference-selection-protocol：默认 uncertainty-ranked-v2，
+legacy-v1 保留原先缺失指标时使用 0 排序的兼容路径。新协议仅允许具有有效、
+有限 filter_column 指标的候选偏好对参与不确定性排序；无指标场景在
+pair-decisions 中记录 missing_uncertainty_metric，不影响独立的 SFT 选择。filter_column=random 保留随机选择路径，
+不要求不确定性指标，报告明确其不是不确定性排序；SFT-only 记录未执行偏好选择。
+vendor 的行为抽样、指标计算及分层过滤函数未修改。延迟打分读取旧生成
+manifest 时缺省使用 legacy-v1；新生成 manifest 的 args 记录实际协议。
+
+max_pairs 保持兼容默认 10000。filter-funnel 和离线导出 manifest 的
+preference_selection 记录候选对数、可排序对数、缺失指标对数、实际入选对数、
+实际是否截断。由于 vendor 按分层分配，依据实际返回数判断是否截断，
+不把 max_pairs 小于候选数直接当作截断证据。未截断时明确报告
+“不确定性排序未起作用”，含义是没有缩小候选集合，仍可能改变导出行顺序。
+这不表示引用/动作质量门没有作用，也不是不确定性蒸馏效果的证据。
+
+uncertainty-metrics 增加 low_sample=(matched_sample_count<3)，报告统计数量；
+不自动删除这些场景，不改 vendor 指标值，也不将 N=3 当作统计可靠性的保证。
+
+离线重放 result/customer-mirroring-pilot-20261121/comparison/records.jsonl：
+48 条记录中有 32 条 Response，7 个强弱匹配场景（4 个 N=2、3 个 N=1）
+全部标记 low_sample。原代码与 legacy-v1 的 SFT 和偏好对逐项相同；
+新协议的 SFT、两个 Query 偏好对也相同。两版均没有通过质量门的 Response
+偏好对，所以该既有导出集合没有变化，指标除新增 low_sample 外逐项不变。
+若其他旧导出中包含 selection_metric_available=false 的 Response 对，
+新协议会移除它们；有截断时，这也可能改变剩余有指标场景的名额分配。
+对有完整指标且不截断的输入，原始 chosen/rejected 内容保持不变。
+历史 result 产物未覆盖。
+
+新增测试覆盖有效与缺失指标混合、正负指标截断/不截断、旧路径兼容、
+N=1/2/3 标记及导出报告。最终 evaluation 回归 220 项通过、0 项失败。
+这里验证的是选择和报告行为，没有调用模型、
+训练或声称偏好数据质量/训练效果提升。
+重放及对照结果见 tmp/preference-filter-audit-20261128/report.json、
+before/、legacy-v1/、uncertainty-ranked-v2/ 和 replay.py。

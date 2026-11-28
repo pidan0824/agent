@@ -475,7 +475,8 @@ def main(argv=None):
                 observed_actions=observed, sft_only=args.sft_only, max_pairs=args.max_pairs,filter_column=args.filter_column,
                 sampling_column=args.sampling_column,ascending=args.ascending,
                 query_min=args.query_min,response_min=args.response_min,click_min=args.click_min,purchase_min=args.purchase_min,
-                pair_protocol=args.pair_protocol,logloss_min_gap=args.logloss_min_gap,action_min_gap=args.action_min_gap)
+                pair_protocol=args.pair_protocol,logloss_min_gap=args.logloss_min_gap,action_min_gap=args.action_min_gap,
+                selection_protocol=args.preference_selection_protocol)
         review_rows, reviewed_keys = [], set()
         for row in records:
             t = row["trajectory"]
@@ -495,6 +496,7 @@ def main(argv=None):
         report.update(exported)
         report["teacher_budget"] = budget_report
         report.update(split=args.split, filtering={"metric":args.filter_column,"sampling":args.sampling_column,
+            "selection_protocol":args.preference_selection_protocol,
             "groups":["domain","candidate_count","observed_behavior_group"],"all_raw_rows_retained":True,
             "test_training_export":False})
         (args.output / "report.json").write_text(encoded(report)+"\n")

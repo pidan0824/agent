@@ -146,7 +146,9 @@ def main(argv=None):
             query_min=generation["query_min"], response_min=generation["response_min"],
             click_min=generation["click_min"], purchase_min=generation["purchase_min"],
             pair_protocol=generation["pair_protocol"], logloss_min_gap=generation["logloss_min_gap"],
-            action_min_gap=generation["action_min_gap"], require_semantic_review=True)
+            action_min_gap=generation["action_min_gap"],
+            selection_protocol=generation.get("preference_selection_protocol", "legacy-v1"),
+            require_semantic_review=True)
         write_json_atomic(args.output / "report.json", {**summarize(scored, []), **exported})
         write_json_atomic(args.output / "request-metrics.json", request_metrics(scored))
         write_json_atomic(args.output / "completed.json", {
