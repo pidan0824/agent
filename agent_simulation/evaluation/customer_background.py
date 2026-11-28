@@ -105,6 +105,7 @@ def candidate_links(context):
             history.append((ref, source["value"], source["time_index"]))
         elif source["kind"] == "history" and source["field"] in ("clicked_items", "purchased_items"):
             history.extend((ref, item, source["time_index"]) for item in source["value"])
+    query_terms = _terms(context.get("query"))
     for row in context["candidate_context"]:
         attributes = {field: facts[ref]["value"] for field, ref in row["fact_refs"].items()}
         row["attributes"] = attributes
@@ -115,15 +116,36 @@ def candidate_links(context):
                 ("recent_purchased_item_ids", "purchase_occurrences")) if field in counts},
             "fact_ref": key}
         candidate = {"item_id": row["item_id"], **attributes}
+        candidate_terms = _terms(candidate.get("item_title"))
+        observed = [(ref, item, when, *product_match(candidate, item))
+                    for ref, item, when in history]
+        # Repair missing/coarse-only associations without replacing already specific
+        # item, brand, shop, leaf-category or title matches.
+        query_fallback = not any(set(fields) - {"category_level2_name"}
+                                 for _, _, _, fields, _ in observed)
+        matches = []
+        for ref, item, when, fields, lexical in observed:
+            shared = candidate_terms & _terms(item.get("item_title")) if query_fallback else set()
+            # Long titles can share query-relevant features across category labels
+            # despite a low whole-title Jaccard score. Keep the literal basis visible.
+            query_shared = sorted(shared & query_terms) if len(shared) >= 2 else []
+            if query_shared and "item_title" not in fields:
+                fields.append("item_title")
+            if not fields:
+                continue
+            priority = ("item_id" in fields, "brand_name" in fields,
+                        bool({"seller_id", "seller_name"} & set(fields)), len(query_shared), lexical,
+                        "category_level3_name" in fields, "category_level2_name" in fields,
+                        when, -item["item_id"])
+            matches.append((priority, ref, item["item_id"], fields, query_shared))
         related, seen = [], set()
-        for ref, item, when in sorted(history, key=lambda h: (
-                match_priority(candidate, h[1]), h[2], -h[1]["item_id"]), reverse=True):
-            fields, _ = product_match(candidate, item)
-            identity = (ref, item["item_id"])
-            if not fields or identity in seen:
+        for _, ref, item_id, fields, query_shared in sorted(matches, key=lambda m: m[0], reverse=True):
+            identity = (ref, item_id)
+            if identity in seen:
                 continue
             seen.add(identity)
-            related.append({"fact_ref": ref, "item_id": item["item_id"], "matched_attributes": fields})
+            related.append({"fact_ref": ref, "item_id": item_id, "matched_attributes": fields,
+                            **({"matched_query_terms": query_shared} if query_shared else {})})
             if len(related) == 3:
                 break
         row["related_history"] = related

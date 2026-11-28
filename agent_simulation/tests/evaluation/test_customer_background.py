@@ -66,6 +66,70 @@ class BackgroundContextTests(unittest.TestCase):
         self.assertIn("item_title", link["matched_attributes"])
         self.assertEqual(ctx["facts"][link["fact_ref"]]["value"]["purchase_occurrences"], 1)
 
+    def query_link_source(self):
+        value = source()
+        ctx = value["response_input"]
+        ctx["query"] = "冬季跑步外套"
+        ctx["short_term_memory"]["search_history"] = []
+        ctx["displayed_items"] = [{
+            "item_id": 4,
+            "item_title": "橙义家跑步外套男女运动连帽开衫骑行速干防风夹克健身训练上衣",
+            "brand_name": "橙义家", "category_level2_name": "运动服",
+            "category_level3_name": "运动夹克/外套"}]
+        ctx["behavioral_summary"] = {
+            "observed_time_index": 3, "statistics_30d": {"orders": 1},
+            "recent_clicked_item_ids": [9], "recent_purchased_item_ids": [10],
+            "item_details": [
+                {"item_id": 9,
+                 "item_title": "新款加绒外套冬季跑步服女加厚瑜伽服健身服训练运动上衣保暖紧身",
+                 "brand_name": "无品牌", "category_level2_name": "瑜伽用品"},
+                {"item_id": 10,
+                 "item_title": "5双男女同款专业运动跑步袜中筒袜马拉松按摩底速干面料骑行跳绳",
+                 "brand_name": "宝图曼", "category_level2_name": "运动服"}]}
+        return value
+
+    def test_query_related_title_recalls_cross_category_history_before_generic_category(self):
+        from agent_simulation.evaluation.customer_background import product_match
+        value = self.query_link_source()
+        raw = value["response_input"]
+        fields, lexical = product_match(raw["displayed_items"][0],
+                                        raw["behavioral_summary"]["item_details"][0])
+        self.assertLess(lexical, .15)
+        self.assertNotIn("item_title", fields)
+        ctx = self.context(value)
+        link = ctx["candidate_context"][0]["related_history"][0]
+        self.assertEqual(link["item_id"], 9)
+        self.assertEqual(link["matched_query_terms"], ["外套", "跑步"])
+        self.assertIn("item_title", link["matched_attributes"])
+        self.assertEqual(ctx["facts"][link["fact_ref"]]["value"]["purchase_occurrences"], 0)
+
+    def test_no_query_does_not_relax_title_matching(self):
+        value = self.query_link_source()
+        value["response_input"]["query"] = ""
+        links = self.context(value)["candidate_context"][0]["related_history"]
+        self.assertEqual([r["item_id"] for r in links], [10])
+        self.assertNotIn("matched_query_terms", links[0])
+
+    def test_one_common_query_fragment_cannot_link_unrelated_products(self):
+        value = self.query_link_source()
+        ctx = value["response_input"]
+        ctx["query"] = "冬季外套"
+        ctx["displayed_items"][0]["item_title"] = "冬季男士运动外套"
+        ctx["behavioral_summary"]["recent_clicked_item_ids"] = [11]
+        ctx["behavioral_summary"]["recent_purchased_item_ids"] = []
+        ctx["behavioral_summary"]["item_details"] = [
+            {"item_id": 11, "item_title": "冬季苹果新鲜水果", "category_level2_name": "水果"}]
+        self.assertEqual(self.context(value)["candidate_context"][0]["related_history"], [])
+
+    def test_same_item_history_remains_ahead_of_query_matches(self):
+        value = self.query_link_source()
+        summary = value["response_input"]["behavioral_summary"]
+        summary["recent_clicked_item_ids"].append(4)
+        summary["item_details"].append({"item_id": 4, "item_title": "旧款开衫"})
+        links = self.context(value)["candidate_context"][0]["related_history"]
+        self.assertEqual(links[0]["item_id"], 4)
+        self.assertTrue(all("matched_query_terms" not in link for link in links))
+
     def test_unknown_brand_and_shop_do_not_create_preference_matches(self):
         from agent_simulation.evaluation.customer_background import product_match
         for brand in ("UNKNOWN", None, "无品牌", "其他/other"):
